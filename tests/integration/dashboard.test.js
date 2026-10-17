@@ -68,7 +68,7 @@ test('数据接口：认证、权限、Origin', async () => {
   await server.stop();
 });
 
-test('会话实体：来源、标题、模型、消息数、回答中 → 已到限额 → 页面已关（保留提示）、标记完成', async () => {
+test('会话实体：来源、标题、模型、消息数、回答中 → 已到限额 → 页面已关（保留提示）、归档、置顶、收藏', async () => {
   const server = await startServer({});
   const ext = await extClient(server);
   const list = async () => (await (await get(server, '/api/conversations', TOKENS.observer)).json()).conversations;
@@ -105,23 +105,41 @@ test('会话实体：来源、标题、模型、消息数、回答中 → 已到
   assert.equal(c.page_status, 'limit_reached', '页面关掉后仍保留最后的限额状态');
   assert.ok(c.status_detail);
 
-  // 标记完成
+  // 归档 / 置顶
   const origin = `http://127.0.0.1:${server.port}`;
-  const mark = await fetch(`${origin}/api/conversations/${CONV}/mark`, {
-    method: 'POST', headers: { authorization: `Bearer ${TOKENS.observer}`, origin, 'content-type': 'application/json' }, body: '{"done":true}'
+  const post = (path, body) => fetch(`${origin}${path}`, {
+    method: 'POST', headers: { authorization: `Bearer ${TOKENS.observer}`, origin, 'content-type': 'application/json' }, body: JSON.stringify(body)
   });
-  assert.equal(mark.status, 200);
+  assert.equal((await post(`/api/conversations/${CONV}/mark`, { archived: true })).status, 200);
   c = (await list())[0];
-  assert.equal(c.done, true);
-  assert.equal(c.activity_after_done, false);
+  assert.equal(c.archived, true);
+  assert.equal(c.pinned, false);
+  assert.equal(c.activity_after_archive, false);
   await sleep(5);
   await sendAndAck(ext, ev('page.opened', { url: CONV_URL, title: 't' }, { tab: 2 }));
   c = (await list())[0];
-  assert.equal(c.activity_after_done, true, '完成后有新动态');
+  assert.equal(c.activity_after_archive, true, '归档后有新动态');
   assert.equal(c.status, 'limit_reached', '重新打开后显示页面状态');
+  assert.equal((await post(`/api/conversations/${CONV}/mark`, { done: false })).status, 200, '旧字段 done 等同归档');
+  assert.equal((await list())[0].archived, false);
+  assert.equal((await post(`/api/conversations/${CONV}/mark`, { pinned: true })).status, 200);
+  c = (await list())[0];
+  assert.equal(c.pinned, true);
+  assert.equal(c.archived, false, '置顶不影响归档');
+  assert.equal((await post(`/api/conversations/${CONV}/mark`, {})).status, 400);
+
+  // 收藏回答
+  assert.equal((await post(`/api/conversations/${CONV}/messages/a1/favorite`, { favorite: true })).status, 200);
+  assert.equal((await post(`/api/conversations/${CONV}/messages/nope/favorite`, { favorite: true })).status, 404);
+  assert.equal((await list())[0].favorite_count, 1);
+  const favs = await (await get(server, '/api/favorites', TOKENS.observer)).json();
+  assert.deepEqual(favs.favorites.map((f) => [f.conversation_id, f.message_id, f.text]), [[CONV, 'a1', '你好！']]);
+  assert.equal((await get(server, '/api/favorites', TOKENS.extension)).status, 403);
 
   const msgs = await (await get(server, `/api/conversations/${CONV}/messages`, TOKENS.observer)).json();
-  assert.deepEqual(msgs.messages.map((m) => [m.message_id, m.text]), [['u1', '你好'], ['a1', '你好！']]);
+  assert.deepEqual(msgs.messages.map((m) => [m.message_id, m.text, m.favorite]), [['u1', '你好', false], ['a1', '你好！', true]]);
+  assert.equal((await post(`/api/conversations/${CONV}/messages/a1/favorite`, { favorite: false })).status, 200);
+  assert.equal((await list())[0].favorite_count, 0);
   const evs = await (await get(server, `/api/conversations/${CONV}/events`, TOKENS.observer)).json();
   assert.ok(evs.events.length >= 8);
   assert.ok(evs.events.every((e) => e.payload.text === undefined), '事件时间线不含正文');
@@ -239,6 +257,28 @@ test('指令通道：看板 → 后端 → 插件 → 页面（快速回复 / �
   assert.equal(r3.ok, true, JSON.stringify(r3));
   await waitFor(() => [...page.doc.querySelectorAll('[data-dil-message-id] p')].at(-1).textContent === '新的回答。。。', { label: 'regenerated', timeout: 5000 });
 
+  // 指定某条回答重新生成：页面回答数和看板对不上 → 明确报错，不乱点
+  const cmdAt = async (index, total) => {
+    const id = `cmd${Math.random().toString(36).slice(2, 12)}`;
+    dash.send(makeEnvelope('command', { command_id: id, action: 'regenerate', conversation_id: CONV, answer_index: index, answer_total: total }));
+    return waitFor(() => dash.messages.find((m) => m.type === 'command_result' && m.command_id === id), { label: 'result regen at', timeout: 12000 });
+  };
+  await waitFor(async () => {
+    const list = (await (await get(server, '/api/conversations', TOKENS.observer)).json()).conversations;
+    return list[0]?.status === 'idle';
+  }, { label: 'regenerate finished', timeout: 8000 });
+  await sleep(300);
+  const r4 = await cmdAt(0, 5);
+  assert.equal(r4.ok, false);
+  assert.equal(r4.code, 'regenerate_target_not_found');
+  // 页面上 2 条回答各有一个按钮，对得上 → 点第一条的
+  const firstBtn = page.doc.querySelectorAll('button[aria-label="重新生成回复"]')[0];
+  let firstClicked = false;
+  firstBtn.addEventListener('click', () => { firstClicked = true; });
+  const r5 = await cmdAt(0, 2);
+  assert.equal(r5.ok, true, JSON.stringify(r5));
+  assert.ok(firstClicked, '点的是第一条回答的“重新生成”');
+
   // 无 control 权限的客户端不能下发
   const meta = await new TestClient(server.url).open();
   await meta.hello('meta-client-0001', TOKENS.meta, 'observer');
@@ -288,7 +328,7 @@ test('观察器：页面出现限额提示时上报 conversation.status（对话
   page.close();
 });
 
-test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设置、实时更新、点卡片跳转、详情复制、标记完成、快速回复', async () => {
+test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设置、实时更新、点卡片开详情、置顶 / 归档、每条回答操作、快速回复候选、通知等级', async () => {
   const { JSDOM } = await import('jsdom');
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
@@ -298,16 +338,18 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   const server = await startServer({ commandTimeoutMs: 1500 });
   const origin = `http://127.0.0.1:${server.port}`;
   const ext = await extClient(server, 'ext-ui-000001');
-  await sendAndAck(ext, ev('page.opened', { url: CONV_URL, title: '界面测试 - ChatGPT' }));
+  await sendAndAck(ext, ev('page.opened', { url: CONV_URL, title: '界面测试：一个非常非常长的标题用来确认卡片标题只占一行不会换行 - ChatGPT' }));
   await sendAndAck(ext, ev('conversation.status', { source: 'chatgpt', status: 'ok', detail: null, model: null }));
   await sendAndAck(ext, ev('message.added', { message_id: 'u1', role: 'user', index: 0, text: '问题一', text_length: 3 }));
   await sendAndAck(ext, ev('message.added', { message_id: 'a1', role: 'assistant', index: 1, text: '回答一', text_length: 3 }));
 
   const html = readFileSync(join(ROOT, 'src/backend/dashboard/index.html'), 'utf8').replace(/<script type="module"[^>]*><\/script>/, '');
+  assert.match(html, /\.card \.title \{[^}]*white-space: nowrap/, '卡片标题不换行');
   const dom = new JSDOM(html, { url: `${origin}/dashboard`, runScripts: 'outside-only', pretendToBeVisual: true });
   const win = dom.window;
   const copied = [];
   const sockets = [];
+  const sounds = [];
   win.__proto = proto;
   win.fetch = (path, opts = {}) => fetch(new URL(path, origin), { ...opts, headers: { ...(opts.headers || {}), origin } });
   win.WebSocket = class {
@@ -323,6 +365,12 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
     send(d) { this.ws.send(d); }
     close() { this.ws.close(); }
   };
+  // 假的 Web Audio：记录每个音符（普通提示音 2 个音符，置顶提示音 3 个）
+  win.AudioContext = class {
+    constructor() { this.currentTime = 0; this.state = 'running'; this.destination = {}; }
+    createOscillator() { return { frequency: {}, type: '', connect: (g) => g, start: () => sounds.push(1), stop() {} }; }
+    createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: (d) => d }; }
+  };
   win.CSS = { escape: (s) => String(s).replace(/"/g, '\\"') };
   Object.defineProperty(win.navigator, 'clipboard', { value: { writeText: async (t) => { copied.push(t); } } });
   const opened = [];
@@ -334,17 +382,21 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   win.eval(`(async () => { ${appSrc} })().catch((e) => { window.__appError = e; });`);
 
   const d = win.document;
+  const cardSel = `.card[data-conv="${CONV}"]`;
   d.getElementById('token').value = TOKENS.observer;
   d.getElementById('connect').click();
   await waitFor(() => d.getElementById('connText').textContent === '已连接', { label: 'connected' });
-  const cardEl = await waitFor(() => d.querySelector(`.card[data-conv="${CONV}"]`), { label: 'card' });
-  assert.equal(cardEl.querySelector('.title').textContent, '界面测试');
+  const cardEl = await waitFor(() => d.querySelector(cardSel), { label: 'card' });
+  assert.match(cardEl.querySelector('.title').textContent, /^界面测试：/);
   assert.equal(cardEl.querySelector('.badge').textContent, '空闲');
   assert.match(cardEl.querySelector('.sub').textContent, /ChatGPT/);
   assert.match(d.getElementById('chips').textContent, /全部1/);
-  assert.ok(!/复制回答|打开/.test([...cardEl.querySelectorAll('button, a')].map((b) => b.textContent).join('|')), '卡片上没有“复制回答”“打开”');
+  const cardButtons = () => [...d.querySelectorAll(`${cardSel} button`)].map((b) => b.textContent);
+  assert.ok(!cardButtons().some((t) => /快速回复|详情|复制回答|标记完成/.test(t)), `卡片按钮：${cardButtons()}`);
+  assert.ok(cardButtons().includes('置顶'));
+  assert.ok(!d.getElementById('detailCopy'), '详情头部不再有单独的“复制最后回答”');
 
-  // 主题切换 + 设置弹窗
+  // 主题切换 + 设置弹窗（含常见回答管理）
   d.getElementById('themeBtn').click();
   assert.ok(['light', 'dark'].includes(d.documentElement.getAttribute('data-theme')));
   d.querySelector('[data-theme-opt="dark"]').click();
@@ -353,49 +405,115 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   d.getElementById('settingsBtn').click();
   assert.ok(d.getElementById('settingsScrim').classList.contains('open'));
   await waitFor(() => /在线客户端/.test(d.getElementById('serverInfo').textContent), { label: 'server info' });
+  const qrValues = () => [...d.querySelectorAll('#qrList input')].map((i) => i.value);
+  assert.equal(qrValues()[0], '继续');
+  d.getElementById('qrNew').value = '帮我写单元测试';
+  d.getElementById('qrAdd').click();
+  assert.equal(qrValues().at(-1), '帮我写单元测试');
+  [...d.querySelectorAll('#qrList .qr-item')].at(-1).querySelector('[title="上移"]').click();
+  assert.equal(qrValues().at(-2), '帮我写单元测试');
+  d.querySelector('#qrList .qr-item [title="删除"]').click();   // 删掉“继续”
+  assert.ok(!qrValues().includes('继续'));
+  assert.ok(JSON.parse(win.localStorage.getItem('bridgeDashboard.quickReplies')).includes('帮我写单元测试'));
+  // 通知等级：音效 / 置顶弹窗默认开启，且不依赖系统通知权限
+  assert.equal(d.querySelector('[data-notify="sound"]').getAttribute('aria-checked'), 'true');
+  assert.equal(d.querySelector('[data-notify="pinned_popup"]').getAttribute('aria-checked'), 'true');
+  assert.equal(d.querySelector('[data-notify="sound"]').disabled, false);
   d.getElementById('settingsClose').click();
 
-  // 点卡片：有标签页 → 下发 focus；测试里的“插件”不执行 → 超时 → 新开页面
+  // 点卡片：打开详情，不跳转
   cardEl.click();
-  await waitFor(() => opened.length === 1, { label: 'fallback open', timeout: 6000 });
-  assert.equal(opened[0], CONV_URL);
-
-  // 实时：状态变为“已到限额”
-  await sendAndAck(ext, ev('conversation.status', { source: 'chatgpt', status: 'limit_reached', detail: '已达到使用上限', model: null }));
-  await waitFor(() => d.querySelector(`.card[data-conv="${CONV}"] .badge`)?.textContent === '已到限额', { label: 'limit badge' });
-  assert.match(d.querySelector(`.card[data-conv="${CONV}"] .notice`).textContent, /已达到使用上限/);
-
-  const btn = (label) => [...d.querySelectorAll(`.card[data-conv="${CONV}"] .actions button`)].find((b) => b.textContent === label);
-
-  // 标记完成
-  btn('标记完成').click();
-  await waitFor(() => btn('取消完成'), { label: 'marked' });
-  assert.ok(d.querySelector(`.card[data-conv="${CONV}"]`).classList.contains('done'));
-
-  // 详情 + 流式更新
-  btn('详情').click();
-  assert.equal(opened.length, 1, '点按钮不触发卡片跳转');
+  assert.equal(opened.length, 0, '点卡片不跳转页面');
   assert.ok(d.getElementById('detailScrim').classList.contains('open'));
   await waitFor(() => d.querySelectorAll('#detailMsgs .msg').length === 2, { label: 'detail' });
-  // 详情里复制回答
-  d.getElementById('detailCopy').click();
+  const mact = (act) => d.querySelector(`#detailMsgs .msg.assistant [data-act="${act}"]`);
+  assert.ok(!d.querySelector('#detailMsgs .msg.user .mact'), '提问上没有回答操作');
+  // 复制
+  mact('copy').click();
   await waitFor(() => copied.length === 1, { label: 'copied' });
   assert.equal(copied[0], '回答一');
+  // 收藏
+  mact('favorite').click();
+  await waitFor(() => d.querySelector('#detailMsgs .msg.assistant.fav'), { label: 'favorited' });
+  await waitFor(() => /1 条收藏/.test(d.querySelector(cardSel)?.textContent || ''), { label: 'favorite tag' });
+  // 折叠 / 展开
+  mact('fold').click();
+  assert.ok(d.querySelector('#detailMsgs .msg.assistant').classList.contains('collapsed'));
+  assert.equal(d.querySelector('#detailMsgs .msg.assistant .fold').textContent, '回答一');
+  mact('fold').click();
+  assert.ok(!d.querySelector('#detailMsgs .msg.assistant').classList.contains('collapsed'));
+  // 重新回答（测试“插件”不执行 → 超时失败提示）
+  assert.equal(mact('regenerate').disabled, false);
+  // 流式更新 + 折叠状态保持
+  mact('fold').click();
   await sendAndAck(ext, ev('message.updated', { message_id: 'a1', role: 'assistant', index: 1, text: '回答一（更新）', text_length: 7 }));
   await waitFor(() => d.querySelector('#detailMsgs .msg.assistant')?.textContent.includes('回答一（更新）'), { label: 'stream update' });
+  assert.ok(d.querySelector('#detailMsgs .msg.assistant').classList.contains('collapsed'), '更新后保持折叠');
+  assert.ok(d.querySelector('#detailMsgs .msg.assistant').classList.contains('fav'), '更新后保持收藏');
+  mact('fold').click();
   await sendAndAck(ext, ev('message.updated', { message_id: 'a1', role: 'assistant', index: 1, text: '代码：\n\n```js\nconst a = 1;\n```\n\n用 `a` 即可', text_length: 30 }));
   await waitFor(() => d.querySelector('#detailMsgs .msg.assistant pre code')?.textContent === 'const a = 1;', { label: 'code block' });
   assert.equal(d.querySelector('#detailMsgs .msg.assistant code.inl').textContent, 'a');
+
+  // 详情右上角：快速回复 + 常见回答候选
+  assert.ok(!d.getElementById('composer').classList.contains('open'));
+  d.getElementById('detailQuick').click();
+  assert.ok(d.getElementById('composer').classList.contains('open'));
+  const ta = d.getElementById('quickText');
+  await waitFor(() => d.getElementById('quickCands').classList.contains('open'), { label: 'cands open' });
+  ta.value = '单元';
+  ta.dispatchEvent(new win.Event('input'));
+  const cands = [...d.querySelectorAll('#quickCands .cand')].map((b) => b.textContent);
+  assert.deepEqual(cands, ['帮我写单元测试'], '按输入过滤常见回答');
+  ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  assert.equal(ta.value, '帮我写单元测试');
+  assert.ok(!d.getElementById('quickCands').classList.contains('open'));
+  d.getElementById('quickSend').click();
+  await waitFor(() => /快速回复失败/.test(d.getElementById('snackbars').textContent), { label: 'reply toast', timeout: 6000 });
+
+  // 详情里跳转：有标签页 → focus；测试“插件”不执行 → 超时 → 新开页面
+  d.getElementById('detailJump').click();
+  await waitFor(() => opened.length === 1, { label: 'fallback open', timeout: 6000 });
+  assert.equal(opened[0], CONV_URL);
   d.getElementById('detailClose').click();
   assert.ok(!d.getElementById('detailScrim').classList.contains('open'));
 
-  // 快速回复：这里的“插件”是不会执行指令的测试客户端 → 后端超时，看板要提示失败
-  btn('快速回复').click();
-  const ta = await waitFor(() => d.querySelector(`.card[data-conv="${CONV}"] .quick.open textarea`), { label: 'quick open' });
-  ta.value = '你好';
-  ta.dispatchEvent(new win.Event('input'));
-  d.querySelector(`.card[data-conv="${CONV}"] .quick .btn.filled`).click();
-  await waitFor(() => /快速回复/.test(d.getElementById('snackbars').textContent) && /失败/.test(d.getElementById('snackbars').textContent), { label: 'reply toast', timeout: 6000 });
+  // 通知等级：普通会话回答完成 → 音效，不弹窗
+  await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 1 }));
+  await sendAndAck(ext, ev('generation.finished', { message_id: 'a1', duration_ms: 1200 }));
+  await waitFor(() => sounds.length === 2, { label: 'sound' });
+  assert.ok(!d.getElementById('alertScrim').classList.contains('open'));
+
+  // 置顶：卡片排到前面，回答完成直接弹窗
+  const btn = (label) => [...d.querySelectorAll(`${cardSel} .actions button`)].find((b) => b.textContent === label);
+  btn('置顶').click();
+  await waitFor(() => d.querySelector(cardSel)?.classList.contains('pinned'), { label: 'pinned' });
+  assert.match(d.getElementById('chips').textContent, /置顶1/);
+  await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 2 }));
+  await sendAndAck(ext, ev('generation.finished', { message_id: 'a1', duration_ms: 2300 }));
+  await waitFor(() => d.getElementById('alertScrim').classList.contains('open'), { label: 'popup' });
+  assert.equal(sounds.length, 5, '置顶回答完成也播放（更强的）提示音');
+  assert.match(d.getElementById('alertBody').textContent, /界面测试/);
+  d.getElementById('alertOpen').click();
+  assert.ok(!d.getElementById('alertScrim').classList.contains('open'));
+  assert.ok(d.getElementById('detailScrim').classList.contains('open'), '弹窗“查看”打开详情');
+  d.getElementById('detailClose').click();
+
+  // 实时：状态变为“已到限额”
+  await sendAndAck(ext, ev('conversation.status', { source: 'chatgpt', status: 'limit_reached', detail: '已达到使用上限', model: null }));
+  await waitFor(() => d.querySelector(`${cardSel} .badge`)?.textContent === '已到限额', { label: 'limit badge' });
+  assert.match(d.querySelector(`${cardSel} .notice`).textContent, /已达到使用上限/);
+
+  // 归档：从“全部”消失，出现在“已归档”
+  btn('归档').click();
+  await waitFor(() => !d.querySelector(cardSel), { label: 'archived hidden' });
+  assert.match(d.getElementById('chips').textContent, /全部0/);
+  assert.match(d.getElementById('chips').textContent, /已归档1/);
+  [...d.querySelectorAll('#chips .chip')].find((b) => /已归档/.test(b.textContent)).click();
+  await waitFor(() => d.querySelector(`${cardSel}.archived`), { label: 'in archive' });
+  btn('取消归档').click();
+  await waitFor(() => !d.querySelector(cardSel), { label: 'unarchived leaves archive view' });
 
   assert.equal(win.__appError, undefined, String(win.__appError?.stack));
   assert.deepEqual(errors, []);
@@ -403,4 +521,34 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   ext.close();
   win.close();
   await server.stop();
+});
+
+test('数据库迁移：旧库的“标记完成”迁移为归档', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { openDatabase } = await import('../../src/backend/src/db.js');
+  const file = join(mkdtempSync(join(tmpdir(), 'bridge-mig-')), 'old.db');
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE conversation_marks (conversation_id TEXT PRIMARY KEY, done INTEGER NOT NULL DEFAULT 0, done_at INTEGER, updated_at INTEGER NOT NULL);
+    INSERT INTO conversation_marks VALUES ('c-done', 1, 1000, 1000), ('c-todo', 0, NULL, 1000);`);
+  old.close();
+  const db = openDatabase(file);
+  const rows = Object.fromEntries(db.raw.prepare('SELECT conversation_id, archived, archived_at, pinned FROM conversation_marks').all().map((r) => [r.conversation_id, { ...r }]));
+  assert.equal(rows['c-done'].archived, 1);
+  assert.equal(rows['c-done'].archived_at, 1000);
+  assert.equal(rows['c-todo'].archived, 0);
+  assert.equal(rows['c-done'].pinned, 0);
+  db.setPinned('c-todo', true);
+  db.close();
+  // 再打开一次：迁移幂等，不覆盖新数据
+  const db2 = openDatabase(file);
+  db2.setArchived('c-done', false);
+  db2.close();
+  const db3 = openDatabase(file);
+  const r = db3.raw.prepare("SELECT archived, pinned FROM conversation_marks WHERE conversation_id = 'c-done'").get();
+  assert.equal(r.archived, 0, '第二次打开不重新从 done 迁移');
+  assert.equal(db3.raw.prepare("SELECT pinned FROM conversation_marks WHERE conversation_id = 'c-todo'").get().pinned, 1);
+  db3.close();
 });

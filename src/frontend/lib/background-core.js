@@ -41,7 +41,8 @@ export function createBackground({ WebSocketImpl, storage, clientId, settings, c
       if (tab && tab.conversation_id !== cmd.conversation_id) return { ok: false, code: 'tab_moved', detail: '该标签页已切换到其他会话' };
       if (typeof executeCommand !== 'function') return { ok: false, code: 'unsupported' };
       return executeCommand(cmd.tab_id, {
-        command_id: cmd.command_id, action: cmd.action, conversation_id: cmd.conversation_id, text: cmd.text
+        command_id: cmd.command_id, action: cmd.action, conversation_id: cmd.conversation_id, text: cmd.text,
+        answer_index: cmd.answer_index, answer_total: cmd.answer_total
       });
     },
     ...connectionOptions

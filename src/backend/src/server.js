@@ -67,7 +67,7 @@ export function createBridgeServer(opts = {}) {
     if (path === '/healthz') return json(res, 200, { ok: true, protocol: PROTOCOL_VERSION });
     if (path === '/stats') return json(res, 200, stats());
     if (DASHBOARD_FILES[path] && req.method === 'GET') return serveDashboardFile(req, res, DASHBOARD_FILES[path]);
-    if (path === '/api/conversations' || path.startsWith('/api/conversations/')) {
+    if (path === '/api/conversations' || path.startsWith('/api/conversations/') || path === '/api/favorites') {
       handleDashboardApi(req, res, path).catch((err) => {
         log.error('[dashboard]', err);
         if (!res.headersSent) json(res, 500, { ok: false, error: 'internal error' });
@@ -108,7 +108,9 @@ export function createBridgeServer(opts = {}) {
    *   GET /api/conversations                         会话列表
    *   GET /api/conversations/:id/messages            当前消息
    *   GET /api/conversations/:id/events?limit=100    最近事件（不含正文）
-   *   POST /api/conversations/:id/mark  {done: bool}  标记完成 / 取消
+   *   POST /api/conversations/:id/mark  {archived?: bool, pinned?: bool}  归档 / 置顶（旧字段 done 等同 archived）
+   *   POST /api/conversations/:id/messages/:mid/favorite  {favorite: bool}  收藏 / 取消收藏回答
+   *   GET  /api/favorites?limit=200                      收藏的回答（正文快照）
    */
   async function handleDashboardApi(req, res, path) {
     if (!originAllowed(req.headers.origin, req.headers.host)) return json(res, 403, { ok: false, error: 'forbidden origin' });
@@ -122,10 +124,27 @@ export function createBridgeServer(opts = {}) {
     if (mark && req.method === 'POST') {
       let body = {};
       try { body = JSON.parse((await readBody(req, 4096)) || '{}'); } catch { return json(res, 400, { ok: false, error: 'invalid json' }); }
-      db.setDone(mark[1], body.done !== false);
-      return json(res, 200, { ok: true, conversation_id: mark[1], done: body.done !== false });
+      const out = { ok: true, conversation_id: mark[1] };
+      const archived = typeof body.archived === 'boolean' ? body.archived : typeof body.done === 'boolean' ? body.done : undefined;
+      if (archived !== undefined) { db.setArchived(mark[1], archived); out.archived = archived; }
+      if (typeof body.pinned === 'boolean') { db.setPinned(mark[1], body.pinned); out.pinned = body.pinned; }
+      if (archived === undefined && out.pinned === undefined) return json(res, 400, { ok: false, error: 'archived or pinned required' });
+      return json(res, 200, out);
+    }
+    const fav = /^\/api\/conversations\/([A-Za-z0-9_-]{1,128})\/messages\/([^/]{1,400})\/favorite$/.exec(path);
+    if (fav && req.method === 'POST') {
+      try { fav[2] = decodeURIComponent(fav[2]); } catch { return json(res, 400, { ok: false, error: 'invalid message id' }); }
+      if (!fav[2] || fav[2].length > 128) return json(res, 400, { ok: false, error: 'invalid message id' });
+      let body = {};
+      try { body = JSON.parse((await readBody(req, 4096)) || '{}'); } catch { return json(res, 400, { ok: false, error: 'invalid json' }); }
+      const favorite = body.favorite !== false;
+      if (!db.setFavorite(fav[1], fav[2], favorite)) return json(res, 404, { ok: false, error: 'message not found' });
+      return json(res, 200, { ok: true, conversation_id: fav[1], message_id: fav[2], favorite });
     }
     if (req.method !== 'GET') return json(res, 405, { ok: false, error: 'method not allowed' });
+    if (path === '/api/favorites') {
+      return json(res, 200, { ok: true, favorites: db.listFavorites(clampInt(params.get('limit'), 1, 1000, 200)) });
+    }
     if (path === '/api/conversations') {
       return json(res, 200, { ok: true, max_seq: db.maxSeq(), now: Date.now(), conversations: db.listConversations(clampInt(params.get('limit'), 1, 1000, 200)) });
     }
@@ -316,6 +335,7 @@ export function createBridgeServer(opts = {}) {
       action: msg.action,
       conversation_id: msg.conversation_id,
       ...(msg.action === 'reply' ? { text: msg.text } : {}),
+      ...(msg.action === 'regenerate' && msg.answer_index != null ? { answer_index: msg.answer_index, answer_total: msg.answer_total } : {}),
       tab_id: tabId,
       requested_by: conn.rec.clientId
     }));

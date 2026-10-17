@@ -99,7 +99,7 @@ export const NON_RETRYABLE_ERRORS = Object.freeze([
 /** 页面操作指令 */
 export const CommandAction = Object.freeze({
   REPLY: 'reply',             // 在会话输入框中填入 text 并发送
-  REGENERATE: 'regenerate',   // 点击最后一条回答的“重新生成”
+  REGENERATE: 'regenerate',   // 点击某条回答（默认最后一条）的“重新生成”
   FOCUS: 'focus'              // 切换到开着该会话的标签页（看板点卡片）
 });
 
@@ -292,6 +292,8 @@ export const SCHEMA = {
       action: { type: 'string', enum: ['reply', 'regenerate', 'focus'] },
       conversation_id: { type: 'string', minLength: 1, maxLength: 128 },
       text: { type: 'string', minLength: 1, maxLength: Limits.MAX_COMMAND_TEXT },
+      answer_index: { type: 'integer', minimum: 0, maximum: 100000 },   // regenerate：第几条回答（从 0 开始）；不填 = 最后一条
+      answer_total: { type: 'integer', minimum: 1, maximum: 100000 },   // regenerate：看板看到的回答总数，用于和页面核对
       tab_id: { type: 'integer', minimum: 0 },          // 后端转发给插件时填写
       requested_by: ID                                    // 后端转发给插件时填写
     }, ['command_id', 'action', 'conversation_id']),

@@ -1,4 +1,5 @@
 // 会话管理看板：HTTP 拉取会话列表 + WebSocket 实时广播 + 页面指令（跳转 / 快速回复 / 重新回答）
+// 卡片：点击打开详情；置顶 / 归档 / 重新回答。详情：快速回复（常见回答候选）、每条回答 复制 / 收藏 / 重新回答 / 折叠。
 import { makeEnvelope, MessageType, randomId } from './protocol.js';
 
 const $ = (id) => document.getElementById(id);
@@ -15,10 +16,25 @@ const SOURCES = {
   duckai: { label: 'Duck.ai', short: 'D', regenerate: false },
   hark: { label: 'Hark', short: 'H', regenerate: false }
 };
+// “全部”和各状态都不含已归档；已归档单独一个筛选
 const STATUS_FILTERS = [
-  ['all', '全部'], ['generating', '回答中'], ['limit_reached', '已到限额'], ['error', '出错'],
-  ['idle', '空闲'], ['closed', '页面已关'], ['todo', '未完成'], ['done', '已完成']
+  ['all', '全部'], ['pinned', '置顶'], ['generating', '回答中'], ['limit_reached', '已到限额'], ['error', '出错'],
+  ['idle', '空闲'], ['closed', '页面已关'], ['favorite', '有收藏'], ['archived', '已归档']
 ];
+const DEFAULT_QUICK_REPLIES = ['继续', '请详细解释一下', '给出完整代码', '总结一下要点', '换一种思路再试试', '用中文回答', '谢谢，没问题了'];
+
+const SVG = {
+  pin: '<svg class="i s18" viewBox="0 0 24 24"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>',
+  copy: '<svg class="i s18" viewBox="0 0 24 24"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z"/></svg>',
+  star: '<svg class="i s18" viewBox="0 0 24 24"><path d="m22 9.24-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/></svg>',
+  starOn: '<svg class="i s18" viewBox="0 0 24 24"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>',
+  redo: '<svg class="i s18" viewBox="0 0 24 24"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>',
+  fold: '<svg class="i s18" viewBox="0 0 24 24"><path d="M7.41 18.59 8.83 20 12 16.83 15.17 20l1.41-1.41L12 14l-4.59 4.59zm9.18-13.18L15.17 4 12 7.17 8.83 4 7.41 5.41 12 10l4.59-4.59z"/></svg>',
+  unfold: '<svg class="i s18" viewBox="0 0 24 24"><path d="M12 5.83 15.17 9l1.41-1.41L12 3 7.41 7.59 8.83 9 12 5.83zm0 12.34L8.83 15l-1.41 1.41L12 21l4.59-4.59L15.17 15 12 18.17z"/></svg>',
+  up: '<svg class="i s18" viewBox="0 0 24 24"><path d="M7.41 15.41 12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></svg>',
+  down: '<svg class="i s18" viewBox="0 0 24 24"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>',
+  del: '<svg class="i s18" viewBox="0 0 24 24"><path d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>'
+};
 
 const ICON = {
   light: '<svg class="i" viewBox="0 0 24 24"><path d="M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM2 13h2a1 1 0 0 0 0-2H2a1 1 0 0 0 0 2zm18 0h2a1 1 0 0 0 0-2h-2a1 1 0 0 0 0 2zM11 2v2a1 1 0 0 0 2 0V2a1 1 0 0 0-2 0zm0 18v2a1 1 0 0 0 2 0v-2a1 1 0 0 0-2 0zM5.99 4.58a1 1 0 0 0-1.41 1.41l1.06 1.06a1 1 0 0 0 1.41-1.41L5.99 4.58zm12.37 12.37a1 1 0 0 0-1.41 1.41l1.06 1.06a1 1 0 0 0 1.41-1.41l-1.06-1.06zm1.06-10.96a1 1 0 0 0-1.41-1.41l-1.06 1.06a1 1 0 0 0 1.41 1.41l1.06-1.06zM7.05 18.36a1 1 0 0 0-1.41-1.41l-1.06 1.06a1 1 0 0 0 1.41 1.41l1.06-1.06z"/></svg>',
@@ -35,8 +51,12 @@ const save = (k, v) => localStorage.setItem(LS + k, JSON.stringify(v));
 const settings = {
   token: load('token', localStorage.getItem('bridgeDashboardToken') || ''),
   theme: load('theme', 'system'),
-  notify: load('notify', { enabled: false, limit_reached: true, finished: true, error: true, background_only: true })
+  // sound：普通会话回答完成播放音效；pinned_popup：置顶会话回答完成直接弹窗；enabled：系统通知（需要浏览器权限）
+  notify: { enabled: false, sound: true, pinned_popup: true, limit_reached: true, error: true, background_only: true, ...load('notify', {}) },
+  quickReplies: load('quickReplies', DEFAULT_QUICK_REPLIES)
 };
+delete settings.notify.finished;
+if (!Array.isArray(settings.quickReplies)) settings.quickReplies = [...DEFAULT_QUICK_REPLIES];
 
 const state = {
   ws: null,
@@ -45,14 +65,16 @@ const state = {
   retry: 0,
   manualClose: false,
   conversations: [],
-  filter: load('filter', 'all'),
+  filter: STATUS_FILTERS.some(([k]) => k === load('filter', 'all')) ? load('filter', 'all') : 'all',
   source: load('source', 'all'),
   search: '',
   sort: load('sort', 'activity'),
   selected: null,
   messages: new Map(),
   streaming: new Set(),
-  quickOpen: new Set(),
+  collapsed: new Set(),
+  composerOpen: false,
+  candIndex: -1,
   drafts: new Map(),
   pendingCommands: new Map(),
   lastStatus: new Map(),
@@ -149,8 +171,72 @@ function renderNotifySettings() {
   }[perm];
   for (const sw of document.querySelectorAll('[data-notify]')) {
     sw.setAttribute('aria-checked', String(!!n[sw.dataset.notify]));
-    sw.disabled = !(n.enabled && perm === 'granted');
+    sw.disabled = sw.dataset.needsSystem ? !(n.enabled && perm === 'granted') : false;
   }
+}
+
+// 提示音：Web Audio 合成，不需要音频文件；浏览器要求先有一次用户操作才能出声
+let audioCtx = null;
+function unlockAudio() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  if (!audioCtx) { try { audioCtx = new AC(); } catch { audioCtx = null; } }
+  if (audioCtx?.state === 'suspended') audioCtx.resume?.().catch(() => {});
+  return audioCtx;
+}
+function playSound(strong = false) {
+  const ctx = unlockAudio();
+  if (!ctx) return false;
+  try {
+    const notes = strong ? [880, 1175, 1568] : [988, 1319];
+    const t0 = ctx.currentTime + 0.01;
+    notes.forEach((f, i) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = f;
+      const t = t0 + i * 0.12;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.18, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+      o.connect(g).connect(ctx.destination);
+      o.start(t);
+      o.stop(t + 0.3);
+    });
+    return true;
+  } catch { return false; }
+}
+
+const pageInFront = () => document.visibilityState === 'visible' && (document.hasFocus ? document.hasFocus() : true);
+
+/** 页面内弹窗（置顶会话回答完成） */
+function showPopup(conversationId, title, body) {
+  state.alertConv = conversationId || null;
+  $('alertTitle').textContent = title;
+  $('alertBody').replaceChildren(...String(body || '').split('\n').filter(Boolean).map((line) => el('p', { style: 'margin:0 0 6px' }, line)));
+  $('alertOpen').hidden = !conversationId;
+  $('alertScrim').classList.add('open');
+}
+function closePopup() { $('alertScrim').classList.remove('open'); state.alertConv = null; }
+
+/** 回答完成：普通会话 → 音效；置顶会话 → 弹窗（前台页面内弹窗，后台系统通知）+ 音效 */
+function onAnswerFinished(c, conversationId, name, secs) {
+  const n = settings.notify;
+  if (c?.pinned) {
+    if (!n.pinned_popup) return 'none';
+    playSound(true);
+    const sysOk = n.enabled && notificationsSupported() && Notification.permission === 'granted';
+    if (!pageInFront() && sysOk) {
+      try {
+        const note = new Notification(`置顶会话回答完成：${name}`, { body: secs, tag: `pinned:${conversationId}`, renotify: true, requireInteraction: true });
+        note.onclick = () => { window.focus(); openDetail(conversationId); note.close(); };
+      } catch { /* 系统通知失败时退回页面内弹窗 */ }
+    }
+    showPopup(conversationId, '置顶会话回答完成', `${name}${secs ? '\n' + secs : ''}`);
+    return 'popup';
+  }
+  if (n.sound) { playSound(false); return 'sound'; }
+  return 'none';
 }
 
 async function toggleNotifications() {
@@ -166,7 +252,7 @@ async function toggleNotifications() {
   renderNotifySettings();
 }
 
-/** kind: limit_reached | finished | error */
+/** kind: limit_reached | error（系统通知） */
 function notify(kind, conversationId, title, body) {
   const n = settings.notify;
   if (!n.enabled || !n[kind] || !notificationsSupported() || Notification.permission !== 'granted') return false;
@@ -202,66 +288,81 @@ function scheduleRefresh(delay = 400) {
 const convById = (id) => state.conversations.find((x) => x.conversation_id === id);
 
 async function openDetail(conversationId) {
+  if (state.selected && state.selected !== conversationId) state.drafts.set(state.selected, $('quickText').value);
   state.selected = conversationId;
   state.messages = new Map();
   state.streaming = new Set();
+  state.composerOpen = false;
+  $('quickText').value = state.drafts.get(conversationId) || '';
+  closeCands();
   $('detailScrim').classList.add('open');
   renderDetailHead();
+  renderComposer();
   renderDetail(true, true);
   try {
     const data = await api(`/api/conversations/${encodeURIComponent(conversationId)}/messages`);
     if (state.selected !== conversationId) return;
-    for (const m of data.messages) state.messages.set(m.message_id, { role: m.role, index: m.msg_index, text: m.text });
+    for (const m of data.messages) state.messages.set(m.message_id, { role: m.role, index: m.msg_index, text: m.text, favorite: !!m.favorite });
     renderDetail(true, true);
   } catch (e) { snackbar(`读取消息失败：${e.message}`, 'err'); }
 }
 
 function closeDetail() {
+  if (state.selected) state.drafts.set(state.selected, $('quickText').value);
+  closeCands();
   state.selected = null;
   $('detailScrim').classList.remove('open');
 }
 
-async function lastAnswer(conversationId) {
-  let list = [];
-  if (state.selected === conversationId && state.messages.size) list = [...state.messages.values()];
-  else list = (await api(`/api/conversations/${encodeURIComponent(conversationId)}/messages`)).messages
-    .map((m) => ({ role: m.role, index: m.msg_index, text: m.text }));
-  const answers = list.filter((m) => m.role === 'assistant').sort((a, b) => a.index - b.index);
-  return answers.length ? answers.at(-1).text : null;
-}
-
 // ------------------------------------------------------------------ 操作
 
-async function copyAnswer(conversationId) {
+async function setMark(c, patch, okText) {
   try {
-    const text = await lastAnswer(conversationId);
-    if (!text) return snackbar('这个会话还没有回答', 'err');
+    await api(`/api/conversations/${encodeURIComponent(c.conversation_id)}/mark`, { method: 'POST', body: JSON.stringify(patch) });
+    Object.assign(c, patch);   // 先本地更新，避免等下一次拉取
+    render();
+    snackbar(okText, 'ok');
+    loadConversations();
+  } catch (e) { snackbar(`操作失败：${e.message}`, 'err'); }
+}
+const toggleArchive = (c) => setMark(c, { archived: !c.archived }, c.archived ? '已取消归档' : '已归档，不再显示在“全部”中');
+const togglePin = (c) => setMark(c, { pinned: !c.pinned }, c.pinned ? '已取消置顶' : '已置顶，回答完成会直接弹窗');
+
+async function toggleFavorite(conversationId, messageId) {
+  const m = state.messages.get(messageId);
+  if (!m) return;
+  const next = !m.favorite;
+  try {
+    await api(`/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/favorite`,
+      { method: 'POST', body: JSON.stringify({ favorite: next }) });
+    m.favorite = next;
+    renderDetail();
+    snackbar(next ? '已收藏这条回答' : '已取消收藏', 'ok');
+    scheduleRefresh(100);
+  } catch (e) { snackbar(`收藏失败：${e.message}`, 'err'); }
+}
+
+async function copyText(text) {
+  try {
     await navigator.clipboard.writeText(text);
     snackbar(`已复制回答（${text.length} 字）`, 'ok');
   } catch (e) { snackbar(`复制失败：${e.message}`, 'err'); }
 }
 
-async function toggleDone(c) {
-  try {
-    await api(`/api/conversations/${encodeURIComponent(c.conversation_id)}/mark`, { method: 'POST', body: JSON.stringify({ done: !c.done }) });
-    snackbar(c.done ? '已取消完成标记' : '已标记完成', 'ok');
-    loadConversations();
-  } catch (e) { snackbar(`标记失败：${e.message}`, 'err'); }
-}
-
-function sendCommand(conversationId, action, text, { quiet = false } = {}) {
+function sendCommand(conversationId, action, text, { quiet = false, extra = {} } = {}) {
   if (!state.ws || state.ws.readyState !== 1 || state.wsState !== 'open' || !state.canControl) return false;
   const commandId = randomId('cmd').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
   state.pendingCommands.set(commandId, { conversation_id: conversationId, action });
   state.ws.send(JSON.stringify(makeEnvelope(MessageType.COMMAND, {
-    command_id: commandId, action, conversation_id: conversationId, ...(text ? { text } : {})
+    command_id: commandId, action, conversation_id: conversationId, ...(text ? { text } : {}), ...extra
   })));
   if (!quiet) snackbar(action === 'reply' ? '正在发送回复…' : '正在请求重新回答…');
   render();
+  if (state.selected === conversationId) { renderComposer(); renderDetail(); }
   return true;
 }
 
-/** 点卡片：有标签页开着就切过去，没有就新开一个 */
+/** 详情里的“跳转到页面”：有标签页开着就切过去，没有就新开一个 */
 function jumpTo(c) {
   if (c.open_tabs > 0 && sendCommand(c.conversation_id, 'focus', null, { quiet: true })) return;
   openUrl(c.url);
@@ -278,6 +379,7 @@ const CODE_TEXT = {
   composer_not_found: '页面上没找到输入框',
   regenerate_not_found: '没找到“重新生成”按钮',
   regenerate_unsupported: '这个站点不支持重新回答',
+  regenerate_target_not_found: '页面上找不到这条回答的“重新生成”按钮（只能重新回答最后一条）',
   timeout: '插件没有及时响应',
   tab_unreachable: '联系不上那个标签页（请刷新页面）'
 };
@@ -294,11 +396,15 @@ function onCommandResult(msg) {
   const what = p?.action === 'reply' ? '快速回复' : '重新回答';
   if (msg.ok) {
     snackbar(`${what}：${msg.detail || '成功'}`, 'ok');
-    if (p?.action === 'reply') { state.drafts.delete(p.conversation_id); state.quickOpen.delete(p.conversation_id); }
+    if (p?.action === 'reply') {
+      state.drafts.delete(p.conversation_id);
+      if (state.selected === p.conversation_id) $('quickText').value = '';
+    }
   } else {
     snackbar(`${what}失败：${CODE_TEXT[msg.code] || msg.detail || msg.code || '未知错误'}`, 'err');
   }
   render();
+  if (state.selected) { renderComposer(); renderDetail(); }
 }
 
 // ------------------------------------------------------------------ WebSocket
@@ -373,7 +479,7 @@ function onBroadcast(b) {
     if (b.event_type === 'message.added' || b.event_type === 'message.updated') {
       const p = b.payload;
       if (typeof p.text === 'string') {
-        state.messages.set(p.message_id, { role: p.role, index: p.index, text: p.text });
+        state.messages.set(p.message_id, { role: p.role, index: p.index, text: p.text, favorite: !!state.messages.get(p.message_id)?.favorite });
         if (b.event_type === 'message.updated' && p.role === 'assistant') state.streaming.add(p.message_id);
         renderDetail(true);
       }
@@ -395,7 +501,7 @@ function onBroadcast(b) {
   }
   if (b.event_type === 'generation.finished') {
     const secs = b.payload.duration_ms != null ? `用时 ${duration(b.payload.duration_ms)}` : '';
-    notify('finished', conv, `回答完成：${name}`, secs);
+    onAnswerFinished(c, conv, name, secs);
   }
   scheduleRefresh(b.event_type === 'message.updated' ? 1500 : 300);
 }
@@ -406,26 +512,31 @@ function filtered() {
   const q = state.search.trim().toLowerCase();
   let list = state.conversations.filter((c) => {
     if (state.source !== 'all' && c.source !== state.source) return false;
-    if (state.filter === 'todo' && c.done) return false;
-    if (state.filter === 'done' && !c.done) return false;
+    if (state.filter === 'archived') { if (!c.archived) return false; }
+    else if (c.archived) return false;
+    if (state.filter === 'pinned' && !c.pinned) return false;
+    if (state.filter === 'favorite' && !c.favorite_count) return false;
     if (STATUS[state.filter] && c.status !== state.filter) return false;
     if (!q) return true;
     return [titleOf(c), c.conversation_id, c.first_user_text, c.last_message?.text, c.model, c.status_detail]
       .some((v) => v && String(v).toLowerCase().includes(q));
   });
-  if (state.sort === 'status') {
-    list = [...list].sort((a, b) => (a.done - b.done) ||
-      ((STATUS[a.status]?.order ?? 9) - (STATUS[b.status]?.order ?? 9)) || (b.last_seen_at - a.last_seen_at));
-  }
+  // 置顶的永远在前
+  list = [...list].sort((a, b) => (b.pinned - a.pinned) ||
+    (state.sort === 'status' ? ((STATUS[a.status]?.order ?? 9) - (STATUS[b.status]?.order ?? 9)) : 0) ||
+    (b.last_seen_at - a.last_seen_at));
   return list;
 }
 
 function renderChips() {
   const inSource = state.conversations.filter((c) => state.source === 'all' || c.source === state.source);
-  const counts = { all: inSource.length, todo: 0, done: 0 };
+  const counts = { all: 0, pinned: 0, favorite: 0, archived: 0 };
   for (const c of inSource) {
+    if (c.archived) { counts.archived++; continue; }
+    counts.all++;
     counts[c.status] = (counts[c.status] || 0) + 1;
-    counts[c.done ? 'done' : 'todo']++;
+    if (c.pinned) counts.pinned++;
+    if (c.favorite_count) counts.favorite++;
   }
   const sources = [...new Set(state.conversations.map((c) => c.source))];
   const chip = (on, label, n, onclick) => el('button', { class: `chip ${on ? 'on' : ''}`, onclick },
@@ -445,43 +556,24 @@ function card(c) {
   const src = sourceInfo(c.source);
   const busy = [...state.pendingCommands.values()].some((p) => p.conversation_id === id && p.action !== 'focus');
   const online = c.open_tabs > 0 && state.wsState === 'open' && state.canControl;
-  const canAct = online && !busy;
-  const quickOpen = state.quickOpen.has(id);
   const stop = (fn) => (e) => { e.stopPropagation(); fn(e); };
-
-  const textarea = el('textarea', { class: 'field', placeholder: `发到这个 ${src.label} 会话，Ctrl+Enter 发送` });
-  textarea.value = state.drafts.get(id) || '';
-  textarea.addEventListener('input', () => state.drafts.set(id, textarea.value));
-  textarea.addEventListener('click', (e) => e.stopPropagation());
-  // 输入法组字期间不重绘，组字结束/失焦后补一次
-  textarea.addEventListener('compositionstart', () => { state.composing = true; });
-  textarea.addEventListener('compositionend', () => { state.composing = false; flushRender(); });
-  textarea.addEventListener('blur', () => setTimeout(flushRender, 0));
-  const doSend = () => {
-    const text = textarea.value.trim();
-    if (!text) return snackbar('回复内容不能为空', 'err');
-    if (!sendCommand(id, 'reply', text)) snackbar('实时连接未建立，无法发送', 'err');
-  };
-  textarea.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doSend(); }
-  });
+  const offlineTip = c.open_tabs ? '' : '需要有标签页开着这个会话';
 
   const notice = c.status_detail && (c.page_status === 'limit_reached' || c.page_status === 'error')
     ? el('div', { class: `notice ${c.page_status === 'error' ? 'err' : ''}` }, c.status_detail) : null;
-  const offlineTip = c.open_tabs ? '' : '需要有标签页开着这个会话';
 
   const node = el('article', {
-    class: `card s-${c.status} ${c.done ? 'done' : ''}`,
-    'data-conv': id, tabindex: '0', role: 'button',
-    title: c.open_tabs ? '点击切换到这个会话的标签页' : '点击打开这个会话',
-    onclick: () => jumpTo(c),
-    onkeydown: (e) => { if (e.target === node && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); jumpTo(c); } }
+    class: `card s-${c.status} ${c.pinned ? 'pinned' : ''} ${c.archived ? 'archived' : ''}`,
+    'data-conv': id, tabindex: '0', role: 'button', title: '点击查看详情',
+    onclick: () => openDetail(id),
+    onkeydown: (e) => { if (e.target === node && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openDetail(id); } }
   },
     el('div', { class: 'head' },
       el('div', { class: `avatar ${SOURCES[c.source] ? c.source : 'other'}`, title: src.label }, src.short),
       el('div', { class: 'tt' },
-        el('div', { class: 'title' }, titleOf(c)),
+        el('div', { class: 'title', title: titleOf(c) },
+          c.pinned ? el('span', { html: SVG.pin, title: '已置顶', style: 'display:inline-flex' }) : null,
+          el('span', { class: 'tx' }, titleOf(c))),
         el('div', { class: 'sub' },
           el('span', {}, src.label),
           c.model ? el('span', {}, c.model) : null,
@@ -492,75 +584,43 @@ function card(c) {
       el('span', { class: 'tag' }, `${c.user_count} 问 · ${c.assistant_count} 答`),
       el('span', { class: 'tag' }, `${c.open_tabs} 个标签页`),
       c.last_duration_ms != null ? el('span', { class: 'tag' }, `上次回答 ${duration(c.last_duration_ms)}`) : null,
-      c.done ? el('span', { class: 'tag' }, '已完成') : null,
-      c.activity_after_done ? el('span', { class: 'tag warn' }, '完成后有新动态') : null
+      c.favorite_count ? el('span', { class: 'tag' }, `${c.favorite_count} 条收藏`) : null,
+      c.archived ? el('span', { class: 'tag' }, '已归档') : null,
+      c.activity_after_archive ? el('span', { class: 'tag warn' }, '归档后有新动态') : null
     ),
     notice,
     c.last_message ? el('div', { class: 'preview' },
       el('b', {}, c.last_message.role === 'user' ? '我：' : `${src.label}：`), c.last_message.text) : null,
     el('div', { class: 'actions' },
-      el('button', { class: 'btn tonal s', disabled: !canAct, title: offlineTip,
-        onclick: stop(() => { quickOpen ? state.quickOpen.delete(id) : state.quickOpen.add(id); render(); }) },
-        quickOpen ? '收起' : '快速回复'),
-      el('button', { class: 'btn outlined s', onclick: stop(() => toggleDone(c)) }, c.done ? '取消完成' : '标记完成'),
+      el('button', { class: `btn ${c.pinned ? 'tonal' : 'outlined'} s`, 'aria-pressed': String(!!c.pinned), onclick: stop(() => togglePin(c)) },
+        el('span', { html: SVG.pin, style: 'display:inline-flex' }), c.pinned ? '取消置顶' : '置顶'),
+      el('button', { class: 'btn outlined s', onclick: stop(() => toggleArchive(c)) }, c.archived ? '取消归档' : '归档'),
       src.regenerate ? el('button', {
         class: 'btn outlined s', title: offlineTip,
-        disabled: !canAct || c.status === 'generating' || c.assistant_count === 0,
+        disabled: !online || busy || c.status === 'generating' || c.assistant_count === 0,
         onclick: stop(() => sendCommand(id, 'regenerate'))
-      }, '重新回答') : null,
-      el('button', { class: 'btn text s', onclick: stop(() => openDetail(id)) }, '详情')
-    ),
-    el('div', { class: `quick ${quickOpen ? 'open' : ''}`, onclick: (e) => e.stopPropagation() },
-      textarea,
-      el('div', { class: 'row' },
-        el('span', { class: 'hint' }, c.status === 'generating' ? '正在回答中，发送会被拒绝' : '在开着这个会话的标签页里发送'),
-        el('button', { class: 'btn filled s', disabled: !canAct, onclick: stop(doSend) }, busy ? '发送中…' : '发送')))
+      }, '重新回答') : null
+    )
   );
   return node;
 }
 
-function flushRender() {
-  if (state.renderPending && !state.composing) { state.renderPending = false; render(); }
-}
-
 function render() {
   const grid = $('grid');
-  const active = document.activeElement;
-  const activeCard = active?.tagName === 'TEXTAREA' ? active.closest('.card') : null;
-  const activeConv = activeCard?.dataset.conv || null;
-  // 正在用输入法组字：整次重绘推迟，避免打断
-  if (state.composing && activeConv) { state.renderPending = true; return; }
   renderChips();
-  const caret = activeConv ? [active.selectionStart, active.selectionEnd] : null;
-
   const list = filtered();
+  const focusedConv = document.activeElement?.closest?.('.card')?.dataset.conv || null;
   if (!state.conversations.length) {
     grid.replaceChildren(el('div', { class: 'empty' }, state.wsState === 'open'
       ? '还没有会话。打开 ChatGPT、Duck.ai 或 Hark 的一个对话试试。'
       : '点右上角的设置，填入 observer token 并连接。'));
   } else if (!list.length) {
-    grid.replaceChildren(el('div', { class: 'empty' }, '没有符合条件的会话'));
+    grid.replaceChildren(el('div', { class: 'empty' }, state.filter === 'archived' ? '没有已归档的会话' : '没有符合条件的会话'));
   } else {
-    // 正在输入的那张卡片保留原节点不替换，焦点和输入状态不受影响；失焦后再刷新它
-    const nodes = list.map((c) => {
-      if (c.conversation_id === activeConv) { state.renderPending = true; return activeCard; }
-      return card(c);
-    });
-    if (activeCard && nodes.includes(activeCard)) {
-      // 不能整体 replaceChildren（会让输入框失焦、打断输入法），只替换它周围的节点
-      for (const n of [...grid.childNodes]) if (n !== activeCard) n.remove();
-      const i = nodes.indexOf(activeCard);
-      activeCard.before(...nodes.slice(0, i));
-      activeCard.after(...nodes.slice(i + 1));
-    } else {
-      grid.replaceChildren(...nodes);
-    }
+    grid.replaceChildren(...list.map(card));
   }
-  if (activeConv && document.activeElement !== active) {
-    const ta = [...grid.querySelectorAll('.card')].find((n) => n.dataset.conv === activeConv)?.querySelector('textarea');
-    if (ta) { ta.focus(); ta.setSelectionRange(caret[0], caret[1]); }
-  }
-  if (state.selected) renderDetailHead();
+  if (focusedConv) [...grid.querySelectorAll('.card')].find((n) => n.dataset.conv === focusedConv)?.focus();
+  if (state.selected) { renderDetailHead(); renderComposer(); }
 }
 
 // ------------------------------------------------------------------ 渲染：详情
@@ -602,20 +662,155 @@ function renderDetailHead() {
   );
 }
 
+function canControlConv(c) {
+  return !!c && c.open_tabs > 0 && state.wsState === 'open' && state.canControl;
+}
+function convBusy(id) {
+  return [...state.pendingCommands.values()].some((p) => p.conversation_id === id && p.action !== 'focus');
+}
+
 function renderDetail(scrollToEnd = false, forceBottom = false) {
   const body = $('detailBody');
   const nearBottom = forceBottom || body.scrollHeight - body.scrollTop - body.clientHeight < 120;
   const msgs = [...state.messages.entries()].sort((a, b) => a[1].index - b[1].index);
   const c = convById(state.selected);
   const src = sourceInfo(c?.source);
-  $('detailMsgs').replaceChildren(...(msgs.length ? msgs.map(([id, m]) => el('div', {
-    class: `msg ${m.role} ${state.streaming.has(id) ? 'streaming' : ''}`
-  },
-    el('div', { class: 'meta' },
-      el('span', {}, m.role === 'user' ? '我' : m.role === 'assistant' ? src.label : m.role),
-      el('span', {}, `${m.text.length} 字`)),
-    el('div', { class: 'body' }, renderText(m.text)))) : [el('div', { class: 'empty' }, '暂无消息')]));
+  const answers = msgs.filter(([, m]) => m.role === 'assistant').map(([id]) => id);
+  const canRegen = src.regenerate && canControlConv(c) && !convBusy(state.selected) && c.status !== 'generating';
+  const iconBtn = (svg, title, onclick, { on = false, disabled = false, act } = {}) =>
+    el('button', { class: `icon-btn ${on ? 'on' : ''}`, title, 'aria-label': title, 'data-act': act, disabled, html: svg,
+      onclick: (e) => { e.stopPropagation(); onclick(); } });
+
+  $('detailMsgs').replaceChildren(...(msgs.length ? msgs.map(([id, m]) => {
+    const isAnswer = m.role === 'assistant';
+    const collapsed = state.collapsed.has(id);
+    const streaming = state.streaming.has(id);
+    const ai = answers.indexOf(id);
+    const isLast = ai === answers.length - 1;
+    const regenTip = !src.regenerate ? '这个站点不支持重新回答'
+      : !canControlConv(c) ? '需要有标签页开着这个会话'
+        : !isLast ? '重新回答这条（页面上每条回答都有“重新生成”时可用）' : '重新回答';
+    return el('div', { class: `msg ${m.role} ${streaming ? 'streaming' : ''} ${collapsed ? 'collapsed' : ''} ${m.favorite ? 'fav' : ''}`, 'data-mid': id },
+      el('div', { class: 'meta' },
+        el('span', {}, m.role === 'user' ? '我' : isAnswer ? src.label : m.role),
+        el('span', {}, `${m.text.length} 字`),
+        m.favorite ? el('span', {}, '已收藏') : null),
+      el('div', { class: 'body' }, renderText(m.text)),
+      el('div', { class: 'fold' }, m.text.split('\n').find((l) => l.trim()) || ''),
+      isAnswer ? el('div', { class: 'mact' },
+        iconBtn(SVG.copy, '复制回答', () => copyText(m.text), { act: 'copy' }),
+        iconBtn(m.favorite ? SVG.starOn : SVG.star, m.favorite ? '取消收藏' : '收藏回答', () => toggleFavorite(state.selected, id), { on: m.favorite, act: 'favorite' }),
+        src.regenerate ? iconBtn(SVG.redo, regenTip, () => regenerateAnswer(ai, answers.length), { disabled: !canRegen || streaming, act: 'regenerate' }) : null,
+        iconBtn(collapsed ? SVG.unfold : SVG.fold, collapsed ? '展开回答' : '折叠回答', () => {
+          collapsed ? state.collapsed.delete(id) : state.collapsed.add(id);
+          renderDetail();
+        }, { act: 'fold' })
+      ) : null);
+  }) : [el('div', { class: 'empty' }, '暂无消息')]));
   if (scrollToEnd && nearBottom) body.scrollTop = body.scrollHeight;
+}
+
+function regenerateAnswer(index, total) {
+  const id = state.selected;
+  if (!id) return;
+  if (!sendCommand(id, 'regenerate', null, { extra: { answer_index: index, answer_total: total } })) snackbar('实时连接未建立，无法重新回答', 'err');
+}
+
+// ------------------------------------------------------------------ 详情：快速回复
+
+function renderComposer() {
+  const c = convById(state.selected);
+  const busy = convBusy(state.selected);
+  const ok = canControlConv(c);
+  $('composer').classList.toggle('open', state.composerOpen);
+  $('detailQuick').classList.toggle('on', state.composerOpen);
+  $('detailQuick').setAttribute('aria-pressed', String(state.composerOpen));
+  $('quickSend').disabled = !ok || busy;
+  $('quickSend').textContent = busy ? '发送中…' : '发送';
+  $('quickHint').textContent = !c ? '' : !ok ? '需要有标签页开着这个会话' : c.status === 'generating' ? '正在回答中，发送会被拒绝' : '在开着这个会话的标签页里发送';
+}
+
+function toggleComposer(open = !state.composerOpen) {
+  state.composerOpen = open;
+  renderComposer();
+  if (open) { $('quickText').focus(); openCands(); } else closeCands();
+}
+
+function candidates() {
+  const q = $('quickText').value.trim().toLowerCase();
+  const list = settings.quickReplies.filter((t) => t && t.trim());
+  if (!q) return list;
+  return list.filter((t) => t.toLowerCase().includes(q) && t.trim().toLowerCase() !== q);
+}
+
+function openCands() {
+  const list = candidates();
+  const box = $('quickCands');
+  if (!list.length) { closeCands(); return; }
+  if (state.candIndex >= list.length) state.candIndex = list.length - 1;
+  box.replaceChildren(el('div', { class: 'ch' }, '常见回答（↑↓ 选择，Enter 填入，Esc 关闭）'),
+    ...list.map((t, i) => el('button', {
+      class: `cand ${i === state.candIndex ? 'on' : ''}`, role: 'option', title: t, type: 'button',
+      onmousedown: (e) => e.preventDefault(),   // 不让输入框失焦
+      onclick: () => pickCand(t)
+    }, t)));
+  box.classList.add('open');
+}
+function closeCands() { $('quickCands').classList.remove('open'); state.candIndex = -1; }
+function pickCand(t) {
+  const ta = $('quickText');
+  ta.value = t;
+  state.drafts.set(state.selected, t);
+  closeCands();
+  ta.focus();
+  ta.setSelectionRange?.(t.length, t.length);
+}
+
+function sendQuick() {
+  const id = state.selected;
+  const text = $('quickText').value.trim();
+  if (!id) return;
+  if (!text) return snackbar('回复内容不能为空', 'err');
+  closeCands();
+  if (!sendCommand(id, 'reply', text)) snackbar('实时连接未建立，无法发送', 'err');
+}
+
+// ------------------------------------------------------------------ 设置：常见回答
+
+function saveQuickReplies() { save('quickReplies', settings.quickReplies); }
+
+function renderQuickReplySettings() {
+  const list = settings.quickReplies;
+  $('qrList').replaceChildren(...(list.length ? list.map((t, i) => {
+    const input = el('input', { class: 'input', maxlength: '2000', 'aria-label': `常见回答 ${i + 1}` });
+    input.value = t;
+    input.addEventListener('change', () => {
+      const v = input.value.trim();
+      if (v) settings.quickReplies[i] = v; else settings.quickReplies.splice(i, 1);
+      saveQuickReplies();
+      renderQuickReplySettings();
+    });
+    const move = (d) => {
+      const j = i + d;
+      [list[i], list[j]] = [list[j], list[i]];
+      saveQuickReplies();
+      renderQuickReplySettings();
+    };
+    return el('div', { class: 'qr-item' }, input,
+      el('button', { class: 'icon-btn', title: '上移', html: SVG.up, disabled: i === 0, onclick: () => move(-1) }),
+      el('button', { class: 'icon-btn', title: '下移', html: SVG.down, disabled: i === list.length - 1, onclick: () => move(1) }),
+      el('button', { class: 'icon-btn', title: '删除', html: SVG.del, onclick: () => { list.splice(i, 1); saveQuickReplies(); renderQuickReplySettings(); } }));
+  }) : [el('div', { class: 'lbl' }, '还没有常见回答')]));
+}
+
+function addQuickReply() {
+  const v = $('qrNew').value.trim();
+  if (!v) return;
+  if (settings.quickReplies.includes(v)) { snackbar('已经有这条了', 'err'); return; }
+  settings.quickReplies.push(v);
+  saveQuickReplies();
+  $('qrNew').value = '';
+  renderQuickReplySettings();
 }
 
 // ------------------------------------------------------------------ 设置
@@ -623,6 +818,7 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
 function openSettings() {
   $('token').value = settings.token;
   renderNotifySettings();
+  renderQuickReplySettings();
   applyTheme();
   $('settingsScrim').classList.add('open');
   loadServerInfo();
@@ -677,11 +873,45 @@ $('sort').value = state.sort;
 $('sort').addEventListener('change', (e) => { state.sort = e.target.value; save('sort', state.sort); render(); });
 $('detailClose').onclick = closeDetail;
 $('detailScrim').addEventListener('click', (e) => { if (e.target === $('detailScrim')) closeDetail(); });
-$('detailCopy').onclick = () => state.selected && copyAnswer(state.selected);
 $('detailJump').onclick = () => { const c = convById(state.selected); if (c) jumpTo(c); };
+$('detailQuick').onclick = () => toggleComposer();
+$('quickCancel').onclick = () => toggleComposer(false);
+$('quickSend').onclick = sendQuick;
+const qt = $('quickText');
+qt.addEventListener('input', () => { state.drafts.set(state.selected, qt.value); state.candIndex = -1; openCands(); });
+qt.addEventListener('focus', openCands);
+qt.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== qt) closeCands(); }, 150));
+qt.addEventListener('keydown', (e) => {
+  const open = $('quickCands').classList.contains('open');
+  const list = open ? candidates() : [];
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendQuick(); return; }
+  if (open && list.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    e.preventDefault();
+    state.candIndex = (state.candIndex + (e.key === 'ArrowDown' ? 1 : -1) + list.length) % list.length;
+    openCands();
+  } else if (open && e.key === 'Enter' && state.candIndex >= 0 && list[state.candIndex]) {
+    e.preventDefault();
+    pickCand(list[state.candIndex]);
+  } else if (e.key === 'Escape' && open) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeCands();
+  }
+});
+$('alertClose').onclick = closePopup;
+$('alertOpen').onclick = () => { const id = state.alertConv; closePopup(); if (id) openDetail(id); };
+$('alertScrim').addEventListener('click', (e) => { if (e.target === $('alertScrim')) closePopup(); });
+$('soundTest').onclick = () => { if (!playSound(false)) snackbar('当前浏览器不支持音效', 'err'); };
+$('popupTest').onclick = () => { playSound(true); showPopup(null, '置顶会话回答完成', '这是一个测试弹窗'); };
+$('qrAdd').onclick = addQuickReply;
+$('qrNew').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addQuickReply(); } });
+$('qrReset').onclick = () => { settings.quickReplies = [...DEFAULT_QUICK_REPLIES]; saveQuickReplies(); renderQuickReplySettings(); };
+// 浏览器要求用户操作后才能播放声音：第一次点击时解锁
+document.addEventListener('pointerdown', unlockAudio, { once: true });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  if ($('settingsScrim').classList.contains('open')) closeSettings();
+  if ($('alertScrim').classList.contains('open')) closePopup();
+  else if ($('settingsScrim').classList.contains('open')) closeSettings();
   else if (state.selected) closeDetail();
 });
 

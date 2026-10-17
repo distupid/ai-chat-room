@@ -48,6 +48,15 @@ export function openDatabase(dbPath = ':memory:') {
       updated_at      INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS favorites (
+      conversation_id TEXT NOT NULL,
+      message_id      TEXT NOT NULL,
+      role            TEXT,
+      text            TEXT NOT NULL,
+      created_at      INTEGER NOT NULL,
+      PRIMARY KEY (conversation_id, message_id)
+    );
+
     CREATE TABLE IF NOT EXISTS conversations (
       conversation_id TEXT PRIMARY KEY,
       first_seen_at   INTEGER NOT NULL,
@@ -55,6 +64,16 @@ export function openDatabase(dbPath = ':memory:') {
       last_url        TEXT
     );
   `);
+
+  // 幂等迁移：conversation_marks 增加 置顶 / 归档 列；旧的“标记完成”(done) 迁移为归档
+  const markCols = new Set(db.prepare('PRAGMA table_info(conversation_marks)').all().map((c) => c.name));
+  const addCol = (name, ddl) => { if (!markCols.has(name)) db.exec(`ALTER TABLE conversation_marks ADD COLUMN ${name} ${ddl}`); };
+  const hadArchived = markCols.has('archived');
+  addCol('archived', 'INTEGER NOT NULL DEFAULT 0');
+  addCol('archived_at', 'INTEGER');
+  addCol('pinned', 'INTEGER NOT NULL DEFAULT 0');
+  addCol('pinned_at', 'INTEGER');
+  if (!hadArchived) db.exec('UPDATE conversation_marks SET archived = done, archived_at = done_at WHERE done = 1');
 
   const insertEvent = db.prepare(`
     INSERT INTO events (event_id, client_id, event_type, conversation_id, tab_id, occurred_at, received_at, payload_json)
@@ -140,12 +159,24 @@ export function openDatabase(dbPath = ':memory:') {
       (SELECT COUNT(*) FROM events e WHERE e.conversation_id = c.conversation_id AND event_type = 'generation.finished') AS generation_count,
       (SELECT json_extract(payload_json, '$.duration_ms') FROM events e WHERE e.conversation_id = c.conversation_id
          AND event_type = 'generation.finished' ORDER BY seq DESC LIMIT 1) AS last_duration_ms,
-      mk.done AS done, mk.done_at AS done_at
+      (SELECT COUNT(*) FROM favorites f WHERE f.conversation_id = c.conversation_id) AS favorite_count,
+      mk.archived AS archived, mk.archived_at AS archived_at, mk.pinned AS pinned, mk.pinned_at AS pinned_at
     FROM conversations c LEFT JOIN conversation_marks mk ON mk.conversation_id = c.conversation_id
     ORDER BY c.last_seen_at DESC LIMIT ?`);
-  const setMarkStmt = db.prepare(`
-    INSERT INTO conversation_marks (conversation_id, done, done_at, updated_at) VALUES (?, ?, ?, ?)
-    ON CONFLICT(conversation_id) DO UPDATE SET done = excluded.done, done_at = excluded.done_at, updated_at = excluded.updated_at`);
+  const ensureMarkStmt = db.prepare(`
+    INSERT INTO conversation_marks (conversation_id, updated_at) VALUES (?, ?) ON CONFLICT(conversation_id) DO NOTHING`);
+  const setArchivedStmt = db.prepare(`
+    UPDATE conversation_marks SET archived = ?, archived_at = ?, done = ?, done_at = ?, updated_at = ? WHERE conversation_id = ?`);
+  const setPinnedStmt = db.prepare(`
+    UPDATE conversation_marks SET pinned = ?, pinned_at = ?, updated_at = ? WHERE conversation_id = ?`);
+  const addFavoriteStmt = db.prepare(`
+    INSERT INTO favorites (conversation_id, message_id, role, text, created_at)
+    SELECT conversation_id, message_id, role, text, ? FROM messages WHERE conversation_id = ? AND message_id = ?
+    ON CONFLICT(conversation_id, message_id) DO UPDATE SET text = excluded.text`);
+  const removeFavoriteStmt = db.prepare('DELETE FROM favorites WHERE conversation_id = ? AND message_id = ?');
+  const favoriteIdsStmt = db.prepare('SELECT message_id FROM favorites WHERE conversation_id = ?');
+  const listFavoritesStmt = db.prepare(`
+    SELECT conversation_id, message_id, role, text, created_at FROM favorites ORDER BY created_at DESC LIMIT ?`);
   // 每个标签页（client_id + tab_id）最近一次页面级事件：用来算“当前有几个标签页开着这个会话”
   const latestTabEventsStmt = db.prepare(`
     SELECT e.conversation_id, e.event_type, e.received_at, e.client_id, e.tab_id, e.seq FROM events e
@@ -190,13 +221,31 @@ export function openDatabase(dbPath = ':memory:') {
         .sort((a, b) => Number(b.seq) - Number(a.seq))
         .map((t) => ({ client_id: t.client_id, tab_id: Number(t.tab_id) }));
     },
-    /** 标记完成 / 取消标记 */
-    setDone(conversationId, done, now = Date.now()) {
-      setMarkStmt.run(conversationId, done ? 1 : 0, done ? now : null, now);
+    /** 归档 / 取消归档（旧接口 done 视为归档） */
+    setArchived(conversationId, archived, now = Date.now()) {
+      ensureMarkStmt.run(conversationId, now);
+      const v = archived ? 1 : 0;
+      const at = archived ? now : null;
+      setArchivedStmt.run(v, at, v, at, now, conversationId);
+    },
+    setDone(conversationId, done, now = Date.now()) { this.setArchived(conversationId, done, now); },
+    /** 置顶 / 取消置顶 */
+    setPinned(conversationId, pinned, now = Date.now()) {
+      ensureMarkStmt.run(conversationId, now);
+      setPinnedStmt.run(pinned ? 1 : 0, pinned ? now : null, now, conversationId);
+    },
+    /** 收藏回答（保存当时的正文快照）；消息不存在返回 false */
+    setFavorite(conversationId, messageId, favorite, now = Date.now()) {
+      if (!favorite) { removeFavoriteStmt.run(conversationId, messageId); return true; }
+      return addFavoriteStmt.run(now, conversationId, messageId).changes > 0;
+    },
+    listFavorites(limit = 200) {
+      return listFavoritesStmt.all(limit).map((r) => ({ ...r }));
     },
     /** 看板：某个会话的当前消息（每条消息的最新版本） */
     listMessages(conversationId) {
-      return listMessagesStmt.all(conversationId).map((r) => ({ ...r, updated_seq: Number(r.updated_seq) }));
+      const fav = new Set(favoriteIdsStmt.all(conversationId).map((r) => r.message_id));
+      return listMessagesStmt.all(conversationId).map((r) => ({ ...r, updated_seq: Number(r.updated_seq), favorite: fav.has(r.message_id) }));
     },
     /** 看板：某个会话最近的事件（不含正文，只保留长度） */
     recentEvents(conversationId, limit = 100) {
@@ -285,9 +334,12 @@ function deriveConversation(r, openTabs) {
     event_count: Number(r.event_count),
     first_seen_at: r.first_seen_at,
     last_seen_at: r.last_seen_at,
-    done: !!r.done,
-    done_at: r.done_at ?? null,
-    // 标记完成之后又有新动态（新消息、新状态）
-    activity_after_done: !!r.done && r.done_at != null && r.last_seen_at > r.done_at
+    favorite_count: Number(r.favorite_count || 0),
+    pinned: !!r.pinned,
+    pinned_at: r.pinned_at ?? null,
+    archived: !!r.archived,
+    archived_at: r.archived_at ?? null,
+    // 归档之后又有新动态（新消息、新状态）
+    activity_after_archive: !!r.archived && r.archived_at != null && r.last_seen_at > r.archived_at
   };
 }

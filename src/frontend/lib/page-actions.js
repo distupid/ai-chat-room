@@ -1,7 +1,7 @@
 /*
  * 页面操作（经典脚本，内容脚本中运行）：执行看板下发的指令。
  *   reply      在输入框中填入文字并发送
- *   regenerate 点击最后一条回答的“重新生成”
+ *   regenerate 点击某条回答的“重新生成”（answer_index 不填 = 最后一条）
  * 选择器可由 DomConfig.actions 覆盖；默认值按 2026-10 实测的 ChatGPT 页面编写，同时兼容旧版。
  */
 (function (global) {
@@ -129,7 +129,18 @@
 
     if (command.action === 'regenerate') {
       if (!sel.regenerate_button) return { ok: false, code: 'regenerate_unsupported', detail: '这个站点没有“重新生成”按钮' };
-      var rb = last(doc.querySelectorAll(sel.regenerate_button));
+      var buttons = doc.querySelectorAll(sel.regenerate_button);
+      var rb = null;
+      var idx = command.answer_index;
+      var total = command.answer_total;
+      if (idx == null || (total != null && idx === total - 1)) {
+        rb = last(buttons);
+      } else if (total != null && buttons.length === total && idx >= 0 && idx < total) {
+        // 页面上每条回答各有一个“重新生成”按钮，按顺序对上
+        rb = buttons[idx];
+      } else {
+        return { ok: false, code: 'regenerate_target_not_found', detail: '页面上的回答和看板对不上，无法定位这条回答的“重新生成”' };
+      }
       if (!rb) return { ok: false, code: 'regenerate_not_found', detail: '没找到“重新生成”按钮' };
       rb.click();
       var started = await waitUntil(win, function () { return ctx.isGenerating(); }, 600, 50);
