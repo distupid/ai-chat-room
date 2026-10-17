@@ -215,7 +215,9 @@ export function openDatabase(dbPath = ':memory:') {
       }
       // 源站已删除的会话（最近一次 conversation.status 为 deleted）不再跟踪；之后若再上报 ok 会自动恢复
       return listConversationsStmt.all(limit).map((r) => deriveConversation(r, openTabs.get(r.conversation_id) || 0))
-        .filter((c) => c.page_status !== 'deleted');
+        .filter((c) => c.page_status !== 'deleted')
+        // 标签页会话（页面开着但还没进入具体会话）：页面关掉 / 进入真正的会话后就不再显示
+        .filter((c) => !(c.pending && c.open_tabs === 0));
     },
     /** 某个插件每个标签页最近一次页面级事件（含已关闭），用于和插件上报的真实标签页对账 */
     tabStatesForClient(clientId) {
@@ -322,6 +324,7 @@ function deriveConversation(r, openTabs) {
   else status = 'idle';
   return {
     conversation_id: r.conversation_id,
+    pending: String(r.conversation_id).startsWith('tab-'),   // 标签页会话：开着网站但还没有具体会话
     source: st?.source || sourceFromUrl(r.last_url),
     title: r.title || null,
     url: r.last_url,

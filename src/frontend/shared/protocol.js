@@ -175,7 +175,8 @@ export const EVENT_PAYLOAD_SCHEMAS = Object.freeze({
         host: { type: 'string', maxLength: 255 },
         conversation_id: NULLABLE_STR(128),   // 内容脚本报告的当前会话；没有内容脚本 / 不在会话里为 null
         url: URL_STR,
-        title: { type: 'string', maxLength: 512 }
+        title: { type: 'string', maxLength: 512 },
+        active: { type: 'boolean' }            // 是否是所在窗口当前显示的标签页（看板高亮对应卡片）
       }, ['tab_id', 'host', 'conversation_id'])
     }
   }),

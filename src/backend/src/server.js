@@ -590,7 +590,12 @@ export function createBridgeServer(opts = {}) {
     }));
     if (result.duplicate) { counters.events_duplicate++; return; }
     counters.events_persisted++;
-    if (ev.event_type === EventType.TABS_SNAPSHOT) return reconcileTabs(conn, ev.payload.tabs || []);
+    if (ev.event_type === EventType.TABS_SNAPSHOT) {
+      reconcileTabs(conn, ev.payload.tabs || []);
+      // 只把“哪个标签页在哪个会话、是否是窗口当前标签页”广播给看板（用于高亮对应卡片），不带网址和标题
+      const slim = { ...ev, payload: { tabs: (ev.payload.tabs || []).map((t) => ({ tab_id: t.tab_id, host: t.host, conversation_id: t.conversation_id, active: !!t.active })) } };
+      return broadcastStored(conn, slim, result.seq);
+    }
     broadcastStored(conn, ev, result.seq);
   }
 

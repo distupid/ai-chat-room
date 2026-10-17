@@ -77,7 +77,8 @@ const state = {
   messages: new Map(),
   streaming: new Set(),
   collapsed: new Set(),
-  stickBottom: true,     // 详情是否跟随到底部（最后一个回复）
+  stickBottom: true,
+  activeTabs: new Map(),  // 插件 client_id → 各窗口当前显示的会话     // 详情是否跟随到底部（最后一个回复）
   longOpen: new Set(),   // 超长消息：用户手动展开了全文的 message_id
   composerOpen: false,
   candIndex: -1,
@@ -141,6 +142,7 @@ async function api(path, opts = {}) {
 }
 
 function titleOf(c) {
+  if (c.pending) return `新对话 · ${sourceInfo(c.source).label}`;
   const t = (c.title || '').replace(/\s*[-|·]\s*(ChatGPT|Hark|Duck\.ai|DuckDuckGo)\s*$/i, '').trim();
   if (t && !/^(ChatGPT|Hark|Duck\.ai|聊天)$/i.test(t) && !/^Duck\.ai 是由/.test(t)) return t;
   if (c.first_user_text) return c.first_user_text.split('\n')[0].slice(0, 120);
@@ -499,7 +501,20 @@ function connect() {
   };
 }
 
+/** 双向绑定：浏览器里每个窗口当前显示的标签页 → 对应卡片高亮（来自插件 tabs.snapshot） */
+function activeConvs() {
+  const s = new Set();
+  for (const set of state.activeTabs.values()) for (const id of set) s.add(id);
+  return s;
+}
+
 function onBroadcast(b) {
+  if (b.event_type === 'tabs.snapshot') {
+    const set = new Set((b.payload.tabs || []).filter((t) => t.active && t.conversation_id).map((t) => t.conversation_id));
+    state.activeTabs.set(b.origin_client_id || 'ext', set);
+    for (const n of document.querySelectorAll('.card[data-conv]')) n.classList.toggle('active-page', activeConvs().has(n.dataset.conv));
+    return;
+  }
   const conv = b.conversation_id;
   const c = convById(conv);
   const name = c ? titleOf(c) : conv;
@@ -579,9 +594,15 @@ function renderChips() {
   const group = (items, cls = '') => items.length ? el('div', { class: `cg ${cls}` }, ...items) : null;
   const statusChips = STATUS_FILTERS.filter(([k]) => !['all', 'favorite'].includes(k))
     .map(([key, label]) => chip(state.filter === key, label, counts[key] || 0, pick(key)));
+  // 来源筛选上显示当前开着的标签页数量
+  const tabsOf = (key) => state.conversations.filter((c) => key === 'all' || c.source === key).reduce((n, c) => n + (c.open_tabs || 0), 0);
   const sourceChips = sources.length > 1
     ? [['all', '全部来源'], ...sources.map((x) => [x, sourceInfo(x).label])]
-      .map(([key, label]) => chip(state.source === key, label, null, () => { state.source = key; save('source', key); render(); }))
+      .map(([key, label]) => {
+        const b = chip(state.source === key, label, tabsOf(key), () => { state.source = key; save('source', key); render(); });
+        b.title = `${label}：${tabsOf(key)} 个标签页开着`;
+        return b;
+      })
     : [];
   const groups = [group(statusChips), group(sourceChips)].filter(Boolean);
   $('chips').replaceChildren(...groups.flatMap((g, i) => i ? [el('span', { class: 'sep' }), g] : [g]));
@@ -600,11 +621,9 @@ function card(c) {
   const stop = (fn) => (e) => { e.stopPropagation(); fn(e); };
   const offlineTip = c.open_tabs ? '' : '需要有标签页开着这个会话';
 
-  const notice = c.status_detail && (c.page_status === 'limit_reached' || c.page_status === 'error')
-    ? el('div', { class: `notice ${c.page_status === 'error' ? 'err' : ''}` }, c.status_detail) : null;
 
   const node = el('article', {
-    class: `card s-${c.status} src-${avatarClass(c.source)} ${c.pinned ? 'pinned' : ''}`,
+    class: `card s-${c.status} src-${avatarClass(c.source)} ${c.pinned ? 'pinned' : ''} ${activeConvs().has(id) ? 'active-page' : ''}`,
     'data-conv': id, tabindex: '0', role: 'button', title: c.status === 'closed' ? '页面已关：点击重新打开并跳转' : '点击查看详情',
     onclick: () => activateCard(c),
     onkeydown: (e) => { if (e.target === node && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); activateCard(c); } }
@@ -624,11 +643,9 @@ function card(c) {
     ),
     el('div', { class: 'tags' },
       el('span', { class: 'tag' }, `${c.user_count} 问 · ${c.assistant_count} 答`),
-      el('span', { class: 'tag' }, `${c.open_tabs} 个标签页`),
       c.last_duration_ms != null ? el('span', { class: 'tag' }, `上次回答 ${duration(c.last_duration_ms)}`) : null,
       c.favorite_count ? el('span', { class: 'tag' }, `${c.favorite_count} 条收藏`) : null,
     ),
-    notice,
     c.last_message ? el('div', { class: 'preview' },
       el('b', {}, c.last_message.role === 'user' ? '我：' : `${src.label}：`), c.last_message.text) : null,
     el('div', { class: 'actions' },
@@ -667,7 +684,7 @@ function closePage(c) {
 async function launchAll() {
   try {
     const r = await api('/api/sites/launch', { method: 'POST', body: '{}' });
-    snackbar(`正在后台打开 ${r.count} 个网站`, 'ok');
+    snackbar(`正在后台打开还没开着的网站（列表共 ${r.count} 个）`, 'ok');
   } catch (e) { snackbar(`一键启动失败：${e.message}`, 'err'); }
 }
 
@@ -931,7 +948,6 @@ function renderDetailHead() {
     c.model ? el('span', {}, c.model) : null,
     el('span', {}, `${c.message_count} 条消息`),
     el('span', {}, ago(c.last_seen_at)),
-    c.status_detail && c.page_status !== 'ok' ? el('span', {}, c.status_detail) : null
   );
 }
 

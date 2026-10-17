@@ -211,8 +211,12 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 ## 页面真实状态对账（tabs.snapshot）
 
 插件定期（连上 / 重连、标签页关闭或跳转、每 30 秒检查，内容不变时最多 5 分钟一次）上报 `tabs.snapshot`：
-`{ tabs: [{ tab_id, host, conversation_id, url?, title? }] }`，来自 `chrome.tabs.query({})`（包含 PWA / app / 弹出窗口），`conversation_id` 由内容脚本 `page_info` 回答。
+`{ tabs: [{ tab_id, host, conversation_id, url?, title?, active? }] }`，来自 `chrome.tabs.query({})`（包含 PWA / app / 弹出窗口），`conversation_id` 由内容脚本 `page_info` 回答。
 后端持久化快照但不广播，并对该插件的标签页对账：
 - 后端认为开着、快照里没有，或 host / 会话已变 → 补 `page.closed`（`reason: "reconciled"`）
 - 快照里开着某会话、后端认为已关闭 / 不存在 / 在别的会话 → 补 `page.opened`
 补出的事件和普通事件一样广播，看板实时更新“N 个标签页 / 页面已关”。
+
+补充：
+- 还没进入具体会话的支持网站标签页，`conversation_id` 为 `tab-<client>-<tabId>`（标签页会话），列表返回 `pending: true`；页面关掉后不再出现在列表里。
+- 后端把快照精简为 `{tab_id, host, conversation_id, active}` 广播给订阅 `*` 的看板，用于高亮浏览器窗口当前显示的会话卡片。

@@ -654,6 +654,9 @@
                         "title": {
                           "type": "string",
                           "maxLength": 512
+                        },
+                        "active": {
+                          "type": "boolean"
                         }
                       }
                     }
@@ -1366,6 +1369,9 @@
                         "title": {
                           "type": "string",
                           "maxLength": 512
+                        },
+                        "active": {
+                          "type": "boolean"
                         }
                       }
                     }

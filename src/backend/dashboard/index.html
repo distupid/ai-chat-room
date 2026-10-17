@@ -105,13 +105,12 @@
     .empty { grid-column: 1 / -1; text-align: center; color: var(--on-surface-variant); padding: 64px 16px; }
 
     /* 会话卡片（filled card，可点击） */
-    .card { background: var(--surface-container-low); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 10px; cursor: pointer; position: relative; outline: none; transition: box-shadow .15s, background .15s; border-left: 4px solid var(--st-closed); }
+    .card { background: var(--surface-container-low); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 10px; cursor: pointer; position: relative; outline: none; transition: box-shadow .15s, background .15s; }
+    /* 双向绑定：浏览器窗口里正显示着这个会话 */
+    .card.active-page { box-shadow: 0 0 0 2px var(--primary); }
     .card:hover { box-shadow: var(--elev-1); background: var(--surface-container); }
+    .card.active-page:hover { box-shadow: 0 0 0 2px var(--primary), var(--elev-1); }
     .card:focus-visible { outline: 2px solid var(--primary); }
-    .card.s-generating { border-left-color: var(--st-generating); }
-    .card.s-limit_reached { border-left-color: var(--st-limit); }
-    .card.s-error { border-left-color: var(--st-error); }
-    .card.s-idle { border-left-color: transparent; }
     .card { --src: var(--tertiary-container); }
     .card.src-chatgpt { --src: #10A37F; } .card.src-duckai { --src: #DE5833; } .card.src-hark { --src: var(--primary); }
     .card.s-idle { background: color-mix(in srgb, var(--src) 12%, var(--surface-container-low)); }
@@ -136,12 +135,12 @@
     .tags { display: flex; gap: 6px; flex-wrap: wrap; }
     .tag { height: 22px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--outline-variant); font-size: 11px; display: inline-flex; align-items: center; color: var(--on-surface-variant); }
     .tag.warn { border-color: var(--error); color: var(--error); }
-    .notice { font-size: 13px; border-radius: 8px; padding: 8px 12px; background: var(--st-limit-bg); color: var(--st-limit); }
-    .notice.err { background: var(--st-error-bg); color: var(--st-error); }
     .preview { font-size: 13px; color: var(--on-surface-variant); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; white-space: pre-wrap; word-break: break-word; }
     .preview b { color: var(--on-surface); font-weight: 500; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .card .actions { margin-top: auto; padding-top: 4px; }
+    .card .actions { margin-top: auto; padding-top: 4px; flex-wrap: nowrap; gap: 6px; }
+    /* 四个按钮保持同一行：平分宽度，文字放不下时省略 */
+    .card .actions .btn { flex: 1 1 0; min-width: 0; padding: 0 8px; justify-content: center; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     /* 卡片：向下弹出的快速回复栏 */
     .creply { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; cursor: default; }
     .creply .field { min-height: 56px; background: var(--surface-container-lowest); }

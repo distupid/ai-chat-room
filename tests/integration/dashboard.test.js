@@ -347,6 +347,11 @@ test('页面真实状态对账：插件上报 tabs.snapshot，后端补 page.clo
   await sendAndAck(ext, snap([{ tab_id: 9, host: 'chatgpt.com', conversation_id: CONV, url: CONV_URL, title: '对账' }]));
   c = (await list()).find((x) => x.conversation_id === CONV);
   assert.equal(c.open_tabs, 1);
+  // 首页（还没进入会话）的标签页会话：开着时有卡片，标签页关掉后从列表消失
+  await sendAndAck(ext, ev('page.opened', { url: 'https://chatgpt.com/', title: 'ChatGPT' }, { conv: 'tab-sync0001-11', tab: 11 }));
+  assert.ok((await list()).find((x) => x.conversation_id === 'tab-sync0001-11')?.pending);
+  await sendAndAck(ext, ev('page.closed', { url: 'https://chatgpt.com/', reason: 'navigated' }, { conv: 'tab-sync0001-11', tab: 11 }));
+  assert.ok(!(await list()).find((x) => x.conversation_id === 'tab-sync0001-11'));
   // 同样的快照再来一次不重复补
   await sendAndAck(ext, snap([{ tab_id: 9, host: 'chatgpt.com', conversation_id: CONV, url: CONV_URL, title: '对账' }]));
   const evs = (await (await get(server, `/api/conversations/${CONV}/events?limit=50`, TOKENS.observer)).json()).events;
@@ -381,6 +386,9 @@ test('源站删除会话：页面没有消息且显示“找不到对话”→ �
   assert.ok(bg.tabs.has(42));
   assert.equal(bg.syncTabs([{ tab_id: 1, host: 'example.com', conversation_id: null }]), 'offline');
   assert.ok(!bg.tabs.has(42));
+  // 开着网站但还没进入会话：用标签页会话 ID，看板也会建卡片
+  bg.handleRuntimeMessage({ kind: 'page_event', event: { event_id: 'pageopen-x2', event_type: 'page.opened', occurred_at: Date.now(), conversation_id: null, payload: { url: 'https://chatgpt.com/', title: 'ChatGPT' } } }, { tab: { id: 50 } });
+  assert.match(bg.tabs.get(50).conversation_id, /^tab-[A-Za-z0-9_-]+-50$/);
   assert.equal(bg.handleRuntimeMessage({ kind: 'page_event', event: { event_id: 'snapshot-x1', event_type: 'tabs.snapshot', occurred_at: Date.now(), conversation_id: null, payload: { tabs: [] } } }, { tab: { id: 1 } }).ok, false);
 
   // 后端：deleted 之后列表里没有它；再上报 ok（误判）会恢复
@@ -662,7 +670,14 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   // 实时：状态变为“已到限额”
   await sendAndAck(ext, ev('conversation.status', { source: 'chatgpt', status: 'limit_reached', detail: '已达到使用上限', model: null }));
   await waitFor(() => d.querySelector(`${cardSel} .badge`)?.textContent === '已到限额', { label: 'limit badge' });
-  assert.match(d.querySelector(`${cardSel} .notice`).textContent, /已达到使用上限/);
+  assert.ok(!d.querySelector(`${cardSel} .notice`), '卡片不再显示限额提示文字');
+  assert.ok(![...d.querySelectorAll(`${cardSel} .tag`)].some((t) => /标签页/.test(t.textContent)), '卡片不显示标签页数量');
+  assert.deepEqual([...d.querySelectorAll(`${cardSel} .actions > button`)].map((b) => b.textContent), ['已置顶', '复制', '关闭', '回复']);
+
+  // 双向绑定：插件报告浏览器窗口正显示这个会话 → 卡片高亮
+  await sendAndAck(ext, makeEnvelope('event', { event_id: `t:snap:${Date.now().toString(36)}:${++evSeq}`, event_type: 'tabs.snapshot', occurred_at: Date.now(), conversation_id: null, tab_id: null,
+    payload: { tabs: [{ tab_id: 1, host: 'chatgpt.com', conversation_id: CONV, url: CONV_URL, title: 't', active: true }] } }));
+  await waitFor(() => d.querySelector(cardSel)?.classList.contains('active-page'), { label: 'active page highlight' });
 
   // 收藏图标：只看有收藏的会话，再点返回
   d.getElementById('favBtn').click();

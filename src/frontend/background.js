@@ -61,7 +61,9 @@ function waitTabComplete(tabId, timeoutMs) {
     const done = () => { clearTimeout(t); chrome.tabs.onUpdated.removeListener(on); resolve(); };
     const on = (id, info) => { if (id === tabId && info.status === 'complete') done(); };
     const t = setTimeout(done, timeoutMs);
-    chrome.tabs.onUpdated.addListener(on);
+    chrome.tabs.onActivated.addListener(() => { ready.then((bg) => syncTabsNow(bg)); });
+chrome.windows?.onFocusChanged?.addListener(() => { ready.then((bg) => syncTabsNow(bg)); });
+chrome.tabs.onUpdated.addListener(on);
     chrome.tabs.get(tabId).then((tab) => { if (tab.status === 'complete') done(); }, done);
   });
 }
@@ -141,14 +143,21 @@ async function closeConversationTabs(tabId, command) {
   return n ? { ok: true, detail: `已关闭 ${n} 个标签页` } : { ok: false, code: 'tab_unreachable', detail: '没有找到可关闭的标签页' };
 }
 
-/** 一键启动：在后台（不抢焦点）打开网站列表里的每个网址 */
+/** 一键启动：在后台（不抢焦点）打开网站列表里还没开着的网址（按域名判断，包含 PWA / app 窗口） */
 async function openSites(text) {
   const urls = String(text || '').split('\n').map((u) => u.trim()).filter((u) => /^https:\/\/[^\s]+$/.test(u)).slice(0, 50);
+  const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ''; } };
+  let openHosts = new Set();
+  try { openHosts = new Set((await chrome.tabs.query({})).map((t) => hostOf(t.url || t.pendingUrl || '')).filter(Boolean)); } catch { /* ignore */ }
   let n = 0;
+  let skipped = 0;
   for (const url of urls) {
-    try { await chrome.tabs.create({ url, active: false }); n++; } catch { /* 单个失败不影响其他 */ }
+    const h = hostOf(url);
+    if (openHosts.has(h)) { skipped++; continue; }
+    try { await chrome.tabs.create({ url, active: false }); n++; openHosts.add(h); } catch { /* 单个失败不影响其他 */ }
   }
-  return { ok: n > 0, detail: `已在后台打开 ${n} 个网站` };
+  if (!n && !skipped) return { ok: false, code: 'tab_unreachable', detail: '没有可打开的网站' };
+  return { ok: true, detail: skipped ? `已在后台打开 ${n} 个网站，${skipped} 个已开着` : `已在后台打开 ${n} 个网站` };
 }
 
 const storage = {
@@ -219,16 +228,17 @@ function syncTabsNow(bg, force = false) {
       const all = await chrome.tabs.query({});
       const list = await Promise.all(all.filter((t) => t.id != null && /^https?:/.test(t.url || '')).map(async (t) => {
         let conversationId = null;
+        let supported = false;
         try {
           const r = await Promise.race([
             chrome.tabs.sendMessage(t.id, { kind: 'page_info' }),
             new Promise((res) => setTimeout(() => res(null), 800))
           ]);
-          if (r?.ok) conversationId = r.conversation_id || null;
+          if (r?.ok) { conversationId = r.conversation_id || null; supported = true; }
         } catch { /* 没有内容脚本的标签页 */ }
         let host = '';
         try { host = new URL(t.url).hostname; } catch { /* ignore */ }
-        return { tab_id: t.id, host, conversation_id: conversationId, url: t.url, title: t.title || '' };
+        return { tab_id: t.id, host, conversation_id: conversationId, supported, active: !!t.active, url: t.url, title: t.title || '' };
       }));
       bg.syncTabs(list, { force: f });
     } catch (e) { console.warn('[bridge] tab sync failed', e); }
