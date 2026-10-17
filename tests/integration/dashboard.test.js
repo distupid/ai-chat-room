@@ -614,11 +614,25 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   const cands = [...d.querySelectorAll('#quickCands .cand')].map((b) => b.textContent);
   assert.deepEqual(cands, ['帮我写单元测试'], '按输入过滤常见回答');
   ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  const repliesBefore = ext.of('command').filter((x) => x.action === 'reply').length;
   ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  assert.equal(ta.value, '帮我写单元测试');
-  assert.ok(!d.getElementById('quickCands').classList.contains('open'));
-  d.getElementById('quickSend').click();
+  // 选中常见回答 + Enter：直接发送，并关闭弹窗
+  assert.ok(!d.getElementById('detailScrim').classList.contains('open'), '发送后关闭弹窗');
+  await waitFor(() => ext.of('command').filter((x) => x.action === 'reply' && x.text === '帮我写单元测试').length > 0 && ext.of('command').filter((x) => x.action === 'reply').length > repliesBefore, { label: 'detail reply command', timeout: 6000 });
   await waitFor(() => /快速回复失败/.test(d.getElementById('snackbars').textContent), { label: 'reply toast', timeout: 6000 });
+
+  // 再次进入弹窗：输入框是空的；普通文字按 Enter 发送（Shift+Enter 不发送）
+  d.querySelector(cardSel).click();
+  await waitFor(() => d.getElementById('detailScrim').classList.contains('open'), { label: 'detail reopen' });
+  assert.equal(ta.value, '', '每次进入弹窗清空输入框');
+  ta.value = '手动输入';
+  ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
+  assert.ok(d.getElementById('detailScrim').classList.contains('open'), 'Shift+Enter 不发送');
+  ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  assert.ok(!d.getElementById('detailScrim').classList.contains('open'));
+  await waitFor(() => ext.of('command').some((x) => x.action === 'reply' && x.text === '手动输入'), { label: 'enter reply', timeout: 6000 });
+  d.querySelector(cardSel).click();
+  await waitFor(() => d.getElementById('detailScrim').classList.contains('open'), { label: 'detail reopen 2' });
 
   // 详情里跳转：有标签页 → focus；测试“插件”不执行 → 超时 → 新开页面
   d.getElementById('detailJump').click();
@@ -638,12 +652,21 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   const panel = await waitFor(() => d.querySelector(`${cardSel} .creply`), { label: 'card reply' });
   assert.ok(!d.getElementById('detailScrim').classList.contains('open'), '不会打开详情');
   assert.ok([...panel.querySelectorAll('.qr button')].some((b) => b.textContent === '帮我写单元测试'));
+  assert.ok(![...panel.querySelectorAll('button')].some((b) => b.textContent === '收起'), '没有收起按钮');
+  const cardBefore = ext.of('command').filter((x) => x.action === 'reply').length;
   [...panel.querySelectorAll('.qr button')].find((b) => b.textContent === '帮我写单元测试').click();
-  assert.equal(panel.querySelector('textarea').value, '帮我写单元测试');
-  panel.querySelector('[data-act="send"]').click();
-  await waitFor(() => ext.of('command').some((m) => m.action === 'reply' && m.text === '帮我写单元测试' && m.command_id !== undefined && ext.of('command').filter((x) => x.action === 'reply').length >= 2), { label: 'card reply command', timeout: 6000 });
-  replyBtn().click();
+  // 点常见回答直接发送，并自动收起
   await waitFor(() => !d.querySelector(`${cardSel} .creply`), { label: 'card reply closed' });
+  await waitFor(() => ext.of('command').filter((x) => x.action === 'reply').length > cardBefore, { label: 'card quick command', timeout: 6000 });
+  // 再展开：输入框为空；Enter 发送后收起
+  replyBtn().click();
+  const panel2 = await waitFor(() => d.querySelector(`${cardSel} .creply`), { label: 'card reply 2' });
+  const cta = panel2.querySelector('textarea');
+  assert.equal(cta.value, '');
+  cta.value = '卡片里输入';
+  cta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await waitFor(() => !d.querySelector(`${cardSel} .creply`), { label: 'card reply closed 2' });
+  await waitFor(() => ext.of('command').some((x) => x.action === 'reply' && x.text === '卡片里输入'), { label: 'card enter command', timeout: 6000 });
 
   // 通知等级：普通会话回答完成 → 音效，不弹窗
   await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 1 }));

@@ -298,7 +298,7 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
   state.streaming = new Set();
   state.longOpen = new Set();
   state.composerOpen = true;   // 点卡片打开详情时直接展开快速回复
-  $('quickText').value = state.drafts.get(conversationId) || '';
+  $('quickText').value = '';   // 每次进入弹窗清空输入框，避免把上次没发出去的文字发到别的会话
   closeCands();
   $('detailScrim').classList.add('open');
   renderDetailHead();
@@ -698,33 +698,36 @@ async function launchAll() {
 function toggleCardReply(id) {
   if (state.cardReply) state.drafts.set(state.cardReply, document.querySelector('.creply textarea')?.value ?? state.drafts.get(state.cardReply) ?? '');
   state.cardReply = state.cardReply === id ? null : id;
+  if (state.cardReply) state.drafts.delete(state.cardReply);   // 每次展开都从空白开始
   render();
   if (state.cardReply) document.querySelector('.creply textarea')?.focus();
 }
 
 function cardReplyPanel(c, online, busy) {
   const id = c.conversation_id;
-  const ta = el('textarea', { class: 'field', placeholder: '发到这个会话，Ctrl+Enter 发送', 'aria-label': '快速回复' });
-  ta.value = state.drafts.get(id) || '';
-  const send = () => {
-    const text = ta.value.trim();
+  const ta = el('textarea', { class: 'field', placeholder: '发到这个会话，Enter 发送，Shift+Enter 换行', 'aria-label': '快速回复' });
+  ta.value = '';
+  const send = (preset) => {
+    const text = (typeof preset === 'string' ? preset : ta.value).trim();
     if (!text) return snackbar('回复内容不能为空', 'err');
     if (!sendCommand(id, 'reply', text)) return snackbar('实时连接未建立，无法发送', 'err');
+    // 发出后自动收起
+    state.drafts.delete(id);
+    if (state.cardReply === id) { state.cardReply = null; render(); }
   };
   ta.addEventListener('input', () => state.drafts.set(id, ta.value));
   ta.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); send(); }
     else if (e.key === 'Escape') { e.preventDefault(); toggleCardReply(id); }
   });
   const quick = settings.quickReplies.filter((t) => t && t.trim()).map((t) => el('button', {
-    type: 'button', title: t, onclick: () => { ta.value = t; state.drafts.set(id, t); ta.focus(); }
+    type: 'button', title: t, disabled: !online || busy, onclick: () => send(t)   // 点击常见回答直接发送
   }, t));
   return el('div', { class: 'creply', onclick: (e) => e.stopPropagation(), onkeydown: (e) => e.stopPropagation() },
     ta,
     quick.length ? el('div', { class: 'qr' }, ...quick) : null,
     el('div', { class: 'row' },
       el('span', { class: 'hint' }, !online ? '需要有标签页开着这个会话' : c.status === 'generating' ? '正在回答中，发送会被拒绝' : ''),
-      el('button', { class: 'btn text s', type: 'button', onclick: () => toggleCardReply(id) }, '收起'),
       el('button', { class: 'btn filled s', type: 'button', 'data-act': 'send', disabled: !online || busy, onclick: send }, busy ? '发送中…' : '发送')));
 }
 
@@ -1110,7 +1113,7 @@ function openCands() {
   const box = $('quickCands');
   if (!list.length) { closeCands(); return; }
   if (state.candIndex >= list.length) state.candIndex = list.length - 1;
-  box.replaceChildren(el('div', { class: 'ch' }, '常见回答（↑↓ 选择，Enter 填入，Esc 关闭）'),
+  box.replaceChildren(el('div', { class: 'ch' }, '常见回答（点击或 ↑↓ 选择后 Enter 直接发送，Esc 关闭）'),
     ...list.map((t, i) => el('button', {
       class: `cand ${i === state.candIndex ? 'on' : ''}`, role: 'option', title: t, type: 'button',
       onmousedown: (e) => e.preventDefault(),   // 不让输入框失焦
@@ -1119,13 +1122,11 @@ function openCands() {
   box.classList.add('open');
 }
 function closeCands() { $('quickCands').classList.remove('open'); state.candIndex = -1; }
+/** 选中常见回答 → 直接发送 */
 function pickCand(t) {
-  const ta = $('quickText');
-  ta.value = t;
-  state.drafts.set(state.selected, t);
+  $('quickText').value = t;
   closeCands();
-  ta.focus();
-  ta.setSelectionRange?.(t.length, t.length);
+  sendQuick();
 }
 
 function sendQuick() {
@@ -1134,7 +1135,11 @@ function sendQuick() {
   if (!id) return;
   if (!text) return snackbar('回复内容不能为空', 'err');
   closeCands();
-  if (!sendCommand(id, 'reply', text)) snackbar('实时连接未建立，无法发送', 'err');
+  if (!sendCommand(id, 'reply', text)) return snackbar('实时连接未建立，无法发送', 'err');
+  // 发出后关闭弹窗；结果通过提示条反馈
+  $('quickText').value = '';
+  state.drafts.delete(id);
+  closeDetail();
 }
 
 // ------------------------------------------------------------------ 设置：常见回答
@@ -1261,14 +1266,17 @@ qt.addEventListener('blur', () => setTimeout(() => { if (document.activeElement 
 qt.addEventListener('keydown', (e) => {
   const open = $('quickCands').classList.contains('open');
   const list = open ? candidates() : [];
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendQuick(); return; }
+  const plainEnter = e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229;   // 输入法选字时的 Enter 不发送
   if (open && list.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
     e.preventDefault();
     state.candIndex = (state.candIndex + (e.key === 'ArrowDown' ? 1 : -1) + list.length) % list.length;
     openCands();
-  } else if (open && e.key === 'Enter' && state.candIndex >= 0 && list[state.candIndex]) {
+  } else if (plainEnter && open && state.candIndex >= 0 && list[state.candIndex]) {
     e.preventDefault();
     pickCand(list[state.candIndex]);
+  } else if (plainEnter) {
+    e.preventDefault();
+    sendQuick();
   } else if (e.key === 'Escape' && open) {
     e.preventDefault();
     e.stopPropagation();
