@@ -193,17 +193,26 @@ export function createBridgeServer(opts = {}) {
   }
 
   // ------------------------------------------------------------- 已适配网站
-  // 内置站点 + 用户在看板上添加的网站（data/sites.json，含分析得到的 DomConfig）
-  const BUILTIN_SITES = [
-    { key: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', host: 'chatgpt.com', builtin: true },
-    { key: 'duckai', name: 'Duck.ai', url: 'https://duck.ai/', host: 'duck.ai', builtin: true },
-    { key: 'hark', name: 'Hark', url: 'https://www.hark.com/chat', host: 'www.hark.com', builtin: true }
+  // 网站列表（data/sites.json）：不再区分“内置”，首次启动用默认三个网站初始化，之后全部可编辑 / 删除。
+  // 有 config 的网站由插件动态注册内容脚本；chatgpt / duckai / hark 的适配代码随插件发布（按 key 识别）。
+  const DEFAULT_SITES = [
+    { key: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', host: 'chatgpt.com' },
+    { key: 'duckai', name: 'Duck.ai', url: 'https://duck.ai/', host: 'duck.ai' },
+    { key: 'hark', name: 'Hark', url: 'https://www.hark.com/chat', host: 'www.hark.com' }
   ];
   const sitesPath = opts.sitesPath ?? (opts.configPath ? join(dirname(opts.configPath), 'sites.json') : null);
-  let customSites = [];
+  let customSites = null;
   if (sitesPath && existsSync(sitesPath)) {
-    try { const v = JSON.parse(readFileSync(sitesPath, 'utf8')); if (Array.isArray(v)) customSites = v; } catch { customSites = []; }
+    try { const v = JSON.parse(readFileSync(sitesPath, 'utf8')); if (Array.isArray(v)) customSites = v; } catch { customSites = null; }
   }
+  if (!customSites) customSites = DEFAULT_SITES.map((x) => ({ ...x }));
+  else {
+    // 旧版 sites.json 只存“添加的网站”：补上默认网站（只补一次，之后删除了就不再出现）
+    if (!customSites.some((x) => x.seeded) && !DEFAULT_SITES.every((d) => customSites.some((x) => x.key === d.key))) {
+      customSites = [...DEFAULT_SITES.filter((d) => !customSites.some((x) => x.key === d.key)).map((x) => ({ ...x })), ...customSites];
+    }
+  }
+  for (const x of customSites) { delete x.builtin; x.seeded = true; }
   function saveSites() {
     if (!sitesPath) return;
     mkdirSync(dirname(sitesPath), { recursive: true });
@@ -229,7 +238,9 @@ export function createBridgeServer(opts = {}) {
    * GET    /api/sites/probe/:id           看板轮询分析结果（control）
    * POST   /api/sites/probe/:id/dom       插件上传抓到的页面 {html, url, title}（publish，且必须是被指派的插件）
    * POST   /api/sites {probe_id, name}    看板确认添加（control）
-   * DELETE /api/sites/:key                删除添加过的网站（control）
+   * PATCH  /api/sites/:key {name?, url?} 编辑网站名称 / 网址（control）
+   * DELETE /api/sites/:key                删除网站（control）
+   * POST   /api/sites/launch              一键启动：让插件在后台打开所有网站（control）
    */
   async function handleSitesApi(req, res, path) {
     if (!originAllowed(req.headers.origin, req.headers.host)) return json(res, 403, { ok: false, error: 'forbidden origin' });
@@ -242,7 +253,7 @@ export function createBridgeServer(opts = {}) {
     try {
       if (path === '/api/sites' && req.method === 'GET') {
         if (!can(Scope.READ_CONTENT) && !can(Scope.PUBLISH)) return json(res, 403, { ok: false, error: 'forbidden' });
-        return json(res, 200, { ok: true, sites: [...BUILTIN_SITES, ...customSites] });
+        return json(res, 200, { ok: true, sites: customSites.map(({ seeded, ...x }) => x) });
       }
       const dom = /^\/api\/sites\/probe\/([A-Za-z0-9_-]{8,64})\/dom$/.exec(path);
       if (dom && req.method === 'POST') {
@@ -257,6 +268,15 @@ export function createBridgeServer(opts = {}) {
         return json(res, 200, { ok: true });
       }
       if (!can(Scope.CONTROL)) return json(res, 403, { ok: false, error: 'control scope required' });
+      if (path === '/api/sites/launch' && req.method === 'POST') {
+        const target = onlineExtensions()[0];
+        if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件' });
+        const urls = customSites.map((x) => x.url).filter((u) => /^https:\/\//.test(u));
+        if (!urls.length) return json(res, 400, { ok: false, error: '网站列表是空的' });
+        sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: randomId('launch').slice(0, 40), action: 'open_sites', conversation_id: 'sites', text: urls.join('\n').slice(0, 20000) }));
+        log.info(`[sites] launch ${urls.length} sites via ${target.clientId}`);
+        return json(res, 202, { ok: true, count: urls.length });
+      }
       if (path === '/api/sites/probe' && req.method === 'POST') {
         const b = await body();
         let u;
@@ -288,17 +308,44 @@ export function createBridgeServer(opts = {}) {
         const p = probes.get(String(b.probe_id || ''));
         if (!p || p.status !== 'done' || !p.result?.ok) return json(res, 400, { ok: false, error: '没有可添加的分析结果' });
         const host = new URL(p.url).hostname;
-        if (BUILTIN_SITES.some((x) => x.host.replace(/^www\./, '') === host.replace(/^www\./, ''))) return json(res, 409, { ok: false, error: '这个网站已内置适配' });
+        const same = (a, b) => a.replace(/^www\./, '') === b.replace(/^www\./, '');
+        if (customSites.some((x) => same(x.host, host) && !x.config)) return json(res, 409, { ok: false, error: '这个网站已经在列表里了' });
         const name = String(b.name || '').trim().slice(0, 40) || host;
-        const site = { key: p.result.config.site, name, url: p.url, host, config: p.result.config, added_at: Date.now() };
+        const site = { key: p.result.config.site, name, url: p.url, host, config: p.result.config, added_at: Date.now(), seeded: true };
         customSites = [...customSites.filter((x) => x.host !== host && x.key !== site.key), site];
         saveSites();
         probes.delete(String(b.probe_id));
         notifySitesChanged();
         log.info(`[sites] added ${site.key} ${host}`);
-        return json(res, 200, { ok: true, site });
+        const { seeded, ...out } = site;
+        return json(res, 200, { ok: true, site: out });
       }
       const del = /^\/api\/sites\/([a-z0-9_-]{1,32})$/.exec(path);
+      if (del && req.method === 'PATCH') {
+        const site = customSites.find((x) => x.key === del[1]);
+        if (!site) return json(res, 404, { ok: false, error: 'site not found' });
+        const b = await body();
+        const patch = {};
+        if (b.name != null) {
+          const name = String(b.name).trim().slice(0, 40);
+          if (!name) return json(res, 400, { ok: false, error: '名称不能为空' });
+          patch.name = name;
+        }
+        if (b.url != null) {
+          let u;
+          try { u = new URL(String(b.url).trim()); } catch { return json(res, 400, { ok: false, error: '网址无效' }); }
+          if (u.protocol !== 'https:') return json(res, 400, { ok: false, error: '只支持 https 网址' });
+          if (customSites.some((x) => x !== site && x.host === u.hostname)) return json(res, 409, { ok: false, error: '另一个网站已经用了这个域名' });
+          patch.url = u.toString();
+          patch.host = u.hostname;
+        }
+        const hostChanged = patch.host && patch.host !== site.host;
+        Object.assign(site, patch);
+        saveSites();
+        if (hostChanged) notifySitesChanged();
+        const { seeded, ...out } = site;
+        return json(res, 200, { ok: true, site: out });
+      }
       if (del && req.method === 'DELETE') {
         const before = customSites.length;
         customSites = customSites.filter((x) => x.key !== del[1]);
@@ -439,6 +486,7 @@ export function createBridgeServer(opts = {}) {
       return sendError(conn, msg.id, ErrorCode.FORBIDDEN, 'token lacks control scope', false);
     }
     counters.commands_received++;
+    if (['probe_site', 'sync_sites', 'open_sites'].includes(msg.action)) return reply(conn, commandResult(msg.command_id, false, 'forbidden_action', '该指令只能由后端发出'));
     if (msg.action === 'reply' && !msg.text?.trim()) return reply(conn, commandResult(msg.command_id, false, 'text_required', '回复内容不能为空'));
     if (pendingCommands.has(msg.command_id)) return reply(conn, commandResult(msg.command_id, false, 'duplicate_command', null));
 

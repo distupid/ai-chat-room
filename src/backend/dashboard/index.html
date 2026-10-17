@@ -111,7 +111,6 @@
     .card.s-limit_reached { border-left-color: var(--st-limit); }
     .card.s-error { border-left-color: var(--st-error); }
     .card.s-idle { border-left-color: transparent; }
-    .card.archived { opacity: .7; }
     .card { --src: var(--tertiary-container); }
     .card.src-chatgpt { --src: #10A37F; } .card.src-duckai { --src: #DE5833; } .card.src-hark { --src: var(--primary); }
     .card.s-idle { background: color-mix(in srgb, var(--src) 12%, var(--surface-container-low)); }
@@ -248,7 +247,7 @@
     .mi .avatar { width: 28px; height: 28px; font-size: 12px; }
     .mi .nm { flex: 1; min-width: 0; display: flex; flex-direction: column; }
     .mi .nm small { color: var(--on-surface-variant); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .mi .del { width: 32px; height: 32px; }
+    .mi .del, .mi .ed { width: 32px; height: 32px; }
     .mi.add { border-top: 1px solid var(--outline-variant); margin-top: 4px; color: var(--primary); }
     .mi.add .plus { width: 28px; height: 28px; border-radius: 14px; border: 1px dashed var(--primary); display: inline-flex; align-items: center; justify-content: center; font-size: 18px; }
     .probe-st { font-size: 13px; color: var(--on-surface-variant); margin: 12px 0; }
@@ -266,7 +265,10 @@
     .snackbar { background: var(--inverse-surface); color: var(--inverse-on-surface); border-radius: 4px; padding: 14px 16px; min-width: 288px; max-width: 560px; box-shadow: var(--elev-3); font-size: 14px; display: flex; gap: 12px; align-items: center; }
     .snackbar.err { border-left: 4px solid var(--error); }
     .snackbar.ok { border-left: 4px solid var(--st-idle); }
-  </style>
+    .menu .mi.editing { flex-wrap: wrap; cursor: default; gap: 6px; height: auto; padding: 8px 12px; }
+    .menu .mi.editing .input { height: 32px; flex: 1 1 100%; padding: 0 8px; }
+    .menu .mi.editing .row { display: flex; gap: 6px; justify-content: flex-end; flex: 1 1 100%; }
+</style>
 </head>
 <body>
   <header class="appbar">
@@ -284,8 +286,12 @@
       <div id="sitesMenu" class="menu" role="menu"></div>
     </div>
     <button id="themeBtn" class="icon-btn" title="切换深色 / 浅色"></button>
+    <button id="favBtn" class="icon-btn" title="查看收藏会话" aria-pressed="false" aria-label="收藏会话"></button>
     <button id="settingsBtn" class="icon-btn" title="设置">
       <svg class="i" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87a.47.47 0 0 0 .12.61l2.03 1.58c-.05.31-.09.64-.09.94s.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.47.47 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
+    </button>
+    <button id="launchBtn" class="icon-btn" title="一键启动：后台打开所有网站" aria-label="一键启动">
+      <svg class="i" viewBox="0 0 24 24"><path d="M9.19 6.35c-2.04 2.29-3.44 5.58-3.57 5.89L2 10.69l4.05-4.05c.47-.47 1.15-.68 1.81-.55l1.33.26zM11.17 17s3.74-1.55 5.89-3.7c5.4-5.4 4.5-9.62 4.21-10.57-.95-.3-5.17-1.19-10.57 4.21C8.55 9.09 7 12.83 7 12.83L11.17 17zm6.48-2.19c-2.29 2.04-5.58 3.44-5.89 3.57L13.31 22l4.05-4.05c.47-.47.68-1.15.55-1.81l-.26-1.33zM9 18c0 .83-.34 1.58-.88 2.12C6.94 21.3 2 22 2 22s.7-4.94 1.88-6.12A3 3 0 0 1 9 18zm4-9c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2z"/></svg>
     </button>
   </header>
 

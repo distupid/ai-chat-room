@@ -94,7 +94,7 @@ async function syncSites() {
   let r;
   try { r = await getSitesFromServer({ serverUrl, token }); } catch (e) { return { ok: false, code: 'unreachable', detail: String(e?.message || e) }; }
   if (!r.ok) return { ok: false, code: 'sites_failed', detail: r.error };
-  const custom = (r.sites || []).filter((x) => !x.builtin && x.host && x.key && x.config);
+  const custom = (r.sites || []).filter((x) => x.host && x.key && x.config);
   const { domConfigs = {} } = await chrome.storage.local.get(['domConfigs']);
   const { customSiteKeys: oldKeys = [] } = await chrome.storage.local.get(['customSiteKeys']);
   const next = { ...domConfigs };
@@ -115,6 +115,16 @@ async function syncSites() {
     return { ok: false, code: 'register_failed', detail: String(e?.message || e) };
   }
   return { ok: true, detail: `${custom.length} 个添加的网站` };
+}
+
+/** 一键启动：在后台（不抢焦点）打开网站列表里的每个网址 */
+async function openSites(text) {
+  const urls = String(text || '').split('\n').map((u) => u.trim()).filter((u) => /^https:\/\/[^\s]+$/.test(u)).slice(0, 50);
+  let n = 0;
+  for (const url of urls) {
+    try { await chrome.tabs.create({ url, active: false }); n++; } catch { /* 单个失败不影响其他 */ }
+  }
+  return { ok: n > 0, detail: `已在后台打开 ${n} 个网站` };
 }
 
 const storage = {
@@ -140,6 +150,19 @@ const ready = (async () => {
     executeCommand: async (tabId, command) => {
       if (command.action === 'probe_site') return probeSite(command);
       if (command.action === 'sync_sites') return syncSites();
+      if (command.action === 'open_sites') return openSites(command.text);
+      if (command.action === 'close') {
+        // 关闭开着这个会话的所有标签页（后端指定的那个 + 本插件记录的其他标签页）
+        const bgNow = await ready;
+        const ids = new Set([tabId, ...[...bgNow.tabs.entries()].filter(([, t]) => t.conversation_id === command.conversation_id).map(([id]) => id)]
+          .filter((x) => Number.isInteger(x)));
+        try {
+          await chrome.tabs.remove([...ids]);
+          return { ok: true, detail: `已关闭 ${ids.size} 个标签页` };
+        } catch (e) {
+          return { ok: false, code: 'tab_unreachable', detail: String(e?.message || e) };
+        }
+      }
       if (command.action === 'focus') {
         try {
           const tab = await chrome.tabs.update(tabId, { active: true });

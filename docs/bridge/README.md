@@ -151,9 +151,10 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 后端启动后，浏览器打开 `http://127.0.0.1:8787/dashboard`，点右上角**设置**，填入 `src/backend/data/config.json` 里 **observer** 的 token 并连接。
 
 - Material Design 3 界面，右上角一键切换浅色 / 深色 / 跟随系统
-- 按状态筛选：回答中 / 已到限额 / 出错 / 空闲 / 页面已关 / 未完成 / 已完成；多个来源时还可以按来源筛选
+- 按状态筛选：置顶 / 回答中 / 出错 / 空闲 / 页面已关（页面已关的会话只在这里显示，点击会重新打开页面并跳转）；多个来源时还可以按来源筛选；顶栏星标查看收藏会话
 - **点卡片**：有标签页开着这个会话就切换过去，否则新开页面
-- 卡片按钮：快速回复（Ctrl+Enter 发送）、标记完成、重新回答（仅 ChatGPT）、详情
+- 卡片按钮：置顶、关闭页面（插件关掉开着该会话的标签页）、回复（向下弹出快速回复栏，Ctrl+Enter 发送）
+- 顶栏：已连接 · N 个页面、搜索、网站（全部可编辑 / 删除，无“内置”）、收藏、设置、一键启动（插件在后台打开所有网站）
 - **详情**弹窗：完整对话，实时流式更新，代码块和行内代码有格式；右上角可复制最后一条回答、跳转到页面
 - **设置**：连接（token、连接 / 断开）、外观、系统通知（已到限额 / 回答完成 / 出错，可设为只在看板不在前台时通知，含测试通知）、后台状态（运行时间、在线客户端、事件和指令计数）
 
@@ -181,7 +182,7 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 `看板 --command--> 后端 --command(tab_id)--> 插件后台 --> 内容脚本执行 --> command_result 原路返回`
 
 - 需要 `control` 权限。旧的 config.json 里，能读全部会话（subscribe_all + read_content）的 observer token 会自动获得 control；不想要可给该 client 加 `"no_control": true`
-- 指令：`reply` 快速回复、`regenerate` 重新回答、`focus` 切换到该标签页（插件后台执行，不经过页面）
+- 指令：`reply` 快速回复、`regenerate` 重新回答、`focus` 切换到该标签页、`close` 关闭该会话的标签页（插件后台执行，不经过页面）；后端 → 插件：`probe_site` / `sync_sites` / `open_sites`（看板不能直接发）
 - 后端只把指令发给“最近一次页面事件显示正开着这个会话”的那个插件标签页；页面正在回答时返回 `busy`；20 秒没有结果返回 `timeout`
 - 插件端选择器可在 DomConfig 的 `actions` 中覆盖（composer / send_button / regenerate_button / regenerate_menu_item / regenerate_menu_text）
 

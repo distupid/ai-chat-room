@@ -390,7 +390,7 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   const cardSel = `.card[data-conv="${CONV}"]`;
   d.getElementById('token').value = TOKENS.observer;
   d.getElementById('connect').click();
-  await waitFor(() => d.getElementById('connText').textContent === '已连接', { label: 'connected' });
+  await waitFor(() => /^已连接 · 1 个页面$/.test(d.getElementById('connText').textContent), { label: 'connected' });
   const cardEl = await waitFor(() => d.querySelector(cardSel), { label: 'card' });
   assert.match(cardEl.querySelector('.title').textContent, /^界面测试：/);
   assert.equal(cardEl.querySelector('.badge').textContent, '空闲');
@@ -403,7 +403,10 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   const chipTexts = () => [...d.querySelectorAll('#chips .chip')].map((b) => b.textContent);
   assert.ok(!chipTexts().some((t) => /^全部\d/.test(t)), `chips: ${chipTexts()}`);
   assert.ok(chipTexts().includes('空闲1'));
-  assert.deepEqual([...d.querySelectorAll('#chips .cg.end .chip')].map((b) => b.textContent), ['有收藏0', '已归档0']);
+  assert.ok(!d.querySelector('#chips .cg.end'), '收藏 / 归档不在筛选栏');
+  assert.ok(!chipTexts().some((t) => /已到限额|有收藏|已归档/.test(t)), `chips: ${chipTexts()}`);
+  assert.ok(chipTexts().includes('页面已关0'));
+  assert.ok(!d.querySelector(`${cardSel} .actions`).textContent.includes('重新回答'), '卡片没有重新回答');
   const idleChip = () => [...d.querySelectorAll('#chips .chip')].find((b) => /^空闲/.test(b.textContent));
   idleChip().click();
   assert.ok(idleChip().classList.contains('on'));
@@ -557,23 +560,50 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   await waitFor(() => d.querySelector(`${cardSel} .badge`)?.textContent === '已到限额', { label: 'limit badge' });
   assert.match(d.querySelector(`${cardSel} .notice`).textContent, /已达到使用上限/);
 
-  // 归档：从“全部”消失，出现在“已归档”
-  btn('归档').click();
-  await waitFor(() => !d.querySelector(cardSel), { label: 'archived hidden' });
-  assert.ok(!d.querySelector(cardSel));
-  assert.match(d.getElementById('chips').textContent, /已归档1/);
-  [...d.querySelectorAll('#chips .chip')].find((b) => /已归档/.test(b.textContent)).click();
-  await waitFor(() => d.querySelector(`${cardSel}.archived`), { label: 'in archive' });
-  btn('取消归档').click();
-  await waitFor(() => !d.querySelector(cardSel), { label: 'unarchived leaves archive view' });
+  // 收藏图标：只看有收藏的会话，再点返回
+  d.getElementById('favBtn').click();
+  assert.equal(d.getElementById('favBtn').getAttribute('aria-pressed'), 'true');
+  assert.ok(d.querySelector(cardSel), '收藏视图里有这个会话');
+  d.getElementById('favBtn').click();
+  assert.equal(d.getElementById('favBtn').getAttribute('aria-pressed'), 'false');
 
-  // 网站下拉：去掉了排序；内置网址 + 末尾“添加网站”
+  // 一键启动：插件收到 open_sites（后台打开所有网站）
+  d.getElementById('launchBtn').click();
+  const launch = await waitFor(() => ext.of('command').find((m) => m.action === 'open_sites'), { label: 'launch' });
+  assert.deepEqual(launch.text.split('\n'), ['https://chatgpt.com/', 'https://duck.ai/', 'https://www.hark.com/chat']);
+
+  // 关闭页面：插件收到 close；页面关闭后只在“页面已关”里显示，点击重新打开并跳转
+  await waitFor(() => btn('关闭页面') && !btn('关闭页面').disabled, { label: 'close enabled', timeout: 8000 });
+  btn('关闭页面').click();
+  const closeCmd = await waitFor(() => ext.of('command').find((m) => m.action === 'close'), { label: 'close cmd' });
+  assert.equal(closeCmd.conversation_id, CONV);
+  ext.send(makeEnvelope('command_result', { command_id: closeCmd.command_id, ok: true, detail: '已关闭 1 个标签页' }));
+  await sendAndAck(ext, ev('page.closed', { url: CONV_URL, reason: 'tab_removed' }));
+  await waitFor(() => !d.querySelector(cardSel), { label: 'closed hidden' });
+  await waitFor(() => /已连接 · 0 个页面/.test(d.getElementById('connText').textContent), { label: 'conn count 0' });
+  [...d.querySelectorAll('#chips .chip')].find((b) => /^页面已关/.test(b.textContent)).click();
+  await waitFor(() => d.querySelector(`${cardSel}.s-closed`), { label: 'in closed view' });
+  const before = opened.length;
+  d.querySelector(cardSel).click();
+  assert.equal(opened.length, before + 1);
+  assert.equal(opened.at(-1), CONV_URL);
+  assert.ok(!d.getElementById('detailScrim').classList.contains('open'), '已关闭的不打开详情');
+
+  // 网站下拉：没有“内置”，每个网站都可编辑 / 删除；末尾“添加网站”
   assert.equal(d.getElementById('sort'), null);
   d.getElementById('sitesBtn').click();
   await waitFor(() => d.querySelectorAll('#sitesMenu .mi').length === 4, { label: 'sites menu' });
   assert.deepEqual([...d.querySelectorAll('#sitesMenu .mi')].map((n) => n.dataset.site), ['chatgpt', 'duckai', 'hark', '+']);
+  assert.equal(d.querySelectorAll('#sitesMenu .mi .ed').length, 3);
+  assert.equal(d.querySelectorAll('#sitesMenu .mi .del').length, 3);
+  d.querySelector('#sitesMenu [data-site="duckai"] .ed').click();
+  const edit = d.querySelector('#sitesMenu .mi.editing');
+  const [nameIn, urlIn] = edit.querySelectorAll('input');
+  nameIn.value = 'Duck'; urlIn.value = 'https://duck.ai/chat';
+  edit.querySelector('[data-act="save"]').click();
+  await waitFor(() => d.querySelector('#sitesMenu [data-site="duckai"] .nm')?.textContent.startsWith('Duck' + 'https://duck.ai/chat'), { label: 'site edited' });
   d.querySelector('#sitesMenu [data-site="duckai"]').click();
-  assert.equal(opened.at(-1), 'https://duck.ai/');
+  assert.equal(opened.at(-1), 'https://duck.ai/chat');
   d.getElementById('sitesBtn').click();
   d.querySelector('#sitesMenu [data-site="+"]').click();
   assert.ok(d.getElementById('siteScrim').classList.contains('open'));
@@ -685,6 +715,23 @@ test('添加网站：看板发起 → 插件收到 probe_site → 上传 DOM →
   assert.equal((await api('/api/sites/example', { method: 'DELETE' })).status, 200);
   assert.equal((await api('/api/sites/example', { method: 'DELETE' })).status, 404);
   assert.deepEqual((await (await api('/api/sites')).json()).sites.map((x) => x.key), ['chatgpt', 'duckai', 'hark']);
+  assert.ok((await (await api('/api/sites')).json()).sites.every((x) => !('builtin' in x)), '没有“内置”概念');
+
+  // 编辑：任何网站都能改名称 / 网址；只接受 https，域名不能重复
+  const ed = await (await api('/api/sites/chatgpt', { method: 'PATCH', body: { name: 'GPT', url: 'https://chatgpt.com/g/x' } })).json();
+  assert.deepEqual([ed.site.name, ed.site.url, ed.site.host], ['GPT', 'https://chatgpt.com/g/x', 'chatgpt.com']);
+  assert.equal((await api('/api/sites/chatgpt', { method: 'PATCH', body: { url: 'http://chatgpt.com/' } })).status, 400);
+  assert.equal((await api('/api/sites/chatgpt', { method: 'PATCH', body: { url: 'https://duck.ai/' } })).status, 409);
+  assert.equal((await api('/api/sites/chatgpt', { method: 'PATCH', body: { name: ' ' } })).status, 400);
+  assert.equal((await api('/api/sites/chatgpt', { method: 'PATCH', body: { name: 'x' }, token: TOKENS.extension })).status, 403);
+  // 一键启动：插件收到 open_sites（所有网址）
+  const ln = await (await api('/api/sites/launch', { method: 'POST' })).json();
+  assert.equal(ln.count, 3);
+  const open = await waitFor(() => ext.of('command').find((m) => m.action === 'open_sites'), { label: 'open_sites' });
+  assert.match(open.text, /https:\/\/chatgpt\.com\/g\/x/);
+  // 默认网站也能删除
+  assert.equal((await api('/api/sites/hark', { method: 'DELETE' })).status, 200);
+  assert.deepEqual((await (await api('/api/sites')).json()).sites.map((x) => x.key), ['chatgpt', 'duckai']);
   ext.close?.();
   await server.stop();
 });

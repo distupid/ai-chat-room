@@ -1484,8 +1484,10 @@
             "reply",
             "regenerate",
             "focus",
+            "close",
             "probe_site",
-            "sync_sites"
+            "sync_sites",
+            "open_sites"
           ]
         },
         "conversation_id": {
