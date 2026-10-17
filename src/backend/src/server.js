@@ -8,7 +8,7 @@ import { loadConfig } from './config.js';
 import { openDatabase } from './db.js';
 import { Broadcaster } from './broadcaster.js';
 import { TokenBucket } from './ratelimit.js';
-import { analyzeDom } from './dom-analyzer.js';
+import { analyzeDom, analyzeNewSite } from './dom-analyzer.js';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,6 +70,13 @@ export function createBridgeServer(opts = {}) {
     if (path === '/api/conversations' || path.startsWith('/api/conversations/') || path === '/api/favorites') {
       handleDashboardApi(req, res, path).catch((err) => {
         log.error('[dashboard]', err);
+        if (!res.headersSent) json(res, 500, { ok: false, error: 'internal error' });
+      });
+      return;
+    }
+    if (path === '/api/sites' || path.startsWith('/api/sites/')) {
+      handleSitesApi(req, res, path).catch((err) => {
+        log.error('[sites]', err);
         if (!res.headersSent) json(res, 500, { ok: false, error: 'internal error' });
       });
       return;
@@ -183,6 +190,128 @@ export function createBridgeServer(opts = {}) {
       return json(res, result.ok ? 200 : 422, result);
     }
     return json(res, 405, { ok: false, error: 'method not allowed' });
+  }
+
+  // ------------------------------------------------------------- 已适配网站
+  // 内置站点 + 用户在看板上添加的网站（data/sites.json，含分析得到的 DomConfig）
+  const BUILTIN_SITES = [
+    { key: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', host: 'chatgpt.com', builtin: true },
+    { key: 'duckai', name: 'Duck.ai', url: 'https://duck.ai/', host: 'duck.ai', builtin: true },
+    { key: 'hark', name: 'Hark', url: 'https://www.hark.com/chat', host: 'www.hark.com', builtin: true }
+  ];
+  const sitesPath = opts.sitesPath ?? (opts.configPath ? join(dirname(opts.configPath), 'sites.json') : null);
+  let customSites = [];
+  if (sitesPath && existsSync(sitesPath)) {
+    try { const v = JSON.parse(readFileSync(sitesPath, 'utf8')); if (Array.isArray(v)) customSites = v; } catch { customSites = []; }
+  }
+  function saveSites() {
+    if (!sitesPath) return;
+    mkdirSync(dirname(sitesPath), { recursive: true });
+    writeFileSync(sitesPath, JSON.stringify(customSites, null, 2) + '\n');
+  }
+  // probe_id → { status: pending|done|error, url, target, requester, result, error, at }
+  const probes = new Map();
+  const PROBE_TTL_MS = 10 * 60 * 1000;
+  function prune() { const now = Date.now(); for (const [k, v] of probes) if (now - v.at > PROBE_TTL_MS) probes.delete(k); }
+  function onlineExtensions() {
+    return [...broadcaster.clients.values()].filter((r) => r.scopes.has(Scope.PUBLISH) && r.ws.readyState === 1);
+  }
+  /** 通知所有在线插件：网站列表变了，重新拉取并注册内容脚本 */
+  function notifySitesChanged() {
+    for (const rec of onlineExtensions()) {
+      sendTo(rec, makeEnvelope(MessageType.COMMAND, { command_id: randomId('sync'), action: 'sync_sites', conversation_id: 'sites' }));
+    }
+  }
+
+  /**
+   * GET    /api/sites                     已适配网站（内置 + 已添加）；observer 或 extension token
+   * POST   /api/sites/probe {url}         看板：让插件打开网址抓取 DOM 并分析；返回 {probe_id}（control）
+   * GET    /api/sites/probe/:id           看板轮询分析结果（control）
+   * POST   /api/sites/probe/:id/dom       插件上传抓到的页面 {html, url, title}（publish，且必须是被指派的插件）
+   * POST   /api/sites {probe_id, name}    看板确认添加（control）
+   * DELETE /api/sites/:key                删除添加过的网站（control）
+   */
+  async function handleSitesApi(req, res, path) {
+    if (!originAllowed(req.headers.origin, req.headers.host)) return json(res, 403, { ok: false, error: 'forbidden origin' });
+    const client = clientFromRequest(req);
+    if (!client) return json(res, 401, { ok: false, error: 'unauthorized' });
+    const can = (sc) => client.scopes.includes(sc);
+    const body = async (max = 8192) => {
+      try { return JSON.parse((await readBody(req, max)) || '{}'); } catch (e) { const err = new Error(e.code === 'TOO_LARGE' ? 'payload too large' : 'invalid json'); err.status = e.code === 'TOO_LARGE' ? 413 : 400; throw err; }
+    };
+    try {
+      if (path === '/api/sites' && req.method === 'GET') {
+        if (!can(Scope.READ_CONTENT) && !can(Scope.PUBLISH)) return json(res, 403, { ok: false, error: 'forbidden' });
+        return json(res, 200, { ok: true, sites: [...BUILTIN_SITES, ...customSites] });
+      }
+      const dom = /^\/api\/sites\/probe\/([A-Za-z0-9_-]{8,64})\/dom$/.exec(path);
+      if (dom && req.method === 'POST') {
+        if (!can(Scope.PUBLISH)) return json(res, 403, { ok: false, error: 'publish scope required' });
+        const p = probes.get(dom[1]);
+        if (!p || p.targetName !== client.name || p.status !== 'pending') return json(res, 404, { ok: false, error: 'probe not found' });
+        const b = await body(MAX_DOM_UPLOAD_BYTES);
+        if (typeof b.html !== 'string') return json(res, 400, { ok: false, error: 'html required' });
+        const result = analyzeNewSite(b.html, { url: typeof b.url === 'string' && /^https:\/\//.test(b.url) ? b.url : p.url, title: b.title });
+        Object.assign(p, { status: result.ok ? 'done' : 'error', result, error: result.ok ? null : (result.report.hint || result.report.error), title: String(b.title || '').slice(0, 200) });
+        log.info(`[sites] probe ${dom[1]} ${p.url}: ${result.ok ? result.report.strategy + ' messages=' + result.report.message_count : result.report.error}`);
+        return json(res, 200, { ok: true });
+      }
+      if (!can(Scope.CONTROL)) return json(res, 403, { ok: false, error: 'control scope required' });
+      if (path === '/api/sites/probe' && req.method === 'POST') {
+        const b = await body();
+        let u;
+        try { u = new URL(String(b.url || '')); } catch { return json(res, 400, { ok: false, error: '网址无效' }); }
+        if (u.protocol !== 'https:') return json(res, 400, { ok: false, error: '只支持 https 网址' });
+        const target = onlineExtensions()[0];
+        if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件' });
+        prune();
+        const id = randomId('probe').slice(0, 40);
+        probes.set(id, { status: 'pending', url: u.toString(), target: target.clientId, targetName: target.name, at: Date.now(), result: null, error: null });
+        sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: id, action: 'probe_site', conversation_id: 'probe', text: u.toString().slice(0, 2048) }));
+        return json(res, 202, { ok: true, probe_id: id });
+      }
+      const pr = /^\/api\/sites\/probe\/([A-Za-z0-9_-]{8,64})$/.exec(path);
+      if (pr && req.method === 'GET') {
+        const p = probes.get(pr[1]);
+        if (!p) return json(res, 404, { ok: false, error: 'probe not found' });
+        if (p.status === 'pending' && Date.now() - p.at > 90000) Object.assign(p, { status: 'error', error: '插件没有在 90 秒内返回页面' });
+        const host = new URL(p.url).hostname;
+        return json(res, 200, {
+          ok: true, status: p.status, url: p.url, error: p.error,
+          report: p.result?.report ?? null,
+          suggested_name: (p.title || '').split(/[|\-–·]/)[0].trim().slice(0, 40) || host,
+          exists: customSites.some((x) => x.host === host)
+        });
+      }
+      if (path === '/api/sites' && req.method === 'POST') {
+        const b = await body();
+        const p = probes.get(String(b.probe_id || ''));
+        if (!p || p.status !== 'done' || !p.result?.ok) return json(res, 400, { ok: false, error: '没有可添加的分析结果' });
+        const host = new URL(p.url).hostname;
+        if (BUILTIN_SITES.some((x) => x.host.replace(/^www\./, '') === host.replace(/^www\./, ''))) return json(res, 409, { ok: false, error: '这个网站已内置适配' });
+        const name = String(b.name || '').trim().slice(0, 40) || host;
+        const site = { key: p.result.config.site, name, url: p.url, host, config: p.result.config, added_at: Date.now() };
+        customSites = [...customSites.filter((x) => x.host !== host && x.key !== site.key), site];
+        saveSites();
+        probes.delete(String(b.probe_id));
+        notifySitesChanged();
+        log.info(`[sites] added ${site.key} ${host}`);
+        return json(res, 200, { ok: true, site });
+      }
+      const del = /^\/api\/sites\/([a-z0-9_-]{1,32})$/.exec(path);
+      if (del && req.method === 'DELETE') {
+        const before = customSites.length;
+        customSites = customSites.filter((x) => x.key !== del[1]);
+        if (customSites.length === before) return json(res, 404, { ok: false, error: 'site not found' });
+        saveSites();
+        notifySitesChanged();
+        return json(res, 200, { ok: true });
+      }
+      return json(res, 405, { ok: false, error: 'method not allowed' });
+    } catch (e) {
+      if (e.status) return json(res, e.status, { ok: false, error: e.message });
+      throw e;
+    }
   }
 
   const wss = new WebSocketServer({
@@ -344,6 +473,11 @@ export function createBridgeServer(opts = {}) {
 
   /** 插件 → 看板：只接受被转发对象自己返回的结果 */
   function onCommandResult(conn, msg) {
+    const probe = probes.get(msg.command_id);
+    if (probe && probe.target === conn.rec.clientId && !msg.ok && probe.status === 'pending') {
+      Object.assign(probe, { status: 'error', error: msg.detail || msg.code || '插件抓取页面失败' });
+      return undefined;
+    }
     const p = pendingCommands.get(msg.command_id);
     if (!p || p.target !== conn.rec.clientId) return undefined;
     pendingCommands.delete(msg.command_id);

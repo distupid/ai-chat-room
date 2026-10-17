@@ -1483,7 +1483,9 @@
           "enum": [
             "reply",
             "regenerate",
-            "focus"
+            "focus",
+            "probe_site",
+            "sync_sites"
           ]
         },
         "conversation_id": {

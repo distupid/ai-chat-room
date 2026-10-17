@@ -38,3 +38,13 @@ export function getDomConfigFromServer({ fetchImpl = fetch, serverUrl, token }) 
 export function clearDomConfigOnServer({ fetchImpl = fetch, serverUrl, token }) {
   return call(fetchImpl, serverUrl, token, 'DELETE', '/api/dom-config');
 }
+
+/** 已适配网站（内置 + 看板上添加的） */
+export function getSitesFromServer({ fetchImpl = fetch, serverUrl, token }) {
+  return call(fetchImpl, serverUrl, token, 'GET', '/api/sites');
+}
+
+/** 看板“添加网站”：上传插件打开该网址后抓到的页面 */
+export function submitProbeDom({ fetchImpl = fetch, serverUrl, token, probeId, html, url, title }) {
+  return call(fetchImpl, serverUrl, token, 'POST', `/api/sites/probe/${encodeURIComponent(probeId)}/dom`, { html, url, title });
+}

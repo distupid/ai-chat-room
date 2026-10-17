@@ -39,7 +39,8 @@
 - `UNAUTHORIZED` 停止重连直到设置变更；不可重试错误从队列移除。
 - 插件只订阅自己打开标签页的会话，不订阅 `*`。
 - 每个站点的 DOM 配置单独存：`chrome.storage.local.domConfigs[site]`，ChatGPT 兼容旧 `domConfig`。
-- 新增站点必须同时改：`manifest.json` 的 `host_permissions` 与 `content_scripts.matches`、`dom-observer.js` 的 `siteForHost` + `SITE_PROFILES`、`page-actions.js` 的站点动作、看板 `SOURCES`、README 站点表、`tests/sites.test.js`。
+- 看板“添加网站”（运行时添加，不改代码）：后端发 `probe_site` → `background.js` 后台打开网址、`chrome.scripting.executeScript` 抓 DOM、上传 `/api/sites/probe/:id/dom`；确认后后端发 `sync_sites` → `syncSites()` 把配置写入 `domConfigs[key]` + `customSiteHosts`，并用 `registerContentScripts`（id `site-<key>`）注册内容脚本；`content.js` 按 `customSiteHosts` 决定站点标识。
+- 内置新增站点（写进代码）必须同时改：`manifest.json` 的 `host_permissions` 与 `content_scripts.matches`、`dom-observer.js` 的 `siteForHost` + `SITE_PROFILES`、`page-actions.js` 的站点动作、看板 `SOURCES`、README 站点表、`tests/sites.test.js`。
 
 ## 调试
 - 页面 Console 会打印 `[chatgpt-bridge] observer started` 和启动 3 秒后的 `diag(startup)`。

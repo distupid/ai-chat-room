@@ -382,6 +382,8 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
     .replace(/^import \{([^}]+)\} from '\.\/protocol\.js';/m, 'const {$1} = window.__proto;');
   const errors = [];
   win.addEventListener('error', (e) => errors.push(e.error || e.message));
+  win.__probePollMs = 30;
+  win.confirm = () => true;
   win.eval(`(async () => { ${appSrc} })().catch((e) => { window.__appError = e; });`);
 
   const d = win.document;
@@ -531,6 +533,32 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   btn('取消归档').click();
   await waitFor(() => !d.querySelector(cardSel), { label: 'unarchived leaves archive view' });
 
+  // 网站下拉：去掉了排序；内置网址 + 末尾“添加网站”
+  assert.equal(d.getElementById('sort'), null);
+  d.getElementById('sitesBtn').click();
+  await waitFor(() => d.querySelectorAll('#sitesMenu .mi').length === 4, { label: 'sites menu' });
+  assert.deepEqual([...d.querySelectorAll('#sitesMenu .mi')].map((n) => n.dataset.site), ['chatgpt', 'duckai', 'hark', '+']);
+  d.querySelector('#sitesMenu [data-site="duckai"]').click();
+  assert.equal(opened.at(-1), 'https://duck.ai/');
+  d.getElementById('sitesBtn').click();
+  d.querySelector('#sitesMenu [data-site="+"]').click();
+  assert.ok(d.getElementById('siteScrim').classList.contains('open'));
+  d.getElementById('siteUrl').value = 'https://chat.example.com/c/abc12345def';
+  d.getElementById('siteProbe').click();
+  const probe = await waitFor(() => ext.of('command').find((m) => m.action === 'probe_site'), { label: 'ui probe' });
+  const page = `<!doctype html><html><head><title>Example Chat</title></head><body><div class="msg-user">问一个</div><div class="msg-bot">答一个</div><textarea></textarea></body></html>`;
+  await fetch(`${origin}/api/sites/probe/${probe.command_id}/dom`, { method: 'POST', headers: { authorization: `Bearer ${TOKENS.extension}`, 'content-type': 'application/json' }, body: JSON.stringify({ html: page, url: probe.text, title: 'Example Chat' }) });
+  await waitFor(() => !d.getElementById('siteConfirm').disabled, { label: 'probe result' });
+  assert.match(d.getElementById('siteKv').textContent, /chat\.example\.com/);
+  assert.match(d.getElementById('siteSamples').textContent, /答一个/);
+  assert.equal(d.getElementById('siteName').value, 'Example Chat');
+  d.getElementById('siteConfirm').click();
+  await waitFor(() => !d.getElementById('siteScrim').classList.contains('open'), { label: 'site added' });
+  d.getElementById('sitesBtn').click();
+  await waitFor(() => d.querySelector('#sitesMenu [data-site="example"]'), { label: 'new site in menu' });
+  d.querySelector('#sitesMenu [data-site="example"] .del').click();
+  await waitFor(() => !d.querySelector('#sitesMenu [data-site="example"]') && d.querySelectorAll('#sitesMenu .mi').length === 4, { timeout: 3000, label: 'site removed' });
+
   assert.equal(win.__appError, undefined, String(win.__appError?.stack));
   assert.deepEqual(errors, []);
   for (const s of sockets) s.close();
@@ -567,4 +595,62 @@ test('数据库迁移：旧库的“标记完成”迁移为归档', async () =>
   assert.equal(r.archived, 0, '第二次打开不重新从 done 迁移');
   assert.equal(db3.raw.prepare("SELECT pinned FROM conversation_marks WHERE conversation_id = 'c-todo'").get().pinned, 1);
   db3.close();
+});
+
+test('添加网站：看板发起 → 插件收到 probe_site → 上传 DOM → 分析结果 → 确认添加 → 插件收到 sync_sites → 删除', async () => {
+  const server = await startServer();
+  const api = (path, { method = 'GET', body, token = TOKENS.observer } = {}) =>
+    fetch(`http://127.0.0.1:${server.port}${path}`, { method, headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+
+  const list0 = await (await api('/api/sites')).json();
+  assert.deepEqual(list0.sites.map((x) => x.key), ['chatgpt', 'duckai', 'hark']);
+  assert.equal((await api('/api/sites', { token: 'nope' })).status, 401);
+  assert.equal((await api('/api/sites/probe', { method: 'POST', body: { url: 'https://chat.example.com/c/abc12345def' } })).status, 409, '没有在线插件');
+
+  const ext = await extClient(server, 'ext-site-000001');
+  assert.equal((await api('/api/sites/probe', { method: 'POST', body: { url: 'http://chat.example.com/' } })).status, 400, '只支持 https');
+  assert.equal((await api('/api/sites/probe', { method: 'POST', body: { url: 'https://chat.example.com/x' }, token: TOKENS.extension })).status, 403, '插件 token 不能发起');
+  const pr = await (await api('/api/sites/probe', { method: 'POST', body: { url: 'https://chat.example.com/c/abc12345def' } })).json();
+  assert.ok(pr.ok && pr.probe_id);
+  const cmd = await waitFor(() => ext.of('command').find((m) => m.action === 'probe_site'), { label: 'probe_site' });
+  assert.equal(cmd.command_id, pr.probe_id);
+  assert.equal(cmd.text, 'https://chat.example.com/c/abc12345def');
+  assert.equal((await (await api(`/api/sites/probe/${pr.probe_id}`)).json()).status, 'pending');
+
+  const html = `<!doctype html><html><head><title>Example Chat - AI</title></head><body><main>
+    <div class="turn turn-user"><p>写一句诗</p></div><div class="turn turn-bot"><p>床前明月光</p><button>复制</button></div>
+    <div class="turn turn-user"><p>下一句</p></div><div class="turn turn-bot"><p>疑是地上霜</p></div></main>
+    <form><textarea></textarea><button type="submit">发送</button></form></body></html>`;
+  assert.equal((await api(`/api/sites/probe/${pr.probe_id}/dom`, { method: 'POST', body: { html, url: cmd.text }, token: TOKENS.observer })).status, 403, '看板 token 不能上传');
+  assert.equal((await api(`/api/sites/probe/${pr.probe_id}/dom`, { method: 'POST', body: { html, url: cmd.text, title: 'Example Chat - AI' }, token: TOKENS.extension })).status, 200);
+  const res = await (await api(`/api/sites/probe/${pr.probe_id}`)).json();
+  assert.equal(res.status, 'done');
+  assert.equal(res.report.message_count, 4);
+  assert.deepEqual(res.report.roles, { user: 2, assistant: 2 });
+  assert.equal(res.report.conversation_id, 'example-abc12345def');
+  assert.equal(res.suggested_name, 'Example Chat');
+  assert.match(res.report.samples[1].text, /床前明月光/);
+  assert.doesNotMatch(res.report.samples[1].text, /复制/);
+
+  const add = await (await api('/api/sites', { method: 'POST', body: { probe_id: pr.probe_id, name: 'Example' } })).json();
+  assert.equal(add.site.key, 'example');
+  await waitFor(() => ext.of('command').some((m) => m.action === 'sync_sites'), { label: 'sync_sites' });
+  const list1 = await (await api('/api/sites', { token: TOKENS.extension })).json();
+  const site = list1.sites.find((x) => x.key === 'example');
+  assert.equal(site.host, 'chat.example.com');
+  assert.equal(site.config.site, 'example');
+  assert.equal((await api('/api/sites', { method: 'POST', body: { probe_id: pr.probe_id } })).status, 400, '同一次分析不能重复添加');
+
+  // 插件抓取失败 → 看板看到错误
+  const pr2 = await (await api('/api/sites/probe', { method: 'POST', body: { url: 'https://other.example.org/' } })).json();
+  await waitFor(() => ext.of('command').some((m) => m.command_id === pr2.probe_id), { label: 'probe 2' });
+  ext.send(makeEnvelope('command_result', { command_id: pr2.probe_id, ok: false, code: 'probe_failed', detail: '页面打不开' }));
+  await waitFor(async () => (await (await api(`/api/sites/probe/${pr2.probe_id}`)).json()).status === 'error', { label: 'probe error' });
+  assert.equal((await (await api(`/api/sites/probe/${pr2.probe_id}`)).json()).error, '页面打不开');
+
+  assert.equal((await api('/api/sites/example', { method: 'DELETE' })).status, 200);
+  assert.equal((await api('/api/sites/example', { method: 'DELETE' })).status, 404);
+  assert.deepEqual((await (await api('/api/sites')).json()).sites.map((x) => x.key), ['chatgpt', 'duckai', 'hark']);
+  ext.close?.();
+  await server.stop();
 });

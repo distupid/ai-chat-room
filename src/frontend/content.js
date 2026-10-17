@@ -1,4 +1,4 @@
-/* 内容脚本（chatgpt.com / duck.ai / hark.com）：启动 DOM 观察器，把事件交给后台 Service Worker。
+/* 内容脚本（chatgpt.com / duck.ai / hark.com，以及看板上添加的网站）：启动 DOM 观察器，把事件交给后台 Service Worker。
  * - 页面事件只发送 kind: 'page_event'；内容脚本不接收任何后端消息，ack / error / broadcast 不会被当作页面事件重新上报。
  * - DOM 配置：启动时从 chrome.storage.local.domConfig 读取；配置变化（弹窗“分析当前页面”）时立即 setConfig 生效。
  * - 只响应本插件发来的 capture_dom 请求：返回去掉 script/style/svg 等的页面 HTML，供后端分析。 */
@@ -13,6 +13,7 @@
     observer = ChatGPTBridgeObserver.createChatGPTObserver({
       document: document,
       window: window,
+      site: SITE,
       config: config || undefined,
       emit: function (event) {
         try {
@@ -87,7 +88,12 @@
   });
 
   // 每个站点一份配置：domConfigs[site]；ChatGPT 兼容旧的 domConfig
+  // 看板上添加的网站：customSiteHosts[host] = 站点标识（由后台 syncSites 写入）
   var SITE = ChatGPTBridgeObserver.siteForHost(location.hostname);
+  function resolveSite(s) {
+    var hosts = s && s.customSiteHosts && typeof s.customSiteHosts === 'object' ? s.customSiteHosts : {};
+    if (hosts[location.hostname]) SITE = String(hosts[location.hostname]);
+  }
   function configFrom(s) {
     s = s || {};
     var map = s.domConfigs && typeof s.domConfigs === 'object' ? s.domConfigs : {};
@@ -105,8 +111,8 @@
   });
 
   try {
-    chrome.storage.local.get(['domConfigs', 'domConfig']).then(
-      function (s) { createObserver(configFrom(s)); },
+    chrome.storage.local.get(['domConfigs', 'domConfig', 'customSiteHosts']).then(
+      function (s) { resolveSite(s); createObserver(configFrom(s)); },
       function () { createObserver(null); }
     );
   } catch (e) {

@@ -68,7 +68,8 @@ const state = {
   filter: STATUS_FILTERS.some(([k]) => k === load('filter', 'all')) ? load('filter', 'all') : 'all',
   source: load('source', 'all'),
   search: '',
-  sort: load('sort', 'activity'),
+  sites: [],
+  probe: null,
   selected: null,
   messages: new Map(),
   streaming: new Set(),
@@ -139,6 +140,8 @@ function titleOf(c) {
   if (c.first_user_text) return c.first_user_text.split('\n')[0].slice(0, 120);
   return c.conversation_id;
 }
+const BUILTIN_SOURCES = ['chatgpt', 'duckai', 'hark'];
+const avatarClass = (s) => BUILTIN_SOURCES.includes(s) ? s : 'other';
 const sourceInfo = (s) => SOURCES[s] || { label: s || '未知', short: (s || '?').slice(0, 1).toUpperCase(), regenerate: false };
 
 // ------------------------------------------------------------------ 主题
@@ -448,6 +451,7 @@ function connect() {
       setConn('on', state.canControl ? '已连接' : '已连接（无 control 权限，不能跳转 / 回复 / 重新回答）');
       ws.send(JSON.stringify(makeEnvelope(MessageType.SUBSCRIBE, { conversations: ['*'] })));
       loadConversations();
+      loadSites();
     } else if (m.type === 'broadcast') {
       onBroadcast(m);
     } else if (m.type === 'command_result') {
@@ -522,9 +526,7 @@ function filtered() {
       .some((v) => v && String(v).toLowerCase().includes(q));
   });
   // 置顶的永远在前
-  list = [...list].sort((a, b) => (b.pinned - a.pinned) ||
-    (state.sort === 'status' ? ((STATUS[a.status]?.order ?? 9) - (STATUS[b.status]?.order ?? 9)) : 0) ||
-    (b.last_seen_at - a.last_seen_at));
+  list = [...list].sort((a, b) => (b.pinned - a.pinned) || (b.last_seen_at - a.last_seen_at));
   return list;
 }
 
@@ -563,13 +565,13 @@ function card(c) {
     ? el('div', { class: `notice ${c.page_status === 'error' ? 'err' : ''}` }, c.status_detail) : null;
 
   const node = el('article', {
-    class: `card s-${c.status} src-${SOURCES[c.source] ? c.source : 'other'} ${c.pinned ? 'pinned' : ''} ${c.archived ? 'archived' : ''}`,
+    class: `card s-${c.status} src-${avatarClass(c.source)} ${c.pinned ? 'pinned' : ''} ${c.archived ? 'archived' : ''}`,
     'data-conv': id, tabindex: '0', role: 'button', title: '点击查看详情',
     onclick: () => openDetail(id),
     onkeydown: (e) => { if (e.target === node && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openDetail(id); } }
   },
     el('div', { class: 'head' },
-      el('div', { class: `avatar ${SOURCES[c.source] ? c.source : 'other'}`, title: src.label }, src.short),
+      el('div', { class: `avatar ${avatarClass(c.source)}`, title: src.label }, src.short),
       el('div', { class: 'tt' },
         el('div', { class: 'title', title: titleOf(c) },
           c.pinned ? el('span', { html: SVG.pin, title: '已置顶', style: 'display:inline-flex' }) : null,
@@ -622,6 +624,127 @@ function render() {
   }
   if (focusedConv) [...grid.querySelectorAll('.card')].find((n) => n.dataset.conv === focusedConv)?.focus();
   if (state.selected) { renderDetailHead(); renderComposer(); }
+}
+
+// ------------------------------------------------------------------ 网站下拉：已适配网址 + 添加网站
+
+const PROBE_POLL_MS = window.__probePollMs || 1000;
+
+async function loadSites() {
+  try {
+    const r = await api('/api/sites');
+    state.sites = r.sites || [];
+    for (const x of state.sites) {
+      if (!SOURCES[x.key]) SOURCES[x.key] = { label: x.name, short: (x.name || x.key).slice(0, 1).toUpperCase(), regenerate: false };
+    }
+    renderSitesMenu();
+  } catch { /* 旧后端没有 /api/sites */ }
+}
+
+function toggleSitesMenu(open) {
+  const m = $('sitesMenu');
+  const next = open ?? !m.classList.contains('open');
+  m.classList.toggle('open', next);
+  $('sitesBtn').setAttribute('aria-expanded', String(next));
+  if (next) renderSitesMenu();
+}
+
+function renderSitesMenu() {
+  const items = state.sites.map((x) => el('button', {
+    class: 'mi', role: 'menuitem', 'data-site': x.key, title: x.url,
+    onclick: () => { toggleSitesMenu(false); window.open(x.url, '_blank', 'noopener'); }
+  },
+    el('span', { class: `avatar ${avatarClass(x.key)}` }, (x.name || x.key).slice(0, 1).toUpperCase()),
+    el('span', { class: 'nm' }, x.name, el('small', {}, x.host)),
+    x.builtin ? null : el('span', {
+      class: 'icon-btn del', title: '删除这个网站', role: 'button',
+      html: '<svg class="i s18" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>',
+      onclick: (e) => { e.stopPropagation(); removeSite(x); }
+    })));
+  items.push(el('button', { class: 'mi add', role: 'menuitem', 'data-site': '+', onclick: () => { toggleSitesMenu(false); openAddSite(); } },
+    el('span', { class: 'plus' }, '+'), el('span', { class: 'nm' }, '添加网站', el('small', {}, '打开网址，获取 DOM 并分析'))));
+  $('sitesMenu').replaceChildren(...items);
+}
+
+async function removeSite(x) {
+  if (!window.confirm(`删除“${x.name}”？已记录的会话会保留。`)) return;
+  try { await api(`/api/sites/${encodeURIComponent(x.key)}`, { method: 'DELETE' }); snackbar(`已删除 ${x.name}`, 'ok'); loadSites(); }
+  catch (e) { snackbar(`删除失败：${e.message}`, 'err'); }
+}
+
+function openAddSite() {
+  state.probe = null;
+  $('siteUrl').value = '';
+  $('siteStatus').textContent = '';
+  $('siteStatus').className = 'probe-st';
+  $('siteResult').classList.remove('open');
+  $('siteConfirm').disabled = true;
+  $('siteProbe').disabled = false;
+  $('siteScrim').classList.add('open');
+  $('siteUrl').focus();
+}
+function closeAddSite() {
+  state.probe = null;
+  $('siteScrim').classList.remove('open');
+}
+
+function probeStatus(text, err = false) {
+  $('siteStatus').textContent = text;
+  $('siteStatus').className = `probe-st ${err ? 'err' : ''}`;
+}
+
+async function startProbe() {
+  const url = $('siteUrl').value.trim();
+  if (!/^https:\/\/[^\s/]+/.test(url)) return probeStatus('请填写 https:// 开头的网址', true);
+  $('siteProbe').disabled = true;
+  $('siteConfirm').disabled = true;
+  $('siteResult').classList.remove('open');
+  probeStatus('插件正在后台打开网址并获取 DOM……');
+  let id;
+  try { id = (await api('/api/sites/probe', { method: 'POST', body: JSON.stringify({ url }) })).probe_id; }
+  catch (e) { $('siteProbe').disabled = false; return probeStatus(`获取失败：${e.message}`, true); }
+  state.probe = id;
+  const started = Date.now();
+  while (state.probe === id) {
+    await new Promise((r) => setTimeout(r, PROBE_POLL_MS));
+    if (state.probe !== id) return;
+    let r;
+    try { r = await api(`/api/sites/probe/${id}`); } catch (e) { r = { status: 'error', error: e.message }; }
+    if (r.status === 'pending') { probeStatus(`插件正在获取 DOM……${Math.round((Date.now() - started) / 1000)} 秒`); continue; }
+    $('siteProbe').disabled = false;
+    if (r.status === 'error' || !r.report || r.report.error) return probeStatus(`分析失败：${r.error || r.report?.hint || r.report?.error || '未知错误'}`, true);
+    return showProbeResult(r);
+  }
+}
+
+function showProbeResult(r) {
+  const rep = r.report;
+  probeStatus(r.exists ? '分析完成：这个网站已添加过，确认后会覆盖。' : '分析完成，确认无误后添加。');
+  const roles = Object.entries(rep.roles || {}).map(([k, v]) => `${k === 'user' ? '用户' : k === 'assistant' ? '助手' : k} ${v}`).join('，');
+  $('siteKv').replaceChildren(...[
+    ['网站', rep.host], ['识别方式', rep.strategy], ['消息', `${rep.message_count} 条（${roles}）`],
+    ['会话 ID', rep.conversation_id || '未识别'], ['输入框', rep.composer || '-']
+  ].flatMap(([k, v]) => [el('span', {}, k), el('span', {}, String(v ?? '-'))]));
+  $('siteSamples').replaceChildren(...(rep.samples || []).map((m) =>
+    el('div', {}, el('b', {}, m.role === 'user' ? '我：' : '助手：'), m.text)));
+  $('siteWarn').textContent = (rep.warnings || []).join('；');
+  $('siteName').value = r.suggested_name || rep.host;
+  $('siteResult').classList.add('open');
+  $('siteConfirm').disabled = false;
+}
+
+async function confirmAddSite() {
+  if (!state.probe) return;
+  $('siteConfirm').disabled = true;
+  try {
+    const r = await api('/api/sites', { method: 'POST', body: JSON.stringify({ probe_id: state.probe, name: $('siteName').value.trim() }) });
+    snackbar(`已添加 ${r.site.name}：刷新该网站的页面后开始记录`, 'ok');
+    closeAddSite();
+    loadSites();
+  } catch (e) {
+    $('siteConfirm').disabled = false;
+    probeStatus(`添加失败：${e.message}`, true);
+  }
 }
 
 // ------------------------------------------------------------------ 渲染：详情
@@ -891,8 +1014,13 @@ $('notifyTest').onclick = () => {
 };
 $('serverRefresh').onclick = loadServerInfo;
 $('search').addEventListener('input', (e) => { state.search = e.target.value; render(); });
-$('sort').value = state.sort;
-$('sort').addEventListener('change', (e) => { state.sort = e.target.value; save('sort', state.sort); render(); });
+$('sitesBtn').onclick = (e) => { e.stopPropagation(); toggleSitesMenu(); };
+document.addEventListener('click', (e) => { if (!e.target.closest?.('.sitemenu')) toggleSitesMenu(false); });
+$('siteCancel').onclick = closeAddSite;
+$('siteScrim').addEventListener('click', (e) => { if (e.target === $('siteScrim')) closeAddSite(); });
+$('siteProbe').onclick = startProbe;
+$('siteUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); startProbe(); } });
+$('siteConfirm').onclick = confirmAddSite;
 $('detailClose').onclick = closeDetail;
 $('detailScrim').addEventListener('click', (e) => { if (e.target === $('detailScrim')) closeDetail(); });
 $('detailJump').onclick = () => { const c = convById(state.selected); if (c) jumpTo(c); };

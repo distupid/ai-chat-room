@@ -1,7 +1,7 @@
 // MV3 Service Worker 入口：把 chrome.* API 适配到 background-core
 import { createBackground, DEFAULT_SETTINGS } from './lib/background-core.js';
 import { randomId } from './shared/protocol.js';
-import { analyzeDomOnServer, clearDomConfigOnServer } from './lib/dom-config-client.js';
+import { analyzeDomOnServer, clearDomConfigOnServer, getSitesFromServer, submitProbeDom } from './lib/dom-config-client.js';
 
 const SUPPORTED_URL = /^https:\/\/(chatgpt\.com|chat\.openai\.com|duck\.ai|(?:www\.)?hark\.com)\//;
 function siteOf(url) {
@@ -46,6 +46,77 @@ async function clearDomConfig() {
   return { ok: true };
 }
 
+// ------------------------------------------------------------- 看板添加的网站
+const CONTENT_JS = ['lib/dom-observer.js', 'lib/page-actions.js', 'content.js'];
+
+/** 页面里执行：去掉脚本 / 样式等，返回 HTML（与 content.js 的 captureDom 相同） */
+function capturePage() {
+  const root = document.documentElement.cloneNode(true);
+  root.querySelectorAll('script, style, noscript, link, svg, iframe, template, img, video, canvas').forEach((n) => n.remove());
+  return { html: '<!DOCTYPE html>\n' + root.outerHTML, url: location.href, title: document.title };
+}
+
+function waitTabComplete(tabId, timeoutMs) {
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(t); chrome.tabs.onUpdated.removeListener(on); resolve(); };
+    const on = (id, info) => { if (id === tabId && info.status === 'complete') done(); };
+    const t = setTimeout(done, timeoutMs);
+    chrome.tabs.onUpdated.addListener(on);
+    chrome.tabs.get(tabId).then((tab) => { if (tab.status === 'complete') done(); }, done);
+  });
+}
+
+/** 后端指令 probe_site：后台打开网址（用这个浏览器的登录状态）→ 等页面渲染 → 抓 DOM → 上传分析 → 关闭标签页 */
+async function probeSite(command) {
+  const url = command.text;
+  if (!/^https:\/\//.test(url || '')) return { ok: false, code: 'bad_url', detail: '只支持 https 网址' };
+  let tab;
+  try {
+    tab = await chrome.tabs.create({ url, active: false });
+    await waitTabComplete(tab.id, 30000);
+    await new Promise((r) => setTimeout(r, 4000));   // 单页应用：再等消息渲染出来
+    const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: capturePage });
+    if (!res?.result?.html) return { ok: false, code: 'capture_failed', detail: '没能读取页面内容' };
+    const { serverUrl, token } = await loadSettings();
+    const r = await submitProbeDom({ serverUrl, token, probeId: command.command_id, ...res.result });
+    return r.ok ? { ok: true, detail: '已上传页面' } : { ok: false, code: 'upload_failed', detail: r.error || `HTTP ${r.status}` };
+  } catch (e) {
+    return { ok: false, code: 'probe_failed', detail: String(e?.message || e) };
+  } finally {
+    if (tab?.id != null) chrome.tabs.remove(tab.id).catch(() => {});
+  }
+}
+
+/** 拉取网站列表：保存各站点的 DomConfig，并为添加的网站注册内容脚本（已打开的页面刷新后生效） */
+async function syncSites() {
+  const { serverUrl, token } = await loadSettings();
+  if (!token) return { ok: false, code: 'no_token' };
+  let r;
+  try { r = await getSitesFromServer({ serverUrl, token }); } catch (e) { return { ok: false, code: 'unreachable', detail: String(e?.message || e) }; }
+  if (!r.ok) return { ok: false, code: 'sites_failed', detail: r.error };
+  const custom = (r.sites || []).filter((x) => !x.builtin && x.host && x.key && x.config);
+  const { domConfigs = {} } = await chrome.storage.local.get(['domConfigs']);
+  const { customSiteKeys: oldKeys = [] } = await chrome.storage.local.get(['customSiteKeys']);
+  const next = { ...domConfigs };
+  for (const k of oldKeys) delete next[k];
+  const hosts = {};
+  for (const x of custom) { next[x.key] = { ...x.config, site: x.key }; hosts[x.host] = x.key; }
+  await chrome.storage.local.set({ domConfigs: next, customSiteHosts: hosts, customSiteKeys: custom.map((x) => x.key) });
+  try {
+    const registered = await chrome.scripting.getRegisteredContentScripts();
+    const ids = registered.map((x) => x.id).filter((id) => id.startsWith('site-'));
+    if (ids.length) await chrome.scripting.unregisterContentScripts({ ids });
+    if (custom.length) {
+      await chrome.scripting.registerContentScripts(custom.map((x) => ({
+        id: `site-${x.key}`, matches: [`https://${x.host}/*`], js: CONTENT_JS, runAt: 'document_idle', persistAcrossSessions: true
+      })));
+    }
+  } catch (e) {
+    return { ok: false, code: 'register_failed', detail: String(e?.message || e) };
+  }
+  return { ok: true, detail: `${custom.length} 个添加的网站` };
+}
+
 const storage = {
   async get(key) { return (await chrome.storage.session.get(key))[key]; },
   async set(key, value) { await chrome.storage.session.set({ [key]: value }); }
@@ -67,6 +138,8 @@ const ready = (async () => {
     WebSocketImpl: WebSocket, storage, clientId: settings.clientId, settings,
     // 看板指令 → 对应标签页的内容脚本执行
     executeCommand: async (tabId, command) => {
+      if (command.action === 'probe_site') return probeSite(command);
+      if (command.action === 'sync_sites') return syncSites();
       if (command.action === 'focus') {
         try {
           const tab = await chrome.tabs.update(tabId, { active: true });
@@ -84,7 +157,7 @@ const ready = (async () => {
       }
     }
   });
-  if (settings.token) await bg.conn.start();
+  if (settings.token) { await bg.conn.start(); syncSites().catch(() => {}); }
   bg.conn.onStateChange = (state) => {
     const badge = { open: 'ON', auth_failed: 'AUTH', waiting: '…', connecting: '…', handshaking: '…' }[state] || '';
     chrome.action.setBadgeText({ text: badge }).catch(() => {});
