@@ -14,3 +14,7 @@ dist/
 build/
 coverage/
 *.tsbuildinfo
+# ---- 运行数据（含 token、对话） ----
+src/backend/data/
+*.db
+*.db-*

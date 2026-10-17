@@ -2,7 +2,7 @@ name: Security
 
 "on":
   push:
-    branches: [main]
+    branches: [main, hark]
   pull_request: {}
   schedule:
     - cron: "0 3 * * 1"
@@ -15,9 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
       - run: pnpm audit
       - name: Secret scan
         uses: gitleaks/gitleaks-action@v2

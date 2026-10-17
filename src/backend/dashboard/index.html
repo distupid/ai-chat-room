@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>会话管理 · Chat Bridge</title>
+  <style>
+    /* Material Design 3 色彩令牌（基线紫色主题） */
+    :root, [data-theme="light"] {
+      --primary: #6750A4; --on-primary: #FFFFFF; --primary-container: #EADDFF; --on-primary-container: #21005D;
+      --secondary-container: #E8DEF8; --on-secondary-container: #1D192B;
+      --tertiary: #7D5260; --tertiary-container: #FFD8E4;
+      --surface: #FEF7FF; --surface-dim: #DED8E1;
+      --surface-container-lowest: #FFFFFF; --surface-container-low: #F7F2FA; --surface-container: #F3EDF7;
+      --surface-container-high: #ECE6F0; --surface-container-highest: #E6E0E9;
+      --on-surface: #1D1B20; --on-surface-variant: #49454F; --outline: #79747E; --outline-variant: #CAC4D0;
+      --error: #B3261E; --on-error: #FFFFFF; --error-container: #F9DEDC; --on-error-container: #410E0B;
+      --inverse-surface: #322F35; --inverse-on-surface: #F5EFF7; --inverse-primary: #D0BCFF;
+      --scrim: rgba(0,0,0,.32);
+      --st-generating: #0B57D0; --st-generating-bg: #D3E3FD;
+      --st-limit: #8A5300; --st-limit-bg: #FFDDB3;
+      --st-error: #B3261E; --st-error-bg: #F9DEDC;
+      --st-idle: #146C2E; --st-idle-bg: #C4EED0;
+      --st-closed: #49454F; --st-closed-bg: #E6E0E9;
+      --elev-1: 0 1px 2px rgba(0,0,0,.3), 0 1px 3px 1px rgba(0,0,0,.15);
+      --elev-3: 0 4px 8px 3px rgba(0,0,0,.15), 0 1px 3px rgba(0,0,0,.3);
+    }
+    [data-theme="dark"] {
+      --primary: #D0BCFF; --on-primary: #381E72; --primary-container: #4F378B; --on-primary-container: #EADDFF;
+      --secondary-container: #4A4458; --on-secondary-container: #E8DEF8;
+      --tertiary: #EFB8C8; --tertiary-container: #633B48;
+      --surface: #141218; --surface-dim: #141218;
+      --surface-container-lowest: #0F0D13; --surface-container-low: #1D1B20; --surface-container: #211F26;
+      --surface-container-high: #2B2930; --surface-container-highest: #36343B;
+      --on-surface: #E6E0E9; --on-surface-variant: #CAC4D0; --outline: #938F99; --outline-variant: #49454F;
+      --error: #F2B8B5; --on-error: #601410; --error-container: #8C1D18; --on-error-container: #F9DEDC;
+      --inverse-surface: #E6E0E9; --inverse-on-surface: #322F35; --inverse-primary: #6750A4;
+      --scrim: rgba(0,0,0,.5);
+      --st-generating: #A8C7FA; --st-generating-bg: #0842A0;
+      --st-limit: #FFB95C; --st-limit-bg: #5C3B00;
+      --st-error: #F2B8B5; --st-error-bg: #8C1D18;
+      --st-idle: #6DD58C; --st-idle-bg: #0F5223;
+      --st-closed: #CAC4D0; --st-closed-bg: #36343B;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--surface); color: var(--on-surface); }
+    body { font: 14px/20px Roboto, "Noto Sans SC", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; letter-spacing: .1px; }
+    button, input, textarea, select { font: inherit; color: inherit; }
+    svg.i { width: 24px; height: 24px; fill: currentColor; flex: none; }
+    svg.i.s18 { width: 18px; height: 18px; }
+
+    /* 顶部应用栏 */
+    .appbar { position: sticky; top: 0; z-index: 10; background: var(--surface-container); display: flex; align-items: center; gap: 8px; padding: 8px 16px; min-height: 64px; }
+    .appbar h1 { font-size: 22px; line-height: 28px; font-weight: 400; margin: 0 12px 0 4px; white-space: nowrap; }
+    .appbar .grow { flex: 1; }
+    .conn { display: inline-flex; align-items: center; gap: 6px; color: var(--on-surface-variant); font-size: 12px; white-space: nowrap; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--outline); }
+    .dot.on { background: var(--st-idle); } .dot.off { background: var(--error); }
+    .search { display: flex; align-items: center; gap: 8px; height: 48px; padding: 0 16px; border-radius: 28px; background: var(--surface-container-high); min-width: 220px; max-width: 420px; flex: 1; color: var(--on-surface-variant); }
+    .search input { border: 0; outline: 0; background: transparent; flex: 1; min-width: 0; color: var(--on-surface); }
+
+    .icon-btn { width: 40px; height: 40px; border-radius: 20px; border: 0; background: transparent; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; color: var(--on-surface-variant); position: relative; flex: none; }
+    .icon-btn:hover { background: color-mix(in srgb, var(--on-surface-variant) 8%, transparent); }
+    .icon-btn:focus-visible { outline: 2px solid var(--primary); }
+
+    .btn { height: 40px; padding: 0 24px; border-radius: 20px; border: 0; cursor: pointer; font-weight: 500; letter-spacing: .1px; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+    .btn.s { height: 32px; padding: 0 12px; border-radius: 16px; font-size: 13px; }
+    .btn:disabled { opacity: .38; cursor: default; }
+    .btn.filled { background: var(--primary); color: var(--on-primary); }
+    .btn.filled:hover:not(:disabled) { box-shadow: var(--elev-1); }
+    .btn.tonal { background: var(--secondary-container); color: var(--on-secondary-container); }
+    .btn.tonal:hover:not(:disabled) { box-shadow: var(--elev-1); }
+    .btn.outlined { background: transparent; color: var(--primary); border: 1px solid var(--outline); }
+    .btn.text { background: transparent; color: var(--primary); padding: 0 12px; }
+    .btn.outlined:hover:not(:disabled), .btn.text:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 8%, transparent); }
+
+    /* 筛选芯片 */
+    .chips { display: flex; gap: 8px; flex-wrap: wrap; padding: 16px 24px 4px; align-items: center; }
+    .chip { height: 32px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--outline-variant); background: transparent; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 14px; font-weight: 500; color: var(--on-surface-variant); }
+    .chip:hover { background: color-mix(in srgb, var(--on-surface-variant) 8%, transparent); }
+    .chip.on { background: var(--secondary-container); color: var(--on-secondary-container); border-color: transparent; }
+    .chip .n { font-size: 12px; opacity: .8; }
+    .chips .sep { width: 1px; height: 24px; background: var(--outline-variant); margin: 0 4px; }
+
+    main { padding: 12px 24px 96px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+    .empty { grid-column: 1 / -1; text-align: center; color: var(--on-surface-variant); padding: 64px 16px; }
+
+    /* 会话卡片（filled card，可点击） */
+    .card { background: var(--surface-container-low); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 10px; cursor: pointer; position: relative; outline: none; transition: box-shadow .15s, background .15s; border-left: 4px solid var(--st-closed); }
+    .card:hover { box-shadow: var(--elev-1); background: var(--surface-container); }
+    .card:focus-visible { outline: 2px solid var(--primary); }
+    .card.s-generating { border-left-color: var(--st-generating); }
+    .card.s-limit_reached { border-left-color: var(--st-limit); }
+    .card.s-error { border-left-color: var(--st-error); }
+    .card.s-idle { border-left-color: var(--st-idle); }
+    .card.done { opacity: .7; }
+    .card .head { display: flex; gap: 12px; align-items: flex-start; }
+    .avatar { width: 40px; height: 40px; border-radius: 20px; flex: none; display: flex; align-items: center; justify-content: center; font-weight: 500; font-size: 15px; }
+    .avatar.chatgpt { background: #10A37F; color: #fff; }
+    .avatar.duckai { background: #DE5833; color: #fff; }
+    .avatar.hark { background: var(--primary); color: var(--on-primary); }
+    .avatar.other { background: var(--tertiary-container); color: var(--on-surface); }
+    .card .tt { flex: 1; min-width: 0; }
+    .card .title { font-size: 16px; line-height: 24px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .card .sub { color: var(--on-surface-variant); font-size: 12px; line-height: 16px; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+    .badge { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; white-space: nowrap; }
+    .b-generating { background: var(--st-generating-bg); color: var(--st-generating); }
+    .b-limit_reached { background: var(--st-limit-bg); color: var(--st-limit); }
+    .b-error { background: var(--st-error-bg); color: var(--st-error); }
+    .b-idle { background: var(--st-idle-bg); color: var(--st-idle); }
+    .b-closed { background: var(--st-closed-bg); color: var(--st-closed); }
+    .tags { display: flex; gap: 6px; flex-wrap: wrap; }
+    .tag { height: 22px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--outline-variant); font-size: 11px; display: inline-flex; align-items: center; color: var(--on-surface-variant); }
+    .tag.warn { border-color: var(--error); color: var(--error); }
+    .notice { font-size: 13px; border-radius: 8px; padding: 8px 12px; background: var(--st-limit-bg); color: var(--st-limit); }
+    .notice.err { background: var(--st-error-bg); color: var(--st-error); }
+    .preview { font-size: 13px; color: var(--on-surface-variant); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; white-space: pre-wrap; word-break: break-word; }
+    .preview b { color: var(--on-surface); font-weight: 500; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .quick { display: none; flex-direction: column; gap: 8px; }
+    .quick.open { display: flex; }
+    .field { border: 1px solid var(--outline); border-radius: 4px; background: transparent; padding: 10px 12px; width: 100%; resize: vertical; min-height: 64px; outline: none; }
+    .field:focus { border: 2px solid var(--primary); padding: 9px 11px; }
+    .quick .row { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
+    .quick .hint { margin-right: auto; font-size: 12px; color: var(--on-surface-variant); }
+
+    /* 对话框 */
+    .scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 30; display: none; align-items: center; justify-content: center; padding: 24px; }
+    .scrim.open { display: flex; }
+    .dialog { background: var(--surface-container-high); border-radius: 28px; box-shadow: var(--elev-3); width: min(860px, 100%); max-height: min(88vh, 100%); display: flex; flex-direction: column; overflow: hidden; }
+    .dialog.narrow { width: min(560px, 100%); }
+    .dialog .dh { display: flex; align-items: center; gap: 8px; padding: 20px 16px 12px 24px; }
+    .dialog .dh h2 { font-size: 22px; line-height: 28px; font-weight: 400; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dialog .dsub { padding: 0 24px 12px; color: var(--on-surface-variant); font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .dialog .db { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }
+    .dialog .df { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 24px 20px; }
+
+    /* 详情：消息 */
+    .msgs { display: flex; flex-direction: column; gap: 12px; }
+    .msg { max-width: 92%; border-radius: 16px; padding: 10px 14px; word-break: break-word; }
+    .msg.user { align-self: flex-end; background: var(--primary-container); color: var(--on-primary-container); border-bottom-right-radius: 4px; }
+    .msg.assistant, .msg.unknown, .msg.system, .msg.tool { align-self: flex-start; background: var(--surface-container-lowest); border: 1px solid var(--outline-variant); border-bottom-left-radius: 4px; }
+    .msg.streaming { border-color: var(--st-generating); }
+    .msg .meta { font-size: 11px; color: var(--on-surface-variant); display: flex; gap: 8px; margin-bottom: 4px; }
+    .msg.user .meta { color: inherit; opacity: .75; }
+    .msg .body p { margin: 0 0 8px; white-space: pre-wrap; }
+    .msg .body p:last-child { margin-bottom: 0; }
+    .msg .body pre { margin: 8px 0; padding: 10px 12px; border-radius: 8px; background: var(--surface-container-highest); overflow-x: auto; font: 12.5px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; white-space: pre; }
+    .msg .body code.inl { font: 12.5px ui-monospace, Consolas, monospace; background: var(--surface-container-highest); border-radius: 4px; padding: 1px 4px; }
+
+    /* 设置 */
+    .sec { padding: 12px 0; border-bottom: 1px solid var(--outline-variant); }
+    .sec:last-child { border-bottom: 0; }
+    .sec h3 { margin: 0 0 12px; font-size: 14px; font-weight: 500; color: var(--primary); }
+    .row2 { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+    .row2 label { flex: 1; min-width: 200px; }
+    .lbl { font-size: 12px; color: var(--on-surface-variant); display: block; margin-bottom: 4px; }
+    .input { height: 48px; border: 1px solid var(--outline); border-radius: 4px; padding: 0 12px; background: transparent; width: 100%; outline: none; }
+    .input:focus { border: 2px solid var(--primary); padding: 0 11px; }
+    .seg { display: inline-flex; border: 1px solid var(--outline); border-radius: 20px; overflow: hidden; }
+    .seg button { height: 40px; padding: 0 16px; border: 0; background: transparent; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
+    .seg button + button { border-left: 1px solid var(--outline); }
+    .seg button.on { background: var(--secondary-container); color: var(--on-secondary-container); }
+    .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 0; }
+    .switch-row .t { font-size: 14px; } .switch-row .d { font-size: 12px; color: var(--on-surface-variant); }
+    .switch { width: 52px; height: 32px; border-radius: 16px; border: 2px solid var(--outline); background: var(--surface-container-highest); position: relative; cursor: pointer; flex: none; padding: 0; }
+    .switch::after { content: ""; position: absolute; top: 6px; left: 6px; width: 16px; height: 16px; border-radius: 50%; background: var(--outline); transition: all .15s; }
+    .switch[aria-checked="true"] { background: var(--primary); border-color: var(--primary); }
+    .switch[aria-checked="true"]::after { left: 22px; top: 2px; width: 24px; height: 24px; background: var(--on-primary); }
+    .switch:disabled { opacity: .38; cursor: default; }
+    .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; font-size: 13px; }
+    .kv .k { color: var(--on-surface-variant); }
+    .clients { margin-top: 8px; font-size: 12px; color: var(--on-surface-variant); }
+
+    /* Snackbar */
+    #snackbars { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 40; align-items: center; }
+    .snackbar { background: var(--inverse-surface); color: var(--inverse-on-surface); border-radius: 4px; padding: 14px 16px; min-width: 288px; max-width: 560px; box-shadow: var(--elev-3); font-size: 14px; display: flex; gap: 12px; align-items: center; }
+    .snackbar.err { border-left: 4px solid var(--error); }
+    .snackbar.ok { border-left: 4px solid var(--st-idle); }
+  </style>
+</head>
+<body>
+  <header class="appbar">
+    <h1>会话管理</h1>
+    <span class="conn"><span id="connDot" class="dot"></span><span id="connText">未连接</span></span>
+    <span class="grow"></span>
+    <label class="search">
+      <svg class="i" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+      <input id="search" type="search" placeholder="搜索标题、内容、会话 ID" />
+    </label>
+    <select id="sort" class="icon-btn" style="width:auto;padding:0 8px" title="排序">
+      <option value="activity">最近活动</option>
+      <option value="status">需要处理的在前</option>
+    </select>
+    <button id="themeBtn" class="icon-btn" title="切换深色 / 浅色"></button>
+    <button id="settingsBtn" class="icon-btn" title="设置">
+      <svg class="i" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87a.47.47 0 0 0 .12.61l2.03 1.58c-.05.31-.09.64-.09.94s.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.47.47 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
+    </button>
+  </header>
+
+  <div id="chips" class="chips"></div>
+  <main><section id="grid" class="grid"></section></main>
+
+  <!-- 详情 -->
+  <div id="detailScrim" class="scrim" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
+    <div class="dialog">
+      <div class="dh">
+        <h2 id="detailTitle">-</h2>
+        <button id="detailJump" class="icon-btn" title="跳转到页面">
+          <svg class="i" viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
+        </button>
+        <button id="detailCopy" class="icon-btn" title="复制最后一条回答">
+          <svg class="i" viewBox="0 0 24 24"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z"/></svg>
+        </button>
+        <button id="detailClose" class="icon-btn" title="关闭">
+          <svg class="i" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </div>
+      <div id="detailSub" class="dsub"></div>
+      <div id="detailBody" class="db"><div id="detailMsgs" class="msgs"></div></div>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <div id="settingsScrim" class="scrim" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="dialog narrow">
+      <div class="dh">
+        <h2 id="settingsTitle">设置</h2>
+        <button id="settingsClose" class="icon-btn" title="关闭">
+          <svg class="i" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </div>
+      <div class="db">
+        <section class="sec">
+          <h3>连接</h3>
+          <label><span class="lbl">observer token（server/data/config.json）</span>
+            <input id="token" class="input" type="password" autocomplete="off" /></label>
+          <div class="row2">
+            <button id="connect" class="btn filled">连接</button>
+            <button id="disconnect" class="btn outlined">断开</button>
+            <span id="connDetail" class="lbl" style="margin:0"></span>
+          </div>
+        </section>
+        <section class="sec">
+          <h3>外观</h3>
+          <div class="seg" id="themeSeg">
+            <button data-theme-opt="light">浅色</button>
+            <button data-theme-opt="dark">深色</button>
+            <button data-theme-opt="system">跟随系统</button>
+          </div>
+        </section>
+        <section class="sec">
+          <h3>系统通知</h3>
+          <div class="switch-row">
+            <div><div class="t">启用系统弹窗通知</div><div class="d" id="notifyPerm"></div></div>
+            <button id="notifyEnabled" class="switch" role="switch" aria-checked="false"></button>
+          </div>
+          <div class="switch-row"><div class="t">已到限额</div><button class="switch" role="switch" data-notify="limit_reached"></button></div>
+          <div class="switch-row"><div class="t">回答完成</div><button class="switch" role="switch" data-notify="finished"></button></div>
+          <div class="switch-row"><div class="t">出错</div><button class="switch" role="switch" data-notify="error"></button></div>
+          <div class="switch-row">
+            <div><div class="t">只在看板不在前台时通知</div><div class="d">看板页面正在看时用页面内提示</div></div>
+            <button class="switch" role="switch" data-notify="background_only"></button>
+          </div>
+          <div class="row2"><button id="notifyTest" class="btn text">发送测试通知</button></div>
+        </section>
+        <section class="sec">
+          <h3>后台</h3>
+          <div id="serverInfo" class="kv"><span class="k">状态</span><span>-</span></div>
+          <div id="serverClients" class="clients"></div>
+          <div class="row2"><button id="serverRefresh" class="btn text">刷新</button></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="snackbars"></div>
+  <script type="module" src="/dashboard/app.js"></script>
+</body>
+</html>

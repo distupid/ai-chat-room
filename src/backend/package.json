@@ -1,0 +1,14 @@
+{
+  "name": "@ai-chat-room/backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "监听会话：WebSocket 鉴权、校验、SQLite 持久化、广播、看板 HTTP API",
+  "scripts": {
+    "start": "node bin/start.js"
+  },
+  "dependencies": {
+    "jsdom": "^30.1.2",
+    "ws": "^8.22.0"
+  }
+}

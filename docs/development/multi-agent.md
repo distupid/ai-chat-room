@@ -20,3 +20,18 @@
 
 - agent 之间僵持不下时升级给协调者裁决，超时未决则冻结并上报人类。
 
+
+## 前后端两端同时开发（本仓库的默认并行方式）
+
+| 泳道 | 拥有的目录 | 测试 | 分支前缀 |
+|---|---|---|---|
+| 契约 | `contracts/` | `tests/unit/protocol.test.js` | `a/` |
+| 前端（插件） | `src/frontend/`（不含生成物 `shared/`） | `tests/integration/{observer,sites}.test.js` | `fe/` |
+| 后端（监听会话 + 看板） | `src/backend/` | `tests/integration/{dom-config,dashboard}.test.js`、`tests/e2e/` | `be/` |
+| 测试与工具 | `tests/helpers.js`、`scripts/`、`.github/`、`docs/` | — | `g/` |
+
+- 两端只通过 `contracts/protocol.js`（WebSocket 消息）和 `docs/bridge/README.md` 里的 HTTP 接口表沟通。
+- 需要新字段 / 新接口：先开 `a/` 契约 PR 合并，两端再基于它并行实现；对方未就绪时用测试桩或 mock。
+- 前端 Agent 跑 `pnpm test:frontend`，后端 Agent 跑 `pnpm test:backend`，合并前都跑全量 `pnpm test`。
+- 集成分支：`hark`。各泳道从 `hark` 拉分支、向 `hark` 提 PR；`hark` 稳定后再由人合并到 `main`。
+- 详细泳道与热点文件拆分计划见 `docs/bridge/MULTI_AGENT_RULES.md`。

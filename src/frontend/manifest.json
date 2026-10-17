@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "ChatGPT WS Bridge",
+  "version": "1.3.0",
+  "description": "观察 ChatGPT / Duck.ai / Hark 页面 DOM，通过 WebSocket 上报到本地 Node.js 后端，并接收后端广播。",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "alarms",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://www.hark.com/*",
+    "https://hark.com/*",
+    "https://duck.ai/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://duck.ai/*",
+        "https://hark.com/*",
+        "https://www.hark.com/*"
+      ],
+      "js": [
+        "lib/dom-observer.js",
+        "lib/page-actions.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "ChatGPT WS Bridge"
+  }
+}
