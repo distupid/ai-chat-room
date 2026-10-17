@@ -1,0 +1,23 @@
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 本技术栈的标准命令。项目未配置的工具请删除对应步骤。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: pnpm install
+      - run: pnpm dlx eslint .
+      - run: pnpm dlx tsc --noEmit
+      - run: pnpm test

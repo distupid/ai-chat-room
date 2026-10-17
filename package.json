@@ -1,0 +1,17 @@
+{
+  "name": "ai-chat-room",
+  "version": "0.1.0",
+  "private": true,
+  "description": "web ai chat admin",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/unit/ tests/integration/ tests/e2e/",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p ."
+  },
+  "workspaces": [
+    "src/frontend",
+    "src/backend"
+  ]
+}
