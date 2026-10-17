@@ -446,6 +446,19 @@
       if (SKIP_TEXT_TAGS[tag]) return;
       if (node !== root && node.matches && node.matches(exclude)) return;
       if (tag === 'BR') { out.push('\n'); return; }
+      // 图片 → ![alt](url)；下载 / 文件链接 → [文字](url "download")：看板按原样式显示
+      if (tag === 'IMG') {
+        var src = node.currentSrc || node.src || node.getAttribute('src') || '';
+        if (/^https?:\/\//i.test(src) && !(node.width && node.width < 32 && node.height && node.height < 32)) {
+          out.push('\n\n![' + String(node.getAttribute('alt') || '').replace(/[\[\]\n]/g, ' ').trim() + '](' + src.replace(/[\s)]/g, encodeURIComponent) + ')\n\n');
+        }
+        return;
+      }
+      if (tag === 'A' && isDownloadLink(node)) {
+        var label = (node.textContent || '').replace(/\s+/g, ' ').replace(/[\[\]]/g, '').trim() || '下载文件';
+        out.push('[' + label + '](' + node.href.replace(/[\s)]/g, encodeURIComponent) + ' "download")');
+        return;
+      }
       var block = BLOCK_TAGS[tag];
       if (block) out.push('\n');
       else if (tag === 'TD' || tag === 'TH') out.push('\t');
@@ -462,6 +475,16 @@
       .replace(/[ \t]+\n/g, '\n')
       .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, '\n\n')
       .replace(/^\s+|\s+$/g, '');
+  }
+
+  var FILE_EXT_RE = /\.(pdf|zip|rar|7z|tar|gz|csv|xlsx?|docx?|pptx?|txt|json|md|png|jpe?g|gif|webp|svg|mp3|mp4|wav|mov|py|js|ts|html?)(?:[?#]|$)/i;
+  function isDownloadLink(a) {
+    var href = a.href || '';
+    if (!/^https?:\/\//i.test(href)) return false;
+    if (a.hasAttribute('download')) return true;
+    var path = '';
+    try { path = new URL(href).pathname; } catch (_) { return false; }
+    return FILE_EXT_RE.test(path) || /\/(download|files?)\//i.test(path);
   }
 
   // 只取正文，避免把“复制/编辑”等按钮区域算进去；找不到正文节点时退回整个消息节点

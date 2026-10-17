@@ -1,4 +1,4 @@
-// 会话管理看板：HTTP 拉取会话列表 + WebSocket 实时广播 + 页面指令（跳转 / 快速回复 / 重新回答）
+// AI-Chat-Room 看板：HTTP 拉取会话列表 + WebSocket 实时广播 + 页面指令（跳转 / 快速回复 / 重新回答）
 // 卡片：点击打开详情；置顶 / 归档 / 重新回答。详情：快速回复（常见回答候选）、每条回答 复制 / 收藏 / 重新回答 / 折叠。
 import { makeEnvelope, MessageType, randomId } from './protocol.js';
 
@@ -563,7 +563,7 @@ function card(c) {
     ? el('div', { class: `notice ${c.page_status === 'error' ? 'err' : ''}` }, c.status_detail) : null;
 
   const node = el('article', {
-    class: `card s-${c.status} ${c.pinned ? 'pinned' : ''} ${c.archived ? 'archived' : ''}`,
+    class: `card s-${c.status} src-${SOURCES[c.source] ? c.source : 'other'} ${c.pinned ? 'pinned' : ''} ${c.archived ? 'archived' : ''}`,
     'data-conv': id, tabindex: '0', role: 'button', title: '点击查看详情',
     onclick: () => openDetail(id),
     onkeydown: (e) => { if (e.target === node && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openDetail(id); } }
@@ -576,9 +576,10 @@ function card(c) {
           el('span', { class: 'tx' }, titleOf(c))),
         el('div', { class: 'sub' },
           el('span', {}, src.label),
-          c.model ? el('span', {}, c.model) : null,
-          el('span', { title: new Date(c.last_seen_at).toLocaleString() }, ago(c.last_seen_at)))),
-      el('span', { class: `badge b-${c.status}` }, STATUS[c.status]?.label || c.status)
+          c.model ? el('span', {}, c.model) : null)),
+      el('div', { class: 'side' },
+        el('span', { class: `badge b-${c.status}` }, STATUS[c.status]?.label || c.status),
+        el('span', { class: 'time', title: new Date(c.last_seen_at).toLocaleString() }, ago(c.last_seen_at)))
     ),
     el('div', { class: 'tags' },
       el('span', { class: 'tag' }, `${c.user_count} 问 · ${c.assistant_count} 答`),
@@ -625,7 +626,31 @@ function render() {
 
 // ------------------------------------------------------------------ 渲染：详情
 
-/** 轻量 Markdown：``` 代码块、空行分段、`行内代码`；全部用 textContent 写入，不解析 HTML */
+const DL_SVG = '<svg viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>';
+const safeUrl = (u) => /^https?:\/\//i.test(u) ? u : null;
+
+/** 段落内：`行内代码`、![图片](url)、[下载](url "download")；全部用 DOM 写入，不解析 HTML */
+function renderInline(p, para) {
+  const re = /(`[^`\n]+`)|!\[([^\]\n]*)\]\((\S+?)\)|\[([^\]\n]+)\]\((\S+?)(?: "download")?\)/g;
+  let last = 0, m;
+  while ((m = re.exec(para))) {
+    if (m.index > last) p.append(para.slice(last, m.index));
+    last = re.lastIndex;
+    if (m[1]) { p.append(el('code', { class: 'inl' }, m[1].slice(1, -1))); continue; }
+    if (m[3] != null) {
+      const u = safeUrl(m[3]);
+      if (u) p.append(el('img', { class: 'rich', src: u, alt: m[2] || '图片', loading: 'lazy', referrerpolicy: 'no-referrer', onclick: () => window.open(u, '_blank', 'noopener') }));
+      else p.append(m[0]);
+      continue;
+    }
+    const u = safeUrl(m[5]);
+    if (u) p.append(el('a', { class: 'dl', href: u, target: '_blank', rel: 'noopener noreferrer', download: '' }, el('span', { html: DL_SVG, style: 'display:inline-flex' }), m[4]));
+    else p.append(m[0]);
+  }
+  if (last < para.length) p.append(para.slice(last));
+}
+
+/** 轻量 Markdown：``` 代码块、空行分段、`行内代码`、图片、下载链接 */
 function renderText(text) {
   const frag = document.createDocumentFragment();
   const parts = String(text || '').split(/^```[^\n]*\n?/m);
@@ -637,10 +662,7 @@ function renderText(text) {
     for (const para of part.split(/\n{2,}/)) {
       if (!para.trim()) continue;
       const p = el('p');
-      para.split(/(`[^`\n]+`)/).forEach((seg) => {
-        if (/^`[^`\n]+`$/.test(seg)) p.append(el('code', { class: 'inl' }, seg.slice(1, -1)));
-        else if (seg) p.append(seg);
-      });
+      renderInline(p, para);
       frag.append(p);
     }
   });
@@ -865,7 +887,7 @@ for (const sw of document.querySelectorAll('[data-notify]')) {
 }
 $('notifyTest').onclick = () => {
   if (!settings.notify.enabled || Notification.permission !== 'granted') return snackbar('请先启用系统通知', 'err');
-  try { new Notification('会话管理', { body: '这是一条测试通知' }); } catch (e) { snackbar(`通知失败：${e.message}`, 'err'); }
+  try { new Notification('AI-Chat-Room', { body: '这是一条测试通知' }); } catch (e) { snackbar(`通知失败：${e.message}`, 'err'); }
 };
 $('serverRefresh').onclick = loadServerInfo;
 $('search').addEventListener('input', (e) => { state.search = e.target.value; render(); });

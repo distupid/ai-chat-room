@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
-  <title>会话管理 · Chat Bridge</title>
+  <title>AI-Chat-Room</title>
   <style>
     /* Material Design 3 色彩令牌（基线紫色主题） */
     :root, [data-theme="light"] {
@@ -97,6 +97,10 @@
     .card.s-error { border-left-color: var(--st-error); }
     .card.s-idle { border-left-color: var(--st-idle); }
     .card.archived { opacity: .7; }
+    .card { --src: var(--tertiary-container); }
+    .card.src-chatgpt { --src: #10A37F; } .card.src-duckai { --src: #DE5833; } .card.src-hark { --src: var(--primary); }
+    .card.s-idle { background: color-mix(in srgb, var(--src) 12%, var(--surface-container-low)); }
+    .card.s-idle:hover { background: color-mix(in srgb, var(--src) 18%, var(--surface-container)); }
     .card .head { display: flex; gap: 12px; align-items: flex-start; }
     .avatar { width: 40px; height: 40px; border-radius: 20px; flex: none; display: flex; align-items: center; justify-content: center; font-weight: 500; font-size: 15px; }
     .avatar.chatgpt { background: #10A37F; color: #fff; }
@@ -124,15 +128,23 @@
     .preview { font-size: 13px; color: var(--on-surface-variant); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; white-space: pre-wrap; word-break: break-word; }
     .preview b { color: var(--on-surface); font-weight: 500; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .card .actions { margin-top: auto; padding-top: 4px; }
+    .card .side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none; }
+    .card .side .time { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); white-space: nowrap; }
     .field { border: 1px solid var(--outline); border-radius: 4px; background: transparent; padding: 10px 12px; width: 100%; resize: vertical; min-height: 64px; outline: none; }
     .field:focus { border: 2px solid var(--primary); padding: 9px 11px; }
+
+    .msg .body img.rich { display: block; max-width: 100%; max-height: 480px; border-radius: 8px; margin: 8px 0; cursor: zoom-in; }
+    .msg .body a.dl { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; margin: 4px 0; border-radius: 8px; border: 1px solid var(--outline-variant); color: var(--primary); text-decoration: none; font-size: 13px; }
+    .msg .body a.dl:hover { background: var(--secondary-container); }
+    .msg .body a.dl svg { width: 18px; height: 18px; fill: currentColor; }
 
     /* 详情：快速回复 */
     .composer { display: none; flex-direction: column; gap: 8px; padding: 12px 24px 20px; border-top: 1px solid var(--outline-variant); position: relative; }
     .composer.open { display: flex; }
     .composer .row { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
     .composer .hint { margin-right: auto; font-size: 12px; color: var(--on-surface-variant); }
-    .cands { display: none; position: absolute; left: 24px; right: 24px; bottom: calc(100% - 4px); max-height: 240px; overflow-y: auto; background: var(--surface-container-lowest); border-radius: 12px; box-shadow: var(--elev-3); padding: 6px 0; z-index: 2; }
+    .cands { display: none; max-height: 200px; overflow-y: auto; background: var(--surface-container-lowest); border: 1px solid var(--outline-variant); border-radius: 12px; padding: 6px 0; }
     .cands.open { display: block; }
     .cands .ch { font-size: 11px; color: var(--on-surface-variant); padding: 4px 16px; }
     .cand { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 8px 16px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -211,7 +223,7 @@
 </head>
 <body>
   <header class="appbar">
-    <h1>会话管理</h1>
+    <h1>AI-Chat-Room</h1>
     <span class="conn"><span id="connDot" class="dot"></span><span id="connText">未连接</span></span>
     <span class="grow"></span>
     <label class="search">
@@ -249,8 +261,8 @@
       <div id="detailSub" class="dsub"></div>
       <div id="detailBody" class="db"><div id="detailMsgs" class="msgs"></div></div>
       <div id="composer" class="composer">
+        <textarea id="quickText" class="field" placeholder="发到这个会话，Ctrl+Enter 发送；常见回答显示在输入框下方"></textarea>
         <div id="quickCands" class="cands" role="listbox"></div>
-        <textarea id="quickText" class="field" placeholder="发到这个会话，Ctrl+Enter 发送；输入时会弹出常见回答"></textarea>
         <div class="row">
           <span id="quickHint" class="hint"></span>
           <button id="quickCancel" class="btn text s">收起</button>

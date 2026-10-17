@@ -1,4 +1,4 @@
-# ChatGPT WS Bridge
+# AI-Chat-Room（浏览器桥接）
 
 ChatGPT 页面 → Chrome 插件（MV3）→ Node.js 本地后端（Schema 校验 / SQLite 持久化 / WebSocket 广播）的完整双向事件链路。
 

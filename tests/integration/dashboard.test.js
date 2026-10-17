@@ -42,7 +42,7 @@ test('看板页面：静态文件、安全响应头', async () => {
     assert.match(r.headers.get('content-security-policy'), /default-src 'self'/);
     assert.equal(r.headers.get('cache-control'), 'no-store');
   }
-  assert.match(await (await get(server, '/dashboard')).text(), /会话管理/);
+  assert.match(await (await get(server, '/dashboard')).text(), /AI-Chat-Room/);
   assert.equal((await get(server, '/dashboard/../server/data/config.json')).status, 404);
   await server.stop();
 });
@@ -345,6 +345,9 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
 
   const html = readFileSync(join(ROOT, 'src/backend/dashboard/index.html'), 'utf8').replace(/<script type="module"[^>]*><\/script>/, '');
   assert.match(html, /\.card \.title \{[^}]*white-space: nowrap/, '卡片标题不换行');
+  assert.match(html, /\.card \.actions \{ margin-top: auto/, '卡片按钮固定在底部');
+  assert.match(html, /\.card\.s-idle \{ background: color-mix\(in srgb, var\(--src\)/, '空闲卡片背景取头像颜色');
+  assert.ok(html.indexOf('id="quickText"') < html.indexOf('id="quickCands"'), '常见回答在输入框下方');
   const dom = new JSDOM(html, { url: `${origin}/dashboard`, runScripts: 'outside-only', pretendToBeVisual: true });
   const win = dom.window;
   const copied = [];
@@ -389,6 +392,10 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   const cardEl = await waitFor(() => d.querySelector(cardSel), { label: 'card' });
   assert.match(cardEl.querySelector('.title').textContent, /^界面测试：/);
   assert.equal(cardEl.querySelector('.badge').textContent, '空闲');
+  assert.ok(cardEl.classList.contains('src-chatgpt'), '卡片带来源类名（空闲时背景取头像颜色）');
+  assert.ok(cardEl.querySelector('.side .badge + .time'), '时间在状态下方');
+  assert.ok(!cardEl.querySelector('.sub .time'));
+  assert.equal(d.title, 'AI-Chat-Room');
   assert.match(cardEl.querySelector('.sub').textContent, /ChatGPT/);
   assert.match(d.getElementById('chips').textContent, /全部1/);
   const cardButtons = () => [...d.querySelectorAll(`${cardSel} button`)].map((b) => b.textContent);
@@ -454,6 +461,15 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   await sendAndAck(ext, ev('message.updated', { message_id: 'a1', role: 'assistant', index: 1, text: '代码：\n\n```js\nconst a = 1;\n```\n\n用 `a` 即可', text_length: 30 }));
   await waitFor(() => d.querySelector('#detailMsgs .msg.assistant pre code')?.textContent === 'const a = 1;', { label: 'code block' });
   assert.equal(d.querySelector('#detailMsgs .msg.assistant code.inl').textContent, 'a');
+  // 图片、下载链接按原样式显示；非 http(s) 的不渲染成元素
+  await sendAndAck(ext, ev('message.updated', { message_id: 'a1', role: 'assistant', index: 1, text: '图：\n\n![结果](https://files.example.com/a.png)\n\n下载 [report.pdf](https://files.example.com/r.pdf "download") 和 [x](javascript:alert(1) "download")', text_length: 40 }));
+  await waitFor(() => d.querySelector('#detailMsgs .msg.assistant img.rich'), { label: 'image' });
+  assert.equal(d.querySelector('#detailMsgs .msg.assistant img.rich').getAttribute('src'), 'https://files.example.com/a.png');
+  const dl = d.querySelectorAll('#detailMsgs .msg.assistant a.dl');
+  assert.equal(dl.length, 1);
+  assert.equal(dl[0].getAttribute('href'), 'https://files.example.com/r.pdf');
+  assert.equal(dl[0].textContent, 'report.pdf');
+  assert.equal(dl[0].getAttribute('rel'), 'noopener noreferrer');
 
   // 详情右上角：快速回复 + 常见回答候选
   assert.ok(!d.getElementById('composer').classList.contains('open'));
