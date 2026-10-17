@@ -1,0 +1,10 @@
+{
+  "name": "@ai-chat-room/frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Chrome MV3 插件：站点适配、DOM 观察、事件上报、指令执行。直接在 chrome://extensions 加载本目录",
+  "scripts": {
+    "build": "node ../../scripts/sync-shared.js"
+  }
+}

@@ -2,12 +2,10 @@
 # 本地验证：运行本技术栈的真实检查，遇到失败即停。
 set -euo pipefail
 cd "$(dirname "$0")/.."
-echo "==> lint"
-pnpm dlx eslint .
-echo "==> typecheck"
-pnpm dlx tsc --noEmit
-echo "==> test"
+echo "==> install"
+pnpm install --frozen-lockfile
+echo "==> build + test"
 pnpm test
-echo "==> build"
-pnpm build
+echo "==> 生成物一致性"
+git diff --exit-code -- contracts/protocol.schema.json src/frontend/shared/ || { echo "生成物未提交：请提交 pnpm build 的结果"; exit 1; }
 echo "全部检查通过。"

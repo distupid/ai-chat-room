@@ -1,0 +1,116 @@
+// MV3 Service Worker 入口：把 chrome.* API 适配到 background-core
+import { createBackground, DEFAULT_SETTINGS } from './lib/background-core.js';
+import { randomId } from './shared/protocol.js';
+import { analyzeDomOnServer, clearDomConfigOnServer } from './lib/dom-config-client.js';
+
+const SUPPORTED_URL = /^https:\/\/(chatgpt\.com|chat\.openai\.com|duck\.ai|(?:www\.)?hark\.com)\//;
+function siteOf(url) {
+  const host = new URL(url).hostname;
+  if (/(^|\.)duck\.ai$/.test(host)) return 'duckai';
+  if (/(^|\.)hark\.com$/.test(host)) return 'hark';
+  return 'chatgpt';
+}
+
+/** 弹窗按钮：抓取当前标签页 DOM → 后端分析 → 保存配置（内容脚本监听 storage 变化后立即生效） */
+async function analyzeActiveTab() {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab || !SUPPORTED_URL.test(tab.url || '')) return { ok: false, error: '请先切换到 chatgpt.com / duck.ai / hark.com 的对话页面再点分析' };
+  const site = siteOf(tab.url);
+  let captured;
+  try { captured = await chrome.tabs.sendMessage(tab.id, { kind: 'capture_dom' }); }
+  catch { return { ok: false, error: '页面上没有运行内容脚本：重新加载插件后，请按 F5 刷新 ChatGPT 页面' }; }
+  if (!captured?.ok) return { ok: false, error: captured?.error || '抓取 DOM 失败' };
+  const { serverUrl, token } = await loadSettings();
+  if (!token) return { ok: false, error: '请先填写并保存 extension token' };
+  let result;
+  try {
+    result = await analyzeDomOnServer({ serverUrl, token, ...captured.page });
+  } catch (e) {
+    return { ok: false, error: `无法访问后端分析接口：${e?.message || e}` };
+  }
+  if (result.ok && result.config) {
+    const { domConfigs = {}, domConfigReports = {} } = await chrome.storage.local.get(['domConfigs', 'domConfigReports']);
+    await chrome.storage.local.set({
+      domConfigs: { ...domConfigs, [site]: { ...result.config, site } },
+      domConfigReports: { ...domConfigReports, [site]: result.report },
+      ...(site === 'chatgpt' ? { domConfig: result.config, domConfigReport: result.report } : {})
+    });
+  }
+  return { ...result, html_bytes: captured.page.html.length };
+}
+
+async function clearDomConfig() {
+  await chrome.storage.local.remove(['domConfig', 'domConfigReport', 'domConfigs', 'domConfigReports']);
+  const { serverUrl, token } = await loadSettings();
+  if (token) { try { await clearDomConfigOnServer({ serverUrl, token }); } catch { /* 后端不可达时只清本地 */ } }
+  return { ok: true };
+}
+
+const storage = {
+  async get(key) { return (await chrome.storage.session.get(key))[key]; },
+  async set(key, value) { await chrome.storage.session.set({ [key]: value }); }
+};
+
+async function loadSettings() {
+  const s = await chrome.storage.local.get(['serverUrl', 'token', 'clientId']);
+  let clientId = s.clientId;
+  if (!clientId) {
+    clientId = randomId('ext').slice(0, 32);
+    await chrome.storage.local.set({ clientId });
+  }
+  return { serverUrl: s.serverUrl || DEFAULT_SETTINGS.serverUrl, token: s.token || DEFAULT_SETTINGS.token, clientId };
+}
+
+const ready = (async () => {
+  const settings = await loadSettings();
+  const bg = createBackground({
+    WebSocketImpl: WebSocket, storage, clientId: settings.clientId, settings,
+    // 看板指令 → 对应标签页的内容脚本执行
+    executeCommand: async (tabId, command) => {
+      if (command.action === 'focus') {
+        try {
+          const tab = await chrome.tabs.update(tabId, { active: true });
+          await chrome.windows.update(tab.windowId, { focused: true });
+          return { ok: true, detail: '已切换到该标签页' };
+        } catch (e) {
+          return { ok: false, code: 'tab_unreachable', detail: String(e?.message || e) };
+        }
+      }
+      try {
+        const r = await chrome.tabs.sendMessage(tabId, { kind: 'bridge_command', command });
+        return r || { ok: false, code: 'no_response' };
+      } catch (e) {
+        return { ok: false, code: 'tab_unreachable', detail: String(e?.message || e) };
+      }
+    }
+  });
+  if (settings.token) await bg.conn.start();
+  bg.conn.onStateChange = (state) => {
+    const badge = { open: 'ON', auth_failed: 'AUTH', waiting: '…', connecting: '…', handshaking: '…' }[state] || '';
+    chrome.action.setBadgeText({ text: badge }).catch(() => {});
+    chrome.action.setBadgeBackgroundColor({ color: state === 'open' ? '#16a34a' : '#dc2626' }).catch(() => {});
+  };
+  return bg;
+})();
+
+// 注意：监听器必须在顶层同步注册，SW 被唤醒时才能收到事件
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  ready.then(async (bg) => {
+    if (message?.kind === 'analyze_dom') return sendResponse(await analyzeActiveTab());
+    if (message?.kind === 'clear_dom_config') return sendResponse(await clearDomConfig());
+    if (message?.kind === 'save_settings') {
+      await chrome.storage.local.set({ serverUrl: message.serverUrl, token: message.token });
+      if (bg.conn.stopped) { bg.conn.url = message.serverUrl; bg.conn.token = message.token; await bg.conn.start(); }
+      else bg.conn.reconfigure({ url: message.serverUrl, token: message.token });
+      return sendResponse({ ok: true });
+    }
+    sendResponse(bg.handleRuntimeMessage(message, sender));
+  });
+  return true; // 异步 sendResponse
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => { ready.then((bg) => bg.onTabRemoved(tabId)); });
+
+// SW 可能被回收：用 alarm 定期唤醒并检查连接
+chrome.alarms.create('bridge-keepalive', { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'bridge-keepalive') ready.then((bg) => bg.conn.poke()); });

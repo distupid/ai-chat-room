@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Chat Bridge（ChatGPT / Duck.ai / Hark）</title>
+  <style>
+    body { font: 12px/1.4 system-ui, sans-serif; width: 400px; margin: 10px; }
+    label { display: block; margin-top: 6px; }
+    input { width: 100%; box-sizing: border-box; }
+    pre { background: #f4f4f5; padding: 6px; max-height: 260px; overflow: auto; white-space: pre-wrap; }
+    .state { font-weight: 600; }
+    fieldset { margin-top: 8px; border: 1px solid #ddd; }
+    .ok { color: #16a34a; } .err { color: #dc2626; }
+  </style>
+</head>
+<body>
+  <div>状态：<span id="state" class="state">-</span></div>
+  <label>后端地址 <input id="url" placeholder="ws://127.0.0.1:8787" /></label>
+  <label>Token（server/data/config.json 中 extension 的 token）<input id="token" type="password" /></label>
+  <button id="save">保存并连接</button>
+  <button id="refresh">刷新诊断</button>
+
+  <fieldset>
+    <legend>DOM 配置</legend>
+    <div>当前：<span id="cfgSource">-</span></div>
+    <button id="analyze">分析当前页面 DOM 并应用</button>
+    <button id="clearCfg">恢复内置默认配置</button>
+    <div id="analyzeMsg"></div>
+    <pre id="cfgReport">-</pre>
+  </fieldset>
+
+  <pre id="diag">-</pre>
+  <script src="popup.js"></script>
+</body>
+</html>

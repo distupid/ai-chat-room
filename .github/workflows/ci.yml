@@ -2,7 +2,7 @@ name: CI
 
 "on":
   push:
-    branches: [main]
+    branches: [main, hark]
   pull_request: {}
 
 permissions:
@@ -12,12 +12,14 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      # 本技术栈的标准命令。项目未配置的工具请删除对应步骤。
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
-      - run: pnpm install
-      - run: pnpm dlx eslint .
-      - run: pnpm dlx tsc --noEmit
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # eslint / tsc 尚未配置（见 AGENTS.md「待确认」），配置后再加回
       - run: pnpm test
+      - name: 生成物与源码一致
+        run: git diff --exit-code -- contracts/protocol.schema.json src/frontend/shared/

@@ -6,13 +6,16 @@
 
 - **项目名称**：`ai-chat-room`
 - **项目简介**：web ai chat admin
-- **技术栈**：全栈（Node 前后端）
+- **技术栈**：Node ≥ 22.13；前端为 Chrome MV3 插件（原生 JS），后端为 Node（ws + node:sqlite + jsdom）
 - **目录布局**：前后端分层
 - **默认分支**：`main`
 
 ## 目录职责
 
-- `src/frontend/、src/backend/` —— 产品源码。
+- `src/frontend/` —— Chrome 插件：站点适配、DOM 观察、事件上报、执行看板指令。
+- `src/backend/` —— 监听会话：鉴权、持久化、广播、看板与 HTTP API。
+- `contracts/` —— 前后端唯一契约：消息协议 `protocol.js` 与导出的 JSON Schema。
+- `docs/bridge/` —— 迁移自 chatgpt-ws-bridge 的使用说明、多 Agent 规则与测试报告。
 - `tests/unit/、tests/integration/、tests/e2e/` —— 自动化测试，与源码结构对应。
 - `docs/` —— 长期文档：架构、开发、测试、安全。
 - `skills/` —— Agent Skills 标准目录（agent 按需自动发现加载）。
@@ -22,16 +25,15 @@
 
 ## 语言边界
 
-- `src/frontend`：全栈（Node 前后端）（包管理：pnpm）
-- `src/backend`：全栈（Node 前后端）（包管理：pnpm）
+- `src/frontend`：浏览器原生 JS（MV3），无构建、无框架（包管理：pnpm workspace）
+- `src/backend`：Node ESM（包管理：pnpm workspace）
 - 跨子项目通信只走 contracts/ 定义的接口，不许私下约定；如某子项目技术栈与上表不同，请在此处补充并同步更新其 AGENTS.md。
 
 ## 开发与验证要求
 
-- 测试命令：`pnpm test`
-- Lint：`pnpm dlx eslint .`
-- 构建：`pnpm build`
-- 标为「待确认」的命令是未经确认的占位，接入 CI 前请与维护者确认。
+- 测试命令：`pnpm test`（全量）、`pnpm test:frontend`、`pnpm test:backend`
+- 构建：`pnpm build`（导出 Schema + 同步协议到插件）
+- Lint / typecheck：待确认（尚未配置 eslint / tsc）。
 - 本地一键检查优先使用 `scripts/verify.sh`。
 
 ## 变更纪律（严格）
