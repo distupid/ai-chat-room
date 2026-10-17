@@ -56,7 +56,8 @@ export const EventType = Object.freeze({
   MESSAGE_UPDATED: 'message.updated',
   GENERATION_STARTED: 'generation.started',
   GENERATION_FINISHED: 'generation.finished',
-  CONVERSATION_STATUS: 'conversation.status'   // 会话状态变化：正常 / 已到限额 / 出错，附带来源与模型
+  CONVERSATION_STATUS: 'conversation.status',  // 会话状态变化：正常 / 已到限额 / 出错 / 已删除，附带来源与模型
+  TABS_SNAPSHOT: 'tabs.snapshot'               // 插件 → 后端：浏览器里真实开着的标签页（含 PWA 窗口），后端据此补齐 page.opened / page.closed
 });
 
 /** conversation.status 的状态取值 */
@@ -154,7 +155,7 @@ const messagePayload = obj({
 /** 每种业务事件的 payload schema */
 export const EVENT_PAYLOAD_SCHEMAS = Object.freeze({
   'page.opened': obj({ url: URL_STR, title: { type: 'string', maxLength: 512 } }),
-  'page.closed': obj({ url: URL_STR, reason: { type: 'string', enum: ['unload', 'pagehide', 'tab_removed', 'navigated', 'manual'] } }),
+  'page.closed': obj({ url: URL_STR, reason: { type: 'string', enum: ['unload', 'pagehide', 'tab_removed', 'navigated', 'manual', 'reconciled'] } }),
   'conversation.changed': obj({ url: URL_STR, previous_conversation_id: NULLABLE_STR(128) }),
   'message.added': messagePayload,
   'message.updated': messagePayload,
@@ -165,6 +166,18 @@ export const EVENT_PAYLOAD_SCHEMAS = Object.freeze({
   'generation.finished': obj({
     message_id: NULLABLE_STR(128),
     duration_ms: { type: ['integer', 'null'], minimum: 0 }
+  }),
+  'tabs.snapshot': obj({
+    tabs: {
+      type: 'array', maxItems: 500,
+      items: obj({
+        tab_id: { type: 'integer', minimum: 0 },
+        host: { type: 'string', maxLength: 255 },
+        conversation_id: NULLABLE_STR(128),   // 内容脚本报告的当前会话；没有内容脚本 / 不在会话里为 null
+        url: URL_STR,
+        title: { type: 'string', maxLength: 512 }
+      }, ['tab_id', 'host', 'conversation_id'])
+    }
   }),
   'conversation.status': obj({
     source: { type: 'string', minLength: 1, maxLength: 32, pattern: '^[a-z0-9_-]+$' },

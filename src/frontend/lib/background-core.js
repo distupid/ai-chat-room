@@ -71,7 +71,7 @@ export function createBackground({ WebSocketImpl, storage, clientId, settings, c
 
   function acceptPageEvent(e, sender) {
     // 内容脚本只能提交业务事件字段；信封字段在这里统一生成
-    if (!e || typeof e !== 'object' || !Object.values(EventType).includes(e.event_type)) {
+    if (!e || typeof e !== 'object' || !Object.values(EventType).includes(e.event_type) || e.event_type === EventType.TABS_SNAPSHOT) {
       pageEventStats.rejected++;
       return { ok: false, error: 'not a page event' };
     }
@@ -111,6 +111,36 @@ export function createBackground({ WebSocketImpl, storage, clientId, settings, c
     }, { tab: { id: tabId } });
   }
 
+  /**
+   * 上报浏览器里真实开着的标签页（由 background.js 用 chrome.tabs.query 收集，含 PWA 窗口）：
+   * - 内存里记着、但浏览器里已经没有的标签页 → 补发 page.closed
+   * - 只在已连接时发送；内容和上次相同则最多每 5 分钟发一次
+   */
+  let lastSnapshotKey = '';
+  let lastSnapshotAt = 0;
+  function syncTabs(list, { force = false } = {}) {
+    const exist = new Set(list.map((t) => t.tab_id));
+    for (const id of [...tabs.keys()]) if (!exist.has(id)) onTabRemoved(id);
+    if (conn.state !== 'open') return 'offline';
+    const items = list.slice(0, 500).map((t) => {
+      const known = tabs.get(t.tab_id);
+      const conversationId = t.conversation_id ?? known?.conversation_id ?? null;
+      const item = { tab_id: t.tab_id, host: String(t.host || '').slice(0, 255), conversation_id: conversationId };
+      if (conversationId) { item.url = String(t.url || known?.url || '').slice(0, 2048); item.title = String(t.title || '').slice(0, 512); }
+      return item;
+    });
+    const key = JSON.stringify(items.map((t) => [t.tab_id, t.host, t.conversation_id]));
+    const t = Date.now();
+    if (!force && key === lastSnapshotKey && t - lastSnapshotAt < 5 * 60 * 1000) return 'unchanged';
+    lastSnapshotKey = key;
+    lastSnapshotAt = t;
+    const envelope = makeEnvelope(MessageType.EVENT, {
+      event_id: `tabs:${t.toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+      event_type: EventType.TABS_SNAPSHOT, occurred_at: t, conversation_id: null, tab_id: null, payload: { tabs: items }
+    });
+    return conn.sendEvent(envelope);
+  }
+
   function diagnostics() {
     return {
       ...conn.diagnostics(),
@@ -120,5 +150,5 @@ export function createBackground({ WebSocketImpl, storage, clientId, settings, c
     };
   }
 
-  return { conn, handleRuntimeMessage, onTabRemoved, diagnostics, tabs };
+  return { conn, handleRuntimeMessage, onTabRemoved, syncTabs, diagnostics, tabs };
 }

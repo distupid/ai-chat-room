@@ -77,6 +77,7 @@ const state = {
   messages: new Map(),
   streaming: new Set(),
   collapsed: new Set(),
+  stickBottom: true,     // 详情是否跟随到底部（最后一个回复）
   longOpen: new Set(),   // 超长消息：用户手动展开了全文的 message_id
   composerOpen: false,
   candIndex: -1,
@@ -301,7 +302,7 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
     if (state.selected !== conversationId) return;
     for (const m of data.messages) state.messages.set(m.message_id, { role: m.role, index: m.msg_index, text: m.text, favorite: !!m.favorite });
     renderDetail(true, true);
-    if (toFavorite) scrollToFavorite();
+    if (toFavorite) { state.stickBottom = false; scrollToFavorite(); } else scrollDetailBottom();
     if (state.selected === conversationId && state.composerOpen && document.activeElement !== $('quickText')) $('quickText').focus();
   } catch (e) { snackbar(`读取消息失败：${e.message}`, 'err'); }
 }
@@ -350,6 +351,16 @@ async function toggleFavorite(conversationId, messageId) {
     snackbar(next ? '已收藏这条回答' : '已取消收藏', 'ok');
     scheduleRefresh(100);
   } catch (e) { snackbar(`收藏失败：${e.message}`, 'err'); }
+}
+
+/** 卡片“复制”：读取会话消息，复制最后一个回答 */
+async function copyLastAnswer(c) {
+  try {
+    const data = await api(`/api/conversations/${encodeURIComponent(c.conversation_id)}/messages`);
+    const last = [...(data.messages || [])].filter((m) => m.role === 'assistant').sort((a, b) => a.msg_index - b.msg_index).pop();
+    if (!last || !last.text) return snackbar('这个会话还没有回答', 'err');
+    await copyText(last.text);
+  } catch (e) { snackbar(`复制失败：${e.message}`, 'err'); }
 }
 
 async function copyText(text) {
@@ -621,8 +632,12 @@ function card(c) {
     c.last_message ? el('div', { class: 'preview' },
       el('b', {}, c.last_message.role === 'user' ? '我：' : `${src.label}：`), c.last_message.text) : null,
     el('div', { class: 'actions' },
-      el('button', { class: `btn ${c.pinned ? 'tonal' : 'outlined'} s`, 'data-act': 'pin', 'aria-pressed': String(!!c.pinned), title: c.pinned ? '已置顶，点击取消' : '置顶', onclick: stop(() => togglePin(c)) },
-        el('span', { html: SVG.pin, style: 'display:inline-flex' }), '置顶'),
+      el('button', { class: `btn ${c.pinned ? 'filled' : 'outlined'} s`, 'data-act': 'pin', 'aria-pressed': String(!!c.pinned), title: c.pinned ? '已置顶，点击取消' : '置顶', onclick: stop(() => togglePin(c)) },
+        el('span', { html: SVG.pin, style: 'display:inline-flex' }), c.pinned ? '已置顶' : '置顶'),
+      el('button', {
+        class: 'btn outlined s', 'data-act': 'copy', title: c.assistant_count ? '复制最后一个回答' : '还没有回答',
+        disabled: !c.assistant_count, onclick: stop(() => copyLastAnswer(c))
+      }, el('span', { html: SVG.copy, style: 'display:inline-flex' }), '复制'),
       el('button', {
         class: 'btn outlined s', 'data-act': 'close', title: c.open_tabs ? '关闭开着这个会话的标签页' : offlineTip,
         disabled: !online || busy, onclick: stop(() => closePage(c))
@@ -927,12 +942,27 @@ function convBusy(id) {
   return [...state.pendingCommands.values()].some((p) => p.conversation_id === id && p.action !== 'focus');
 }
 
-/** 快速回复时把对话固定在底部（最新消息） */
+/** 快速回复时把对话固定在底部（最后一个回复）；回复栏展开、图片加载、窗口变化导致高度变化时保持在底部 */
 function scrollDetailBottom() {
   const body = $('detailBody');
+  state.stickBottom = true;
   body.scrollTop = body.scrollHeight;
   requestAnimationFrame?.(() => { body.scrollTop = body.scrollHeight; });
 }
+(() => {
+  const body = $('detailBody');
+  body.addEventListener('scroll', () => {
+    state.stickBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+  }, { passive: true });
+  const keep = () => { if (state.selected && state.stickBottom) body.scrollTop = body.scrollHeight; };
+  if (typeof ResizeObserver === 'function') {
+    const ro = new ResizeObserver(keep);
+    ro.observe(body);
+    ro.observe($('detailMsgs'));
+  }
+  $('detailMsgs').addEventListener('load', keep, true);   // 图片加载完成（load 不冒泡，用捕获）
+  $('composer').addEventListener('transitionend', keep);
+})();
 
 function renderDetail(scrollToEnd = false, forceBottom = false) {
   const body = $('detailBody');

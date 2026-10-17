@@ -63,6 +63,9 @@
     if (msg.kind === 'capture_dom') {
       try { sendResponse({ ok: true, page: captureDom() }); }
       catch (e) { sendResponse({ ok: false, error: String(e && e.message || e) }); }
+    } else if (msg.kind === 'page_info') {
+      // 后台对账用：这个标签页当前在哪个会话
+      sendResponse({ ok: true, conversation_id: observer ? observer.getConversationId() : null, url: location.href });
     } else if (msg.kind === 'bridge_diag') {
       logDiag('manual'); sendResponse({ ok: true });
     } else if (msg.kind === 'get_observer_config') {

@@ -126,8 +126,6 @@
     .card .title { font-size: 16px; line-height: 24px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 4px; min-width: 0; }
     .card .title .tx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
     .card .title svg { flex: none; color: var(--primary); }
-    .card.pinned, .card.pinned.s-idle { background: color-mix(in srgb, var(--primary) 16%, var(--surface-container-low)); }
-    .card.pinned:hover, .card.pinned.s-idle:hover { background: color-mix(in srgb, var(--primary) 22%, var(--surface-container)); }
     .card .sub { color: var(--on-surface-variant); font-size: 12px; line-height: 16px; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
     .badge { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; white-space: nowrap; }
     .b-generating { background: var(--st-generating-bg); color: var(--st-generating); }
@@ -388,14 +386,6 @@
             <button id="connect" class="btn filled">连接</button>
             <button id="disconnect" class="btn outlined">断开</button>
             <span id="connDetail" class="lbl" style="margin:0"></span>
-          </div>
-        </section>
-        <section class="sec">
-          <h3>外观</h3>
-          <div class="seg" id="themeSeg">
-            <button data-theme-opt="light">浅色</button>
-            <button data-theme-opt="dark">深色</button>
-            <button data-theme-opt="system">跟随系统</button>
           </div>
         </section>
         <section class="sec">

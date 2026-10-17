@@ -179,7 +179,8 @@ export function openDatabase(dbPath = ':memory:') {
     SELECT conversation_id, message_id, role, text, created_at FROM favorites ORDER BY created_at DESC LIMIT ?`);
   // 每个标签页（client_id + tab_id）最近一次页面级事件：用来算“当前有几个标签页开着这个会话”
   const latestTabEventsStmt = db.prepare(`
-    SELECT e.conversation_id, e.event_type, e.received_at, e.client_id, e.tab_id, e.seq FROM events e
+    SELECT e.conversation_id, e.event_type, e.received_at, e.client_id, e.tab_id, e.seq,
+      json_extract(e.payload_json, '$.url') AS url FROM events e
     JOIN (SELECT client_id, tab_id, MAX(seq) AS s FROM events
           WHERE tab_id IS NOT NULL AND event_type IN ('page.opened', 'page.closed', 'conversation.changed')
           GROUP BY client_id, tab_id) x ON e.seq = x.s`);
@@ -215,6 +216,11 @@ export function openDatabase(dbPath = ':memory:') {
       // 源站已删除的会话（最近一次 conversation.status 为 deleted）不再跟踪；之后若再上报 ok 会自动恢复
       return listConversationsStmt.all(limit).map((r) => deriveConversation(r, openTabs.get(r.conversation_id) || 0))
         .filter((c) => c.page_status !== 'deleted');
+    },
+    /** 某个插件每个标签页最近一次页面级事件（含已关闭），用于和插件上报的真实标签页对账 */
+    tabStatesForClient(clientId) {
+      return latestTabEventsStmt.all().filter((t) => t.client_id === clientId)
+        .map((t) => ({ tab_id: Number(t.tab_id), conversation_id: t.conversation_id, event_type: t.event_type, received_at: t.received_at, url: t.url || '' }));
     },
     /** 当前开着该会话的标签页（最近活动在前），用于把看板指令路由到对应插件 */
     openTabsFor(conversationId, now = Date.now()) {

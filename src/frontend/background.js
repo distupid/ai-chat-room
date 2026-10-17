@@ -198,9 +198,42 @@ const ready = (async () => {
     const badge = { open: 'ON', auth_failed: 'AUTH', waiting: '…', connecting: '…', handshaking: '…' }[state] || '';
     chrome.action.setBadgeText({ text: badge }).catch(() => {});
     chrome.action.setBadgeBackgroundColor({ color: state === 'open' ? '#16a34a' : '#dc2626' }).catch(() => {});
+    if (state === 'open') syncTabsNow(bg, true);   // 连上（含重连）后立刻对账一次
   };
   return bg;
 })();
+
+/**
+ * 页面真实状态同步：列出浏览器里所有标签页（含 PWA / app / 弹出窗口），问内容脚本当前在哪个会话，
+ * 交给 background-core 上报 tabs.snapshot，后端据此补齐页面打开 / 关闭状态。连续触发时合并为一次。
+ */
+let syncTimer = null;
+let syncForce = false;
+function syncTabsNow(bg, force = false) {
+  syncForce = syncForce || force;
+  if (syncTimer) return;
+  syncTimer = setTimeout(async () => {
+    syncTimer = null;
+    const f = syncForce; syncForce = false;
+    try {
+      const all = await chrome.tabs.query({});
+      const list = await Promise.all(all.filter((t) => t.id != null && /^https?:/.test(t.url || '')).map(async (t) => {
+        let conversationId = null;
+        try {
+          const r = await Promise.race([
+            chrome.tabs.sendMessage(t.id, { kind: 'page_info' }),
+            new Promise((res) => setTimeout(() => res(null), 800))
+          ]);
+          if (r?.ok) conversationId = r.conversation_id || null;
+        } catch { /* 没有内容脚本的标签页 */ }
+        let host = '';
+        try { host = new URL(t.url).hostname; } catch { /* ignore */ }
+        return { tab_id: t.id, host, conversation_id: conversationId, url: t.url, title: t.title || '' };
+      }));
+      bg.syncTabs(list, { force: f });
+    } catch (e) { console.warn('[bridge] tab sync failed', e); }
+  }, 300);
+}
 
 // 注意：监听器必须在顶层同步注册，SW 被唤醒时才能收到事件
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -218,8 +251,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // 异步 sendResponse
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => { ready.then((bg) => bg.onTabRemoved(tabId)); });
+chrome.tabs.onRemoved.addListener((tabId) => { ready.then((bg) => { bg.onTabRemoved(tabId); syncTabsNow(bg); }); });
+chrome.tabs.onUpdated.addListener((tabId, info) => { if (info.url || info.status === 'complete') ready.then((bg) => syncTabsNow(bg)); });
 
 // SW 可能被回收：用 alarm 定期唤醒并检查连接
 chrome.alarms.create('bridge-keepalive', { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'bridge-keepalive') ready.then((bg) => bg.conn.poke()); });
+chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'bridge-keepalive') ready.then((bg) => { bg.conn.poke(); syncTabsNow(bg); }); });

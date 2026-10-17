@@ -2,7 +2,7 @@ import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import {
-  ErrorCode, MessageType, PROTOCOL_VERSION, Scope, validateMessage, makeEnvelope, randomId
+  ErrorCode, EventType, MessageType, PROTOCOL_VERSION, Scope, validateMessage, makeEnvelope, randomId
 } from '../../../contracts/protocol.js';
 import { loadConfig } from './config.js';
 import { openDatabase } from './db.js';
@@ -590,13 +590,54 @@ export function createBridgeServer(opts = {}) {
     }));
     if (result.duplicate) { counters.events_duplicate++; return; }
     counters.events_persisted++;
-    if (!policy.broadcast_event_types.includes(ev.event_type)) return;
+    if (ev.event_type === EventType.TABS_SNAPSHOT) return reconcileTabs(conn, ev.payload.tabs || []);
+    broadcastStored(conn, ev, result.seq);
+  }
 
-    const stored = { ...ev, seq: result.seq, client_id: conn.rec.clientId };
+  function broadcastStored(conn, ev, seq) {
+    if (!policy.broadcast_event_types.includes(ev.event_type)) return;
+    const stored = { ...ev, seq, client_id: conn.rec.clientId };
     broadcaster.broadcast(
       (rec) => toBroadcast(stored, rec, false),
       (rec) => (policy.echo_to_sender || rec.clientId !== conn.rec.clientId) && subscribedTo(rec, ev.conversation_id)
     );
+  }
+
+  /**
+   * 用插件上报的“浏览器里真实开着的标签页”对账（不广播快照本身）：
+   * - 后端认为开着、但快照里没有（或已换了网站 / 会话）的标签页 → 补一条 page.closed（reason: reconciled）
+   * - 快照里开着某个会话、但后端认为已关闭 / 不存在 / 在别的会话 → 补一条 page.opened
+   */
+  function reconcileTabs(conn, snapshot, now = Date.now()) {
+    const clientId = conn.rec.clientId;
+    const snap = new Map(snapshot.map((t) => [t.tab_id, t]));
+    const states = db.tabStatesForClient(clientId);
+    const latest = new Map(states.map((s) => [s.tab_id, s]));
+    const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ''; } };
+    const synth = (type, tabId, conversationId, payload) => {
+      const ev = {
+        type: MessageType.EVENT, event_id: `sync:${tabId}:${now.toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+        event_type: type, occurred_at: now, conversation_id: conversationId, tab_id: tabId, payload
+      };
+      try {
+        const r = db.persistEvent(clientId, ev, now);
+        if (!r.duplicate) { counters.events_reconciled = (counters.events_reconciled || 0) + 1; broadcastStored(conn, ev, r.seq); }
+      } catch (err) { log.error('[db] reconcile persist failed', err); }
+    };
+    for (const s of states) {
+      if (s.event_type === EventType.PAGE_CLOSED || !s.conversation_id) continue;
+      const t = snap.get(s.tab_id);
+      const gone = !t
+        || (s.url && t.host && hostOf(s.url) && hostOf(s.url) !== t.host)
+        || (t.conversation_id && t.conversation_id !== s.conversation_id);
+      if (gone) synth(EventType.PAGE_CLOSED, s.tab_id, s.conversation_id, { url: s.url.slice(0, 2048), reason: 'reconciled' });
+    }
+    for (const t of snapshot) {
+      if (!t.conversation_id) continue;
+      const s = latest.get(t.tab_id);
+      const known = s && s.event_type !== EventType.PAGE_CLOSED && s.conversation_id === t.conversation_id;
+      if (!known) synth(EventType.PAGE_OPENED, t.tab_id, t.conversation_id, { url: (t.url || '').slice(0, 2048), title: (t.title || '').slice(0, 512) });
+    }
   }
 
   function subscribedTo(rec, conversationId) {

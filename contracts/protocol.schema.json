@@ -156,7 +156,8 @@
                   "message.updated",
                   "generation.started",
                   "generation.finished",
-                  "conversation.status"
+                  "conversation.status",
+                  "tabs.snapshot"
                 ]
               }
             }
@@ -211,7 +212,8 @@
             "message.updated",
             "generation.started",
             "generation.finished",
-            "conversation.status"
+            "conversation.status",
+            "tabs.snapshot"
           ]
         },
         "occurred_at": {
@@ -302,7 +304,8 @@
                       "pagehide",
                       "tab_removed",
                       "navigated",
-                      "manual"
+                      "manual",
+                      "reconciled"
                     ]
                   }
                 }
@@ -591,6 +594,69 @@
                       "null"
                     ],
                     "maxLength": 100
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "tabs.snapshot"
+              }
+            },
+            "required": [
+              "event_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "tabs"
+                ],
+                "properties": {
+                  "tabs": {
+                    "type": "array",
+                    "maxItems": 500,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "tab_id",
+                        "host",
+                        "conversation_id"
+                      ],
+                      "properties": {
+                        "tab_id": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "host": {
+                          "type": "string",
+                          "maxLength": 255
+                        },
+                        "conversation_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "maxLength": 128
+                        },
+                        "url": {
+                          "type": "string",
+                          "maxLength": 2048
+                        },
+                        "title": {
+                          "type": "string",
+                          "maxLength": 512
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -774,7 +840,8 @@
             "message.updated",
             "generation.started",
             "generation.finished",
-            "conversation.status"
+            "conversation.status",
+            "tabs.snapshot"
           ]
         },
         "occurred_at": {
@@ -865,7 +932,8 @@
                       "pagehide",
                       "tab_removed",
                       "navigated",
-                      "manual"
+                      "manual",
+                      "reconciled"
                     ]
                   }
                 }
@@ -1238,6 +1306,69 @@
                       "null"
                     ],
                     "maxLength": 100
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "tabs.snapshot"
+              }
+            },
+            "required": [
+              "event_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "tabs"
+                ],
+                "properties": {
+                  "tabs": {
+                    "type": "array",
+                    "maxItems": 500,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "tab_id",
+                        "host",
+                        "conversation_id"
+                      ],
+                      "properties": {
+                        "tab_id": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "host": {
+                          "type": "string",
+                          "maxLength": 255
+                        },
+                        "conversation_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "maxLength": 128
+                        },
+                        "url": {
+                          "type": "string",
+                          "maxLength": 2048
+                        },
+                        "title": {
+                          "type": "string",
+                          "maxLength": 512
+                        }
+                      }
+                    }
                   }
                 }
               }

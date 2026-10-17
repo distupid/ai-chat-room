@@ -207,3 +207,12 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 
 - ChatGPT 页面 DOM 会改版。选择器集中在 `dom-observer.js` 的 `SELECTORS`（当前：`[data-message-author-role][data-message-id]`、`[data-testid="stop-button"]`、`.result-streaming`），改版后只需改这里。
 - 自动化测试中的页面是 jsdom 模拟的 ChatGPT 结构，不是登录后的 chatgpt.com 真实页面；在真实浏览器里加载插件后，可用 `pnpm observer` 观察实际广播进行人工确认。
+
+## 页面真实状态对账（tabs.snapshot）
+
+插件定期（连上 / 重连、标签页关闭或跳转、每 30 秒检查，内容不变时最多 5 分钟一次）上报 `tabs.snapshot`：
+`{ tabs: [{ tab_id, host, conversation_id, url?, title? }] }`，来自 `chrome.tabs.query({})`（包含 PWA / app / 弹出窗口），`conversation_id` 由内容脚本 `page_info` 回答。
+后端持久化快照但不广播，并对该插件的标签页对账：
+- 后端认为开着、快照里没有，或 host / 会话已变 → 补 `page.closed`（`reason: "reconciled"`）
+- 快照里开着某会话、后端认为已关闭 / 不存在 / 在别的会话 → 补 `page.opened`
+补出的事件和普通事件一样广播，看板实时更新“N 个标签页 / 页面已关”。

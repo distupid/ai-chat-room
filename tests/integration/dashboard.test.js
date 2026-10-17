@@ -328,6 +328,34 @@ test('观察器：页面出现限额提示时上报 conversation.status（对话
   page.close();
 });
 
+test('页面真实状态对账：插件上报 tabs.snapshot，后端补 page.closed / page.opened，列表实时变化', async () => {
+  const server = await startServer({});
+  const ext = await extClient(server, 'ext-sync-0001');
+  const list = async () => (await (await get(server, '/api/conversations', TOKENS.observer)).json()).conversations;
+  const snap = (tabs) => makeEnvelope('event', {
+    event_id: `t:snap:${Date.now().toString(36)}:${++evSeq}`, event_type: 'tabs.snapshot', occurred_at: Date.now(),
+    conversation_id: null, tab_id: null, payload: { tabs }
+  });
+  await sendAndAck(ext, ev('page.opened', { url: CONV_URL, title: '对账' }));
+  assert.equal((await list())[0].open_tabs, 1);
+  // 标签页 1 在浏览器里已经没有了（关闭事件丢失）→ 补 page.closed
+  await sendAndAck(ext, snap([{ tab_id: 7, host: 'example.com', conversation_id: null }]));
+  let c = (await list()).find((x) => x.conversation_id === CONV);
+  assert.equal(c.open_tabs, 0);
+  assert.equal(c.status, 'closed');
+  // PWA 窗口里的标签页 9 开着这个会话，但后端不知道 → 补 page.opened
+  await sendAndAck(ext, snap([{ tab_id: 9, host: 'chatgpt.com', conversation_id: CONV, url: CONV_URL, title: '对账' }]));
+  c = (await list()).find((x) => x.conversation_id === CONV);
+  assert.equal(c.open_tabs, 1);
+  // 同样的快照再来一次不重复补
+  await sendAndAck(ext, snap([{ tab_id: 9, host: 'chatgpt.com', conversation_id: CONV, url: CONV_URL, title: '对账' }]));
+  const evs = (await (await get(server, `/api/conversations/${CONV}/events?limit=50`, TOKENS.observer)).json()).events;
+  assert.equal(evs.filter((e) => e.event_type === 'page.opened').length, 2);
+  assert.equal(evs.filter((e) => e.event_type === 'page.closed' && e.payload.reason === 'reconciled').length, 1);
+  ext.close();
+  await server.stop();
+});
+
 test('源站删除会话：页面没有消息且显示“找不到对话”→ 上报 deleted；后端列表不再包含该会话，看板移除卡片', async () => {
   class NoopWS { constructor() { this.readyState = 0; } send() {} close() {} }
   const bg = createBackground({ WebSocketImpl: NoopWS, storage: null, clientId: 'ext-del-00001', settings: { serverUrl: 'ws://127.0.0.1:1', token: 'x' } });
@@ -347,6 +375,13 @@ test('源站删除会话：页面没有消息且显示“找不到对话”→ �
   await waitFor(() => statuses().at(-1).status === 'deleted', { label: 'deleted', timeout: 4000 });
   assert.match(statuses().at(-1).detail, /Unable to load conversation/);
   page.close();
+
+  // 后台对账：内存里记着的标签页在浏览器里已经没有 → 补 page.closed；内容脚本不能伪造 tabs.snapshot
+  bg.handleRuntimeMessage({ kind: 'page_event', event: { event_id: 'pageopen-x1', event_type: 'page.opened', occurred_at: Date.now(), conversation_id: CONV, payload: { url: CONV_URL, title: 't' } } }, { tab: { id: 42 } });
+  assert.ok(bg.tabs.has(42));
+  assert.equal(bg.syncTabs([{ tab_id: 1, host: 'example.com', conversation_id: null }]), 'offline');
+  assert.ok(!bg.tabs.has(42));
+  assert.equal(bg.handleRuntimeMessage({ kind: 'page_event', event: { event_id: 'snapshot-x1', event_type: 'tabs.snapshot', occurred_at: Date.now(), conversation_id: null, payload: { tabs: [] } } }, { tab: { id: 1 } }).ok, false);
 
   // 后端：deleted 之后列表里没有它；再上报 ok（误判）会恢复
   const server = await startServer();
@@ -461,7 +496,7 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   // 主题切换 + 设置弹窗（含常见回答管理）
   d.getElementById('themeBtn').click();
   assert.ok(['light', 'dark'].includes(d.documentElement.getAttribute('data-theme')));
-  d.querySelector('[data-theme-opt="dark"]').click();
+  while (JSON.parse(win.localStorage.getItem('bridgeDashboard.theme')) !== 'dark') d.getElementById('themeBtn').click();   // 设置里不再有“外观”，只用顶栏按钮切换
   assert.equal(d.documentElement.getAttribute('data-theme'), 'dark');
   assert.equal(JSON.parse(win.localStorage.getItem('bridgeDashboard.theme')), 'dark');
   d.getElementById('settingsBtn').click();
@@ -604,8 +639,14 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   const btn = (label) => [...d.querySelectorAll(`${cardSel} .actions button`)].find((b) => b.textContent === label);
   btn('置顶').click();
   await waitFor(() => d.querySelector(cardSel)?.classList.contains('pinned'), { label: 'pinned' });
-  assert.ok(btn('置顶'), '置顶后按钮文字不变（不显示“取消置顶”），用背景色表示');
-  assert.equal(d.querySelector(`${cardSel} [data-act="pin"]`).getAttribute('aria-pressed'), 'true');
+  assert.ok(btn('已置顶'), '置顶后按钮显示“已置顶”');
+  const pinBtn = d.querySelector(`${cardSel} [data-act="pin"]`);
+  assert.equal(pinBtn.getAttribute('aria-pressed'), 'true');
+  assert.ok(pinBtn.classList.contains('filled'), '置顶按钮用强调色背景');
+  assert.ok(!d.querySelector('#settingsScrim [data-theme-opt]'), '设置里没有“外观”');
+  // 复制：复制最后一个回答
+  btn('复制').click();
+  await waitFor(() => copied.at(-1) === longText, { label: 'copy last answer' });
   assert.ok(!d.querySelector('[data-notify="limit_reached"]') && !d.querySelector('[data-notify="error"]') && !d.querySelector('[data-notify="background_only"]'), '设置里没有限额 / 出错系统通知');
   assert.match(d.getElementById('chips').textContent, /置顶1/);
   await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 2 }));
