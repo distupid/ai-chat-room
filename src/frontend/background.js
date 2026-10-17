@@ -117,6 +117,30 @@ async function syncSites() {
   return { ok: true, detail: `${custom.length} 个添加的网站` };
 }
 
+/**
+ * 关闭页面：后端指定的标签页 + 后端记录的该插件所有标签页 + 本插件记录的标签页
+ * + 按会话地址在所有窗口（含 PWA / app 窗口、弹出窗口）里找到的标签页，一起关掉。
+ */
+async function closeConversationTabs(tabId, command) {
+  const bgNow = await ready;
+  const ids = new Set([tabId, ...(command.tab_ids || []),
+    ...[...bgNow.tabs.entries()].filter(([, t]) => t.conversation_id === command.conversation_id).map(([id]) => id)]);
+  if (command.url) {
+    const strip = (u) => String(u || '').split('#')[0].split('?')[0].replace(/\/$/, '');
+    const target = strip(command.url);
+    try {
+      const all = await chrome.tabs.query({})   // 不加 windowType：包含普通、PWA(app)、弹出窗口;
+      for (const t of all) if (t.id != null && (strip(t.url) === target || strip(t.pendingUrl) === target)) ids.add(t.id);
+    } catch { /* 没有 tabs 权限读取地址时只关已知标签页 */ }
+  }
+  const list = [...ids].filter((x) => Number.isInteger(x) && x >= 0);
+  let n = 0;
+  for (const id of list) {
+    try { await chrome.tabs.remove(id); n++; } catch { /* 已经关掉的忽略 */ }
+  }
+  return n ? { ok: true, detail: `已关闭 ${n} 个标签页` } : { ok: false, code: 'tab_unreachable', detail: '没有找到可关闭的标签页' };
+}
+
 /** 一键启动：在后台（不抢焦点）打开网站列表里的每个网址 */
 async function openSites(text) {
   const urls = String(text || '').split('\n').map((u) => u.trim()).filter((u) => /^https:\/\/[^\s]+$/.test(u)).slice(0, 50);
@@ -151,18 +175,7 @@ const ready = (async () => {
       if (command.action === 'probe_site') return probeSite(command);
       if (command.action === 'sync_sites') return syncSites();
       if (command.action === 'open_sites') return openSites(command.text);
-      if (command.action === 'close') {
-        // 关闭开着这个会话的所有标签页（后端指定的那个 + 本插件记录的其他标签页）
-        const bgNow = await ready;
-        const ids = new Set([tabId, ...[...bgNow.tabs.entries()].filter(([, t]) => t.conversation_id === command.conversation_id).map(([id]) => id)]
-          .filter((x) => Number.isInteger(x)));
-        try {
-          await chrome.tabs.remove([...ids]);
-          return { ok: true, detail: `已关闭 ${ids.size} 个标签页` };
-        } catch (e) {
-          return { ok: false, code: 'tab_unreachable', detail: String(e?.message || e) };
-        }
-      }
+      if (command.action === 'close') return closeConversationTabs(tabId, command);
       if (command.action === 'focus') {
         try {
           const tab = await chrome.tabs.update(tabId, { active: true });

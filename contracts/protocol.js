@@ -168,7 +168,7 @@ export const EVENT_PAYLOAD_SCHEMAS = Object.freeze({
   }),
   'conversation.status': obj({
     source: { type: 'string', minLength: 1, maxLength: 32, pattern: '^[a-z0-9_-]+$' },
-    status: { type: 'string', enum: ['ok', 'limit_reached', 'error'] },
+    status: { type: 'string', enum: ['ok', 'limit_reached', 'error', 'deleted'] },   // deleted：源站页面显示会话已删除 / 不存在 → 后端不再跟踪
     detail: NULLABLE_STR(500),
     model: NULLABLE_STR(100)
   }, ['source', 'status', 'detail'])
@@ -296,6 +296,8 @@ export const SCHEMA = {
       answer_index: { type: 'integer', minimum: 0, maximum: 100000 },   // regenerate：第几条回答（从 0 开始）；不填 = 最后一条
       answer_total: { type: 'integer', minimum: 1, maximum: 100000 },   // regenerate：看板看到的回答总数，用于和页面核对
       tab_id: { type: 'integer', minimum: 0 },          // 后端转发给插件时填写
+      tab_ids: { type: 'array', maxItems: 50, items: { type: 'integer', minimum: 0 } },   // close：该插件里开着这个会话的所有标签页
+      url: { type: 'string', maxLength: 2048 },           // close：会话页面地址（插件再按地址找 PWA / 其他窗口里的标签页）
       requested_by: ID                                    // 后端转发给插件时填写
     }, ['command_id', 'action', 'conversation_id']),
 

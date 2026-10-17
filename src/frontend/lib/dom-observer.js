@@ -76,6 +76,17 @@
         "\u5df2\u8fbe\u5230[^\u3002]{0,30}(?:\u4e0a\u9650|\u9650\u989d|\u9650\u5236)",
         "(?:\u4e0a\u9650|\u9650\u989d)[^\u3002]{0,20}\u91cd\u7f6e"
       ],
+      // 会话在源站被删除 / 不存在（只在页面上没有任何消息时才判定）
+      deleted_patterns: [
+        'unable to load conversation',
+        'conversation not found',
+        'this conversation (?:has been|was) deleted',
+        '(?:conversation|chat) (?:does not|doesn(?:\'|\u2019)t) exist',
+        '\u627e\u4e0d\u5230(?:\u8be5|\u8fd9\u4e2a)?(?:\u5bf9\u8bdd|\u4f1a\u8bdd|\u804a\u5929)',
+        '\u65e0\u6cd5\u52a0\u8f7d(?:\u8be5|\u8fd9\u4e2a)?(?:\u5bf9\u8bdd|\u4f1a\u8bdd)',
+        '(?:\u5bf9\u8bdd|\u4f1a\u8bdd)(?:\u5df2\u88ab|\u5df2)?\u5220\u9664',
+        '(?:\u5bf9\u8bdd|\u4f1a\u8bdd)\u4e0d\u5b58\u5728'
+      ],
       error_patterns: [
         'something went wrong',
         'an error occurred',
@@ -324,6 +335,7 @@
       activityIdleMs: isFinite(idle) && idle >= 0 && idle <= 60000 ? idle
         : (dg.activity_idle_ms != null ? dg.activity_idle_ms : D.generating.activity_idle_ms),
       limitPatterns: patterns(st.limit_patterns, Array.isArray(ds.limit_patterns) ? ds.limit_patterns : D.status.limit_patterns, 'status.limit'),
+      deletedPatterns: patterns(st.deleted_patterns, Array.isArray(ds.deleted_patterns) ? ds.deleted_patterns : D.status.deleted_patterns, 'status.deleted'),
       errorPatterns: patterns(st.error_patterns, Array.isArray(ds.error_patterns) ? ds.error_patterns : D.status.error_patterns, 'status.error'),
       modelSelector: pickSel(st.model_selector, 'model_selector' in ds ? ds.model_selector : D.status.model_selector, 'status.model_selector', true),
       statusExcludeMessages: typeof st.exclude_messages === 'boolean' ? st.exclude_messages : !!ds.exclude_messages,
@@ -523,6 +535,8 @@
     }
     if (!body || !doc.createTreeWalker) return result;
     var exclude = [c.userText, c.assistantText].filter(Boolean).join(', ');
+    // 页面上一条消息都没有时，才检查“会话已删除 / 不存在”
+    var noMessages = !!c.messageSelector && !doc.querySelector(c.messageSelector);
     var walker = doc.createTreeWalker(body, 4 /* NodeFilter.SHOW_TEXT */);
     var errorHit = null;
     var node;
@@ -534,6 +548,15 @@
       var parent = node.parentElement;
       if (!parent || SKIP_STATUS_TAGS[parent.tagName]) continue;
       var i;
+      if (noMessages && c.deletedPatterns && c.deletedPatterns.length) {
+        for (i = 0; i < c.deletedPatterns.length; i++) {
+          if (c.deletedPatterns[i].test(t) && !parent.closest('[contenteditable="true"], [contenteditable=""]')) {
+            result.status = 'deleted';
+            result.detail = t.trim().slice(0, 300);
+            return result;
+          }
+        }
+      }
       var limitMatch = false;
       for (i = 0; i < c.limitPatterns.length; i++) if (c.limitPatterns[i].test(t)) { limitMatch = true; break; }
       var errorMatch = false;

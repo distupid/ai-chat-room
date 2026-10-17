@@ -100,7 +100,8 @@
     .chips .cg.end { margin-left: auto; }
 
     main { padding: 12px 24px 96px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+    /* align-items:start：展开回复栏只让这一张卡片变高，不拉伸同一行的其他卡片 */
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; align-items: start; }
     .empty { grid-column: 1 / -1; text-align: center; color: var(--on-surface-variant); padding: 64px 16px; }
 
     /* 会话卡片（filled card，可点击） */
@@ -125,8 +126,8 @@
     .card .title { font-size: 16px; line-height: 24px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 4px; min-width: 0; }
     .card .title .tx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
     .card .title svg { flex: none; color: var(--primary); }
-    .card.pinned { background: color-mix(in srgb, var(--primary) 6%, var(--surface-container-low)); }
-    .card.pinned:hover { background: color-mix(in srgb, var(--primary) 9%, var(--surface-container)); }
+    .card.pinned, .card.pinned.s-idle { background: color-mix(in srgb, var(--primary) 16%, var(--surface-container-low)); }
+    .card.pinned:hover, .card.pinned.s-idle:hover { background: color-mix(in srgb, var(--primary) 22%, var(--surface-container)); }
     .card .sub { color: var(--on-surface-variant); font-size: 12px; line-height: 16px; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
     .badge { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; white-space: nowrap; }
     .b-generating { background: var(--st-generating-bg); color: var(--st-generating); }
@@ -303,8 +304,8 @@
     <div class="dialog">
       <div class="dh">
         <h2 id="detailTitle">-</h2>
-        <button id="detailQuick" class="icon-btn" title="快速回复">
-          <svg class="i" viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>
+        <button id="detailPin" class="icon-btn" title="置顶" aria-pressed="false">
+          <svg class="i" viewBox="0 0 24 24"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>
         </button>
         <button id="detailJump" class="icon-btn" title="跳转到页面">
           <svg class="i" viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
@@ -403,12 +404,6 @@
           <div class="switch-row">
             <div><div class="t">启用系统通知</div><div class="d" id="notifyPerm"></div></div>
             <button id="notifyEnabled" class="switch" role="switch" aria-checked="false"></button>
-          </div>
-          <div class="switch-row"><div class="t">已到限额（系统通知）</div><button class="switch" role="switch" data-notify="limit_reached" data-needs-system="1"></button></div>
-          <div class="switch-row"><div class="t">出错（系统通知）</div><button class="switch" role="switch" data-notify="error" data-needs-system="1"></button></div>
-          <div class="switch-row">
-            <div><div class="t">限额 / 出错只在看板不在前台时发系统通知</div><div class="d">看板页面正在看时用页面内提示</div></div>
-            <button class="switch" role="switch" data-notify="background_only" data-needs-system="1"></button>
           </div>
           <div class="row2"><button id="soundTest" class="btn text">试听音效</button><button id="popupTest" class="btn text">测试弹窗</button><button id="notifyTest" class="btn text">发送测试通知</button></div>
         </section>

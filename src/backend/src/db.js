@@ -212,7 +212,9 @@ export function openDatabase(dbPath = ':memory:') {
         if (now - t.received_at > TAB_STALE_MS) continue;   // 浏览器崩溃等没来得及上报关闭的标签页
         openTabs.set(t.conversation_id, (openTabs.get(t.conversation_id) || 0) + 1);
       }
-      return listConversationsStmt.all(limit).map((r) => deriveConversation(r, openTabs.get(r.conversation_id) || 0));
+      // 源站已删除的会话（最近一次 conversation.status 为 deleted）不再跟踪；之后若再上报 ok 会自动恢复
+      return listConversationsStmt.all(limit).map((r) => deriveConversation(r, openTabs.get(r.conversation_id) || 0))
+        .filter((c) => c.page_status !== 'deleted');
     },
     /** 当前开着该会话的标签页（最近活动在前），用于把看板指令路由到对应插件 */
     openTabsFor(conversationId, now = Date.now()) {

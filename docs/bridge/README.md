@@ -175,14 +175,14 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 | `done` / `done_at` / `activity_after_done` | 标记完成 |
 | `first_seen_at` / `last_seen_at` | 首次 / 最近活动时间 |
 
-“已到限额 / 出错”由新事件 `conversation.status` 上报：观察器每秒在**消息正文以外**的页面文字里匹配提示语（正文、输入框、脚本都跳过），规则在 DomConfig 的 `status.limit_patterns` / `status.error_patterns` 中可改。
+“已到限额 / 出错 / 已删除”由事件 `conversation.status` 上报（`deleted`：页面上没有任何消息且出现“找不到对话 / Unable to load conversation”等提示，规则在 `status.deleted_patterns`；后端随后不再列出该会话）：观察器每秒在**消息正文以外**的页面文字里匹配提示语（正文、输入框、脚本都跳过），规则在 DomConfig 的 `status.limit_patterns` / `status.error_patterns` 中可改。
 
 ### 指令通道
 
 `看板 --command--> 后端 --command(tab_id)--> 插件后台 --> 内容脚本执行 --> command_result 原路返回`
 
 - 需要 `control` 权限。旧的 config.json 里，能读全部会话（subscribe_all + read_content）的 observer token 会自动获得 control；不想要可给该 client 加 `"no_control": true`
-- 指令：`reply` 快速回复、`regenerate` 重新回答、`focus` 切换到该标签页、`close` 关闭该会话的标签页（插件后台执行，不经过页面）；后端 → 插件：`probe_site` / `sync_sites` / `open_sites`（看板不能直接发）
+- 指令：`reply` 快速回复、`regenerate` 重新回答、`focus` 切换到该标签页、`close` 关闭该会话的所有标签页（含 PWA 窗口，按 `tab_ids` + 会话 `url` 查找）（插件后台执行，不经过页面）；后端 → 插件：`probe_site` / `sync_sites` / `open_sites`（看板不能直接发）
 - 后端只把指令发给“最近一次页面事件显示正开着这个会话”的那个插件标签页；页面正在回答时返回 `busy`；20 秒没有结果返回 `timeout`
 - 插件端选择器可在 DomConfig 的 `actions` 中覆盖（composer / send_button / regenerate_button / regenerate_menu_item / regenerate_menu_text）
 

@@ -55,7 +55,7 @@ const settings = {
   token: load('token', localStorage.getItem('bridgeDashboardToken') || ''),
   theme: load('theme', 'system'),
   // sound：普通会话回答完成播放音效；pinned_popup：置顶会话回答完成直接弹窗；enabled：系统通知（需要浏览器权限）
-  notify: { enabled: false, sound: true, pinned_popup: true, limit_reached: true, error: true, background_only: true, ...load('notify', {}) },
+  notify: { enabled: false, sound: true, pinned_popup: true, ...load('notify', {}) },
   quickReplies: load('quickReplies', DEFAULT_QUICK_REPLIES)
 };
 delete settings.notify.finished;
@@ -259,18 +259,6 @@ async function toggleNotifications() {
   renderNotifySettings();
 }
 
-/** kind: limit_reached | error（系统通知） */
-function notify(kind, conversationId, title, body) {
-  const n = settings.notify;
-  if (!n.enabled || !n[kind] || !notificationsSupported() || Notification.permission !== 'granted') return false;
-  if (n.background_only && document.visibilityState === 'visible' && document.hasFocus?.()) return false;
-  try {
-    const note = new Notification(title, { body: (body || '').slice(0, 200), tag: `${kind}:${conversationId || ''}`, renotify: true });
-    note.onclick = () => { window.focus(); if (conversationId) openDetail(conversationId); note.close(); };
-    return true;
-  } catch { return false; }
-}
-
 // ------------------------------------------------------------------ 数据
 
 async function loadConversations() {
@@ -299,7 +287,7 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
   state.selected = conversationId;
   state.messages = new Map();
   state.streaming = new Set();
-  state.composerOpen = false;
+  state.composerOpen = true;   // 点卡片打开详情时直接展开快速回复
   $('quickText').value = state.drafts.get(conversationId) || '';
   closeCands();
   $('detailScrim').classList.add('open');
@@ -312,6 +300,7 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
     for (const m of data.messages) state.messages.set(m.message_id, { role: m.role, index: m.msg_index, text: m.text, favorite: !!m.favorite });
     renderDetail(true, true);
     if (toFavorite) scrollToFavorite();
+    if (state.selected === conversationId && state.composerOpen && document.activeElement !== $('quickText')) $('quickText').focus();
   } catch (e) { snackbar(`读取消息失败：${e.message}`, 'err'); }
 }
 
@@ -514,15 +503,22 @@ function onBroadcast(b) {
       renderDetail();
     }
   }
+  if (b.event_type === 'conversation.status' && b.payload.status === 'deleted') {
+    // 源站删除了这个会话：从看板移除，不再跟踪
+    state.conversations = state.conversations.filter((x) => x.conversation_id !== conv);
+    if (state.selected === conv) closeDetail();
+    if (state.cardReply === conv) state.cardReply = null;
+    snackbar(`会话已在源站删除，不再跟踪：${name}`);
+    render();
+    return;
+  }
   if (b.event_type === 'conversation.status') {
     const prev = state.lastStatus.get(conv);
     const now = b.payload.status;
     state.lastStatus.set(conv, now);
     if (now !== prev && (now === 'limit_reached' || now === 'error')) {
       const label = now === 'limit_reached' ? '已到限额' : '出错';
-      if (!notify(now, conv, `${label}：${name}`, b.payload.detail || sourceInfo(b.payload.source).label)) {
-        snackbar(`${label}：${name}${b.payload.detail ? ' — ' + b.payload.detail : ''}`, 'err');
-      }
+      snackbar(`${label}：${name}${b.payload.detail ? ' — ' + b.payload.detail : ''}`, 'err');
     }
   }
   if (b.event_type === 'generation.finished') {
@@ -623,12 +619,12 @@ function card(c) {
     c.last_message ? el('div', { class: 'preview' },
       el('b', {}, c.last_message.role === 'user' ? '我：' : `${src.label}：`), c.last_message.text) : null,
     el('div', { class: 'actions' },
-      el('button', { class: `btn ${c.pinned ? 'tonal' : 'outlined'} s`, 'aria-pressed': String(!!c.pinned), onclick: stop(() => togglePin(c)) },
-        el('span', { html: SVG.pin, style: 'display:inline-flex' }), c.pinned ? '取消置顶' : '置顶'),
+      el('button', { class: `btn ${c.pinned ? 'tonal' : 'outlined'} s`, 'data-act': 'pin', 'aria-pressed': String(!!c.pinned), title: c.pinned ? '已置顶，点击取消' : '置顶', onclick: stop(() => togglePin(c)) },
+        el('span', { html: SVG.pin, style: 'display:inline-flex' }), '置顶'),
       el('button', {
         class: 'btn outlined s', 'data-act': 'close', title: c.open_tabs ? '关闭开着这个会话的标签页' : offlineTip,
         disabled: !online || busy, onclick: stop(() => closePage(c))
-      }, el('span', { html: SVG.closeTab, style: 'display:inline-flex' }), '关闭页面'),
+      }, el('span', { html: SVG.closeTab, style: 'display:inline-flex' }), '关闭'),
       el('button', {
         class: `btn ${state.cardReply === id ? 'tonal' : 'outlined'} s`, 'data-act': 'reply', 'aria-expanded': String(state.cardReply === id),
         title: offlineTip, onclick: stop(() => toggleCardReply(id))
@@ -990,8 +986,9 @@ function renderComposer() {
   const busy = convBusy(state.selected);
   const ok = canControlConv(c);
   $('composer').classList.toggle('open', state.composerOpen);
-  $('detailQuick').classList.toggle('on', state.composerOpen);
-  $('detailQuick').setAttribute('aria-pressed', String(state.composerOpen));
+  $('detailPin').classList.toggle('on', !!c?.pinned);
+  $('detailPin').setAttribute('aria-pressed', String(!!c?.pinned));
+  $('detailPin').title = c?.pinned ? '已置顶，点击取消' : '置顶';
   $('quickSend').disabled = !ok || busy;
   $('quickSend').textContent = busy ? '发送中…' : '发送';
   $('quickHint').textContent = !c ? '' : !ok ? '需要有标签页开着这个会话' : c.status === 'generating' ? '正在回答中，发送会被拒绝' : '在开着这个会话的标签页里发送';
@@ -1156,7 +1153,7 @@ $('siteConfirm').onclick = confirmAddSite;
 $('detailClose').onclick = closeDetail;
 $('detailScrim').addEventListener('click', (e) => { if (e.target === $('detailScrim')) closeDetail(); });
 $('detailJump').onclick = () => { const c = convById(state.selected); if (c) jumpTo(c); };
-$('detailQuick').onclick = () => toggleComposer();
+$('detailPin').onclick = () => { const c = convById(state.selected); if (c) togglePin(c); };
 $('quickCancel').onclick = () => toggleComposer(false);
 $('quickSend').onclick = sendQuick;
 const qt = $('quickText');

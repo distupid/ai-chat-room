@@ -328,6 +328,40 @@ test('观察器：页面出现限额提示时上报 conversation.status（对话
   page.close();
 });
 
+test('源站删除会话：页面没有消息且显示“找不到对话”→ 上报 deleted；后端列表不再包含该会话，看板移除卡片', async () => {
+  class NoopWS { constructor() { this.readyState = 0; } send() {} close() {} }
+  const bg = createBackground({ WebSocketImpl: NoopWS, storage: null, clientId: 'ext-del-00001', settings: { serverUrl: 'ws://127.0.0.1:1', token: 'x' } });
+  const results = [];
+  const orig = bg.handleRuntimeMessage;
+  bg.handleRuntimeMessage = (m, s) => { const r = orig(m, s); results.push({ m, r }); return r; };
+  const page = openChatGPTPage({ url: CONV_URL, tabId: 4, background: bg, html: fakeChatGPT(CONV) });
+  const statuses = () => results.filter((x) => x.m.event.event_type === 'conversation.status').map((x) => x.m.event.payload);
+  await waitFor(() => statuses().length >= 1, { label: 'initial status' });
+  // 有消息时，即使出现这句话也不判定为删除
+  const note = page.doc.createElement('div');
+  note.textContent = 'Unable to load conversation';
+  page.doc.body.appendChild(note);
+  await sleep(1300);
+  assert.notEqual(statuses().at(-1).status, 'deleted');
+  for (const m of page.doc.querySelectorAll('[data-chatgpt-search-unit-key], [data-message-author-role], [data-dil-message-id], article')) m.remove();
+  await waitFor(() => statuses().at(-1).status === 'deleted', { label: 'deleted', timeout: 4000 });
+  assert.match(statuses().at(-1).detail, /Unable to load conversation/);
+  page.close();
+
+  // 后端：deleted 之后列表里没有它；再上报 ok（误判）会恢复
+  const server = await startServer();
+  const ext = await extClient(server, 'ext-del-00002');
+  await sendAndAck(ext, ev('page.opened', { url: CONV_URL, title: '要删除的会话' }));
+  const list = async () => (await (await fetch(`http://127.0.0.1:${server.port}/api/conversations`, { headers: { authorization: `Bearer ${TOKENS.observer}` } })).json()).conversations.map((c) => c.conversation_id);
+  assert.ok((await list()).includes(CONV));
+  await sendAndAck(ext, ev('conversation.status', { source: 'chatgpt', status: 'deleted', detail: 'Unable to load conversation', model: null }));
+  assert.ok(!(await list()).includes(CONV), '不再跟踪');
+  await sendAndAck(ext, ev('conversation.status', { source: 'chatgpt', status: 'ok', detail: null, model: null }));
+  assert.ok((await list()).includes(CONV), '再次正常上报后恢复');
+  ext.close();
+  await server.stop();
+});
+
 test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设置、实时更新、点卡片开详情、置顶 / 归档、每条回答操作、快速回复候选、通知等级', async () => {
   const { JSDOM } = await import('jsdom');
   const { readFileSync } = await import('node:fs');
@@ -493,9 +527,12 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.equal(dl[0].getAttribute('rel'), 'noopener noreferrer');
 
   // 详情右上角：快速回复 + 常见回答候选
-  assert.ok(!d.getElementById('composer').classList.contains('open'));
-  d.getElementById('detailQuick').click();
+  // 点卡片打开详情时快速回复已经展开；右上角是置顶按钮
   assert.ok(d.getElementById('composer').classList.contains('open'));
+  assert.equal(d.getElementById('detailQuick'), null);
+  assert.equal(d.getElementById('detailPin').getAttribute('aria-pressed'), 'false');
+  d.getElementById('quickText').focus();
+  d.getElementById('quickText').dispatchEvent(new win.Event('focus'));
   const ta = d.getElementById('quickText');
   await waitFor(() => d.getElementById('quickCands').classList.contains('open'), { label: 'cands open' });
   ta.value = '单元';
@@ -544,6 +581,9 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   const btn = (label) => [...d.querySelectorAll(`${cardSel} .actions button`)].find((b) => b.textContent === label);
   btn('置顶').click();
   await waitFor(() => d.querySelector(cardSel)?.classList.contains('pinned'), { label: 'pinned' });
+  assert.ok(btn('置顶'), '置顶后按钮文字不变（不显示“取消置顶”），用背景色表示');
+  assert.equal(d.querySelector(`${cardSel} [data-act="pin"]`).getAttribute('aria-pressed'), 'true');
+  assert.ok(!d.querySelector('[data-notify="limit_reached"]') && !d.querySelector('[data-notify="error"]') && !d.querySelector('[data-notify="background_only"]'), '设置里没有限额 / 出错系统通知');
   assert.match(d.getElementById('chips').textContent, /置顶1/);
   await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 2 }));
   await sendAndAck(ext, ev('generation.finished', { message_id: 'a1', duration_ms: 2300 }));
@@ -573,10 +613,12 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.deepEqual(launch.text.split('\n'), ['https://chatgpt.com/', 'https://duck.ai/', 'https://www.hark.com/chat']);
 
   // 关闭页面：插件收到 close；页面关闭后只在“页面已关”里显示，点击重新打开并跳转
-  await waitFor(() => btn('关闭页面') && !btn('关闭页面').disabled, { label: 'close enabled', timeout: 8000 });
-  btn('关闭页面').click();
+  await waitFor(() => btn('关闭') && !btn('关闭').disabled, { label: 'close enabled', timeout: 8000 });
+  btn('关闭').click();
   const closeCmd = await waitFor(() => ext.of('command').find((m) => m.action === 'close'), { label: 'close cmd' });
   assert.equal(closeCmd.conversation_id, CONV);
+  assert.deepEqual(closeCmd.tab_ids, [1], '带上该插件里开着这个会话的所有标签页');
+  assert.equal(closeCmd.url, CONV_URL, '带上会话地址，用来找 PWA 窗口里的标签页');
   ext.send(makeEnvelope('command_result', { command_id: closeCmd.command_id, ok: true, detail: '已关闭 1 个标签页' }));
   await sendAndAck(ext, ev('page.closed', { url: CONV_URL, reason: 'tab_removed' }));
   await waitFor(() => !d.querySelector(cardSel), { label: 'closed hidden' });

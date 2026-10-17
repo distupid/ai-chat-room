@@ -574,7 +574,8 @@
                     "enum": [
                       "ok",
                       "limit_reached",
-                      "error"
+                      "error",
+                      "deleted"
                     ]
                   },
                   "detail": {
@@ -1220,7 +1221,8 @@
                     "enum": [
                       "ok",
                       "limit_reached",
-                      "error"
+                      "error",
+                      "deleted"
                     ]
                   },
                   "detail": {
@@ -1513,6 +1515,18 @@
         "tab_id": {
           "type": "integer",
           "minimum": 0
+        },
+        "tab_ids": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "url": {
+          "type": "string",
+          "maxLength": 2048
         },
         "requested_by": {
           "type": "string",

@@ -480,6 +480,13 @@ export function createBridgeServer(opts = {}) {
     });
   }
 
+  /** close：把这个插件里开着该会话的所有标签页 + 会话地址一起发过去（PWA 窗口里的标签页也能关掉） */
+  function closeExtras(conversationId, clientId) {
+    const tabIds = [...new Set(db.openTabsFor(conversationId).filter((t) => t.client_id === clientId).map((t) => t.tab_id))].slice(0, 50);
+    const url = db.listConversations().find((c) => c.conversation_id === conversationId)?.url;
+    return { tab_ids: tabIds, ...(typeof url === 'string' && /^https:\/\//.test(url) ? { url: url.slice(0, 2048) } : {}) };
+  }
+
   /** 看板（control 权限）→ 找到开着该会话的插件标签页 → 转发指令 */
   function onCommand(conn, msg) {
     if (!conn.rec.scopes.has(Scope.CONTROL)) {
@@ -513,6 +520,7 @@ export function createBridgeServer(opts = {}) {
       conversation_id: msg.conversation_id,
       ...(msg.action === 'reply' ? { text: msg.text } : {}),
       ...(msg.action === 'regenerate' && msg.answer_index != null ? { answer_index: msg.answer_index, answer_total: msg.answer_total } : {}),
+      ...(msg.action === 'close' ? closeExtras(msg.conversation_id, target.clientId) : {}),
       tab_id: tabId,
       requested_by: conn.rec.clientId
     }));
