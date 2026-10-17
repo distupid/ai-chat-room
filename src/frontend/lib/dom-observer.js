@@ -704,6 +704,7 @@
 
       // 第一遍：收集当前渲染出来的消息（长对话里页面只渲染一部分，DOM 位置不能当作消息序号）
       var items = [];
+      var seen = Object.create(null);
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
         // 嵌套的消息节点（两种选择器同时命中父子）只处理最外层
@@ -713,7 +714,10 @@
         var text = getNodeText(el, role, cfg);
         // 空节点且没有 ID：多半是正在创建的占位节点
         if (!rawId && !text) continue;
-        items.push({ id: getMessageKey(el, role, i), role: role, text: text });
+        var key = getMessageKey(el, role, i);
+        // 同一条消息拆成多行（文字气泡 + 卡片共用一个 message-id）时分开记录，避免互相覆盖
+        if (seen[key]) key = (key + '#' + (++seen[key])).slice(0, 128); else seen[key] = 1;
+        items.push({ id: key, role: role, text: text });
       }
       assignIndexes(items);
 
