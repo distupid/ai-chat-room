@@ -70,12 +70,6 @@
      * 正则不区分大小写。注意不要匹配页脚“ChatGPT 可能会出错”这类常驻文字。
      */
     status: {
-      limit_patterns: [
-        "you(?:'|\u2019)ve (?:hit|reached) (?:your|the|our) [^.]{0,60}limit",
-        "(?:limit|cap) (?:resets|will reset)",
-        "\u5df2\u8fbe\u5230[^\u3002]{0,30}(?:\u4e0a\u9650|\u9650\u989d|\u9650\u5236)",
-        "(?:\u4e0a\u9650|\u9650\u989d)[^\u3002]{0,20}\u91cd\u7f6e"
-      ],
       // 会话在源站被删除 / 不存在（只在页面上没有任何消息时才判定）
       deleted_patterns: [
         'unable to load conversation',
@@ -196,7 +190,7 @@
         exclude: '[aria-hidden="true"], time, [data-reply-parent], [data-testid="card-disclosure"], button[aria-label="折叠"]'
       },
       generating: { selector: '', activity_idle_ms: 2000 },
-      status: { limit_patterns: [], error_patterns: [], model_selector: '', exclude_messages: true, check_interval_ms: 2000 },
+      status: { error_patterns: [], model_selector: '', exclude_messages: true, check_interval_ms: 2000 },
       actions: {
         composer: 'textarea[data-testid="chat-input"]',
         send_button: 'button[data-testid="send-button"]',
@@ -334,7 +328,6 @@
       generating: pickSel(g.selector, 'selector' in dg ? dg.selector : D.generating.selector, 'generating.selector', true),
       activityIdleMs: isFinite(idle) && idle >= 0 && idle <= 60000 ? idle
         : (dg.activity_idle_ms != null ? dg.activity_idle_ms : D.generating.activity_idle_ms),
-      limitPatterns: patterns(st.limit_patterns, Array.isArray(ds.limit_patterns) ? ds.limit_patterns : D.status.limit_patterns, 'status.limit'),
       deletedPatterns: patterns(st.deleted_patterns, Array.isArray(ds.deleted_patterns) ? ds.deleted_patterns : D.status.deleted_patterns, 'status.deleted'),
       errorPatterns: patterns(st.error_patterns, Array.isArray(ds.error_patterns) ? ds.error_patterns : D.status.error_patterns, 'status.error'),
       modelSelector: pickSel(st.model_selector, 'model_selector' in ds ? ds.model_selector : D.status.model_selector, 'status.model_selector', true),
@@ -537,7 +530,18 @@
     var exclude = [c.userText, c.assistantText].filter(Boolean).join(', ');
     // 页面上一条消息都没有时，才检查“会话已删除 / 不存在”
     var noMessages = !!c.messageSelector && !doc.querySelector(c.messageSelector);
-    var walker = doc.createTreeWalker(body, 4 /* NodeFilter.SHOW_TEXT */);
+    // 整棵跳过消息节点 / 正文 / 输入框（长对话里正文很大，逐个文字节点检查会拖慢页面）
+    var skipSel = [exclude, c.statusExcludeMessages ? c.messageSelector : '', '[contenteditable="true"], [contenteditable=""]'].filter(Boolean).join(', ');
+    var walker = doc.createTreeWalker(body, 1 | 4 /* SHOW_ELEMENT | SHOW_TEXT */, {
+      acceptNode: function (n) {
+        if (n.nodeType === 1) {
+          if (SKIP_STATUS_TAGS[n.tagName]) return 2;   // FILTER_REJECT：跳过整个子树
+          try { if (skipSel && n.matches(skipSel)) return 2; } catch (_) { /* 选择器无效 */ }
+          return 3;                                    // FILTER_SKIP：不返回元素本身，继续看子节点
+        }
+        return 1;
+      }
+    });
     var errorHit = null;
     var node;
     var visited = 0;
@@ -557,20 +561,17 @@
           }
         }
       }
-      var limitMatch = false;
-      for (i = 0; i < c.limitPatterns.length; i++) if (c.limitPatterns[i].test(t)) { limitMatch = true; break; }
       var errorMatch = false;
-      if (!limitMatch && !errorHit) {
+      if (!errorHit) {
         for (i = 0; i < c.errorPatterns.length; i++) if (c.errorPatterns[i].test(t)) { errorMatch = true; break; }
       }
-      if (!limitMatch && !errorMatch) continue;
+      if (!errorMatch) continue;
       // 过滤：对话正文、可编辑区域（输入框草稿）
       if (exclude && parent.closest(exclude)) continue;
       if (c.statusExcludeMessages && parent.closest(c.messageSelector)) continue;
       if (parent.closest('[contenteditable="true"], [contenteditable=""]')) continue;
       var block = parent.closest('p, div, section, li, [role="alert"], [role="status"]') || parent;
       var detail = rawText(block).replace(/\s+/g, ' ').slice(0, 300) || t.trim().slice(0, 300);
-      if (limitMatch) { result.status = 'limit_reached'; result.detail = detail; return result; }
       errorHit = detail;
     }
     if (errorHit) { result.status = 'error'; result.detail = errorHit; }
@@ -605,6 +606,8 @@
 
     var state = {
       started: false,
+      maxIndex: null,                                   // 已分配的最大消息序号
+      indexBase: Math.floor(Date.now() / 1000) * 1000,  // 本页面第一次分配序号的基数
       url: win.location.href,
       conversationId: null,
       messages: Object.create(null),
@@ -659,10 +662,48 @@
       return 'fallback:' + role + ':' + index;
     }
 
+    /**
+     * 稳定的消息序号：已见过的消息保持原序号；新消息按它在已知消息之间的位置插入
+     * （追加在后面 → 比已知最大值大；长对话向上加载的历史 → 比后面那条小）。
+     * 新页面第一次扫描以当前时间为基数，保证本次看到的最新消息排在以前记录的消息之后。
+     */
+    var STEP = 1000;
+    function assignIndexes(items) {
+      var n = items.length;
+      var j;
+      for (j = 0; j < n; j++) { var kn = state.messages[items[j].id]; if (kn) items[j].index = kn.index; }
+      j = 0;
+      while (j < n) {
+        if (items[j].index != null) { j++; continue; }
+        var a = j;
+        while (j < n && items[j].index == null) j++;
+        var len = j - a;
+        var prev = a > 0 ? items[a - 1].index : null;
+        var next = j < n ? items[j].index : null;
+        for (var q = 0; q < len; q++) {
+          var idx;
+          if (prev == null && next == null) {
+            idx = (state.maxIndex != null ? state.maxIndex : state.indexBase - STEP) + (q + 1) * STEP;
+          } else if (next == null) {
+            idx = Math.max(prev, state.maxIndex != null ? state.maxIndex : prev) + (q + 1) * STEP;
+          } else if (prev == null) {
+            idx = Math.max(0, next - (len - q) * STEP);
+          } else {
+            var stepIn = (next - prev) / (len + 1);
+            idx = stepIn >= 1 ? prev + Math.floor(stepIn * (q + 1)) : prev + q + 1;
+          }
+          items[a + q].index = idx;
+        }
+      }
+      for (j = 0; j < n; j++) if (state.maxIndex == null || items[j].index > state.maxIndex) state.maxIndex = items[j].index;
+    }
+
     function scanMessages(conversationId, force) {
       var nodes = doc.querySelectorAll(cfg.messageSelector); // querySelectorAll 结果本身不含重复节点
       var lastAssistantId = null;
 
+      // 第一遍：收集当前渲染出来的消息（长对话里页面只渲染一部分，DOM 位置不能当作消息序号）
+      var items = [];
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
         // 嵌套的消息节点（两种选择器同时命中父子）只处理最外层
@@ -670,11 +711,17 @@
         var role = normalizeRole(roleOf(el, cfg));
         var rawId = rawMessageIdOf(el, cfg);
         var text = getNodeText(el, role, cfg);
-
         // 空节点且没有 ID：多半是正在创建的占位节点
         if (!rawId && !text) continue;
+        items.push({ id: getMessageKey(el, role, i), role: role, text: text });
+      }
+      assignIndexes(items);
 
-        var id = getMessageKey(el, role, i);
+      for (var k = 0; k < items.length; k++) {
+        var it = items[k];
+        var id = it.id;
+        var role = it.role;
+        var text = it.text;
         if (role === 'assistant') lastAssistantId = id;
 
         var hash = fnv1a64(text);
@@ -682,20 +729,19 @@
         var payload = {
           message_id: id,
           role: role,
-          index: i,
+          index: it.index,
           text: text.slice(0, MAX_TEXT),
           text_length: text.length,
           truncated: text.length > MAX_TEXT
         };
 
         if (!known) {
-          state.messages[id] = { hash: hash, lastEmit: now(), role: role, index: i };
+          state.messages[id] = { hash: hash, lastEmit: now(), role: role, index: it.index };
           // 不带内容哈希：页面刷新后再次观察到同一条消息时 event_id 相同，后端按重复处理
           send('message.added', conversationId, payload, id);
           continue;
         }
 
-        known.index = i;
         if (known.hash === hash) continue;
         if (role === 'assistant') state.lastAssistantChangeAt = now();
 
@@ -725,6 +771,7 @@
 
       // 路由变了：旧会话的消息状态和生成状态都不带过去
       state.messages = Object.create(null);
+      state.maxIndex = null;
       state.generating = false;
       state.generationStartedAt = 0;
       state.generationMessageId = null;
@@ -879,6 +926,7 @@
     function setConfig(next) {
       cfg = resolveConfig(next, doc, base);
       state.messages = Object.create(null);
+      state.maxIndex = null;
       state.lastStatusCheckAt = 0;
       state.lastAssistantChangeAt = 0;
       if (state.started) scan(true);

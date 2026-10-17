@@ -68,7 +68,7 @@ test('数据接口：认证、权限、Origin', async () => {
   await server.stop();
 });
 
-test('会话实体：来源、标题、模型、消息数、回答中 → 已到限额 → 页面已关（保留提示）、归档、置顶、收藏', async () => {
+test('会话实体：来源、标题、模型、消息数、回答中 → 出错 → 页面已关（保留提示）、归档、置顶、收藏', async () => {
   const server = await startServer({});
   const ext = await extClient(server);
   const list = async () => (await (await get(server, '/api/conversations', TOKENS.observer)).json()).conversations;
@@ -91,10 +91,10 @@ test('会话实体：来源、标题、模型、消息数、回答中 → 已到
   assert.deepEqual(c.last_message, { role: 'assistant', text: '你好！' });
 
   await sendAndAck(ext, ev('generation.finished', { message_id: 'a1', duration_ms: 4200 }));
-  await sendAndAck(ext, ev('conversation.status', { source: 'chatgpt', status: 'limit_reached', detail: '已达到 GPT-5 的使用上限，将在 18:30 重置。', model: 'GPT-5' }));
+  await sendAndAck(ext, ev('conversation.status', { source: 'chatgpt', status: 'error', detail: 'Something went wrong. 18:30', model: 'GPT-5' }));
   c = (await list())[0];
-  assert.equal(c.status, 'limit_reached');
-  assert.equal(c.status_detail, '已达到 GPT-5 的使用上限，将在 18:30 重置。');
+  assert.equal(c.status, 'error');
+  assert.equal(c.status_detail, 'Something went wrong. 18:30');
   assert.equal(c.generation_count, 1);
   assert.equal(c.last_duration_ms, 4200);
 
@@ -102,7 +102,7 @@ test('会话实体：来源、标题、模型、消息数、回答中 → 已到
   c = (await list())[0];
   assert.equal(c.status, 'closed');
   assert.equal(c.open_tabs, 0);
-  assert.equal(c.page_status, 'limit_reached', '页面关掉后仍保留最后的限额状态');
+  assert.equal(c.page_status, 'error', '页面关掉后仍保留最后的出错状态');
   assert.ok(c.status_detail);
 
   // 归档 / 置顶
@@ -119,7 +119,7 @@ test('会话实体：来源、标题、模型、消息数、回答中 → 已到
   await sendAndAck(ext, ev('page.opened', { url: CONV_URL, title: 't' }, { tab: 2 }));
   c = (await list())[0];
   assert.equal(c.activity_after_archive, true, '归档后有新动态');
-  assert.equal(c.status, 'limit_reached', '重新打开后显示页面状态');
+  assert.equal(c.status, 'error', '重新打开后显示页面状态');
   assert.equal((await post(`/api/conversations/${CONV}/mark`, { done: false })).status, 200, '旧字段 done 等同归档');
   assert.equal((await list())[0].archived, false);
   assert.equal((await post(`/api/conversations/${CONV}/mark`, { pinned: true })).status, 200);
@@ -299,7 +299,7 @@ test('指令通道：看板 → 后端 → 插件 → 页面（快速回复 / �
   await server.stop();
 });
 
-test('观察器：页面出现限额提示时上报 conversation.status（对话正文里的“上限”不误报）', async () => {
+test('观察器：不再判断限额；长对话只渲染部分消息时，序号保持稳定，新回答排在最后', async () => {
   class NoopWS { constructor() { this.readyState = 0; } send() {} close() {} }
   const bg = createBackground({ WebSocketImpl: NoopWS, storage: null, clientId: 'ext-status-0001', settings: { serverUrl: 'ws://127.0.0.1:1', token: 'x' } });
   const results = [];
@@ -307,24 +307,32 @@ test('观察器：页面出现限额提示时上报 conversation.status（对话
   bg.handleRuntimeMessage = (m, s) => { const r = orig(m, s); results.push({ m, r }); return r; };
   const page = openChatGPTPage({ url: CONV_URL, tabId: 3, background: bg, html: fakeChatGPT(CONV) });
   const statuses = () => results.filter((x) => x.m.event.event_type === 'conversation.status').map((x) => x.m.event.payload);
-  await waitFor(() => statuses().length >= 1, { label: 'initial status' });
+  const added = () => results.filter((x) => x.m.event.event_type === 'message.added').map((x) => x.m.event.payload);
+  await waitFor(() => statuses().length >= 1 && added().length >= 1, { label: 'initial' });
   assert.deepEqual(statuses()[0], { source: 'chatgpt', status: 'ok', detail: null, model: null });
-
-  // 回答正文里出现“已达到使用上限”——不应触发
-  page.doc.querySelector('[data-dil-message-id] p').textContent = '如果你已达到使用上限，可以等待重置';
-  await sleep(1300);
-  assert.equal(statuses().at(-1).status, 'ok');
 
   const banner = page.doc.createElement('div');
   banner.setAttribute('role', 'alert');
   banner.textContent = "You've reached your GPT-5 limit. Your limit resets at 6:30 PM.";
   page.doc.body.appendChild(banner);
-  await waitFor(() => statuses().at(-1).status === 'limit_reached', { label: 'limit', timeout: 4000 });
-  assert.match(statuses().at(-1).detail, /6:30 PM/);
-  assert.ok(results.every((x) => x.r.ok), JSON.stringify(results.filter((x) => !x.r.ok).map((x) => x.r)));
+  await sleep(1300);
+  assert.ok(statuses().every((x) => x.status !== 'limit_reached'), '限额提示不再上报');
 
-  banner.remove();
-  await waitFor(() => statuses().at(-1).status === 'ok', { label: 'back to ok', timeout: 4000 });
+  // 模拟长对话：前面的消息被移出 DOM，再追加一条新回答
+  const first = [...page.doc.querySelectorAll('[data-chatgpt-search-unit-key]')];
+  const before = Object.fromEntries(added().map((p) => [p.message_id, p.index]));
+  const maxBefore = Math.max(...Object.values(before));
+  const host = first[0].parentElement;
+  for (const el of first.slice(0, -1)) el.remove();
+  const n = page.doc.createElement('div');
+  n.setAttribute('data-chatgpt-search-unit-key', 'fallback-turn-9:9:assistant');
+  n.setAttribute('data-chatgpt-search-message-ids', 'virt-new-1');
+  n.innerHTML = '<div data-dil-message-id="virt-new-1"><p>新的回答</p></div>';
+  host.appendChild(n);
+  await waitFor(() => added().some((p) => p.message_id === 'virt-new-1'), { label: 'new msg', timeout: 4000 });
+  const np = added().find((p) => p.message_id === 'virt-new-1');
+  assert.ok(np.index > maxBefore, `新回答序号 ${np.index} 应大于已有的 ${maxBefore}`);
+  assert.ok(results.every((x) => x.r.ok), JSON.stringify(results.filter((x) => !x.r.ok).map((x) => x.r)));
   page.close();
 });
 
@@ -667,9 +675,10 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.ok(d.getElementById('detailScrim').classList.contains('open'), '弹窗“查看”打开详情');
   d.getElementById('detailClose').click();
 
-  // 实时：状态变为“已到限额”
+  // 已删除限额判断：旧插件上报 limit_reached 也不显示“已到限额”
   await sendAndAck(ext, ev('conversation.status', { source: 'chatgpt', status: 'limit_reached', detail: '已达到使用上限', model: null }));
-  await waitFor(() => d.querySelector(`${cardSel} .badge`)?.textContent === '已到限额', { label: 'limit badge' });
+  await sleep(300);
+  assert.notEqual(d.querySelector(`${cardSel} .badge`)?.textContent, '已到限额');
   assert.ok(!d.querySelector(`${cardSel} .notice`), '卡片不再显示限额提示文字');
   assert.ok(![...d.querySelectorAll(`${cardSel} .tag`)].some((t) => /标签页/.test(t.textContent)), '卡片不显示标签页数量');
   assert.deepEqual([...d.querySelectorAll(`${cardSel} .actions > button`)].map((b) => b.textContent), ['已置顶', '复制', '关闭', '回复']);

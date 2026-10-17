@@ -5,7 +5,6 @@ import { makeEnvelope, MessageType, randomId } from './protocol.js';
 const $ = (id) => document.getElementById(id);
 
 const STATUS = {
-  limit_reached: { label: '已到限额', order: 0 },
   generating: { label: '回答中', order: 1 },
   error: { label: '出错', order: 2 },
   idle: { label: '空闲', order: 3 },
@@ -55,7 +54,8 @@ const settings = {
   token: load('token', localStorage.getItem('bridgeDashboardToken') || ''),
   theme: load('theme', 'system'),
   // sound：普通会话回答完成播放音效；pinned_popup：置顶会话回答完成直接弹窗；enabled：系统通知（需要浏览器权限）
-  notify: { enabled: false, sound: true, pinned_popup: true, ...load('notify', {}) },
+  // all_popup：所有会话回答完成都弹窗（默认关）
+  notify: { enabled: false, sound: true, pinned_popup: true, all_popup: false, ...load('notify', {}) },
   quickReplies: load('quickReplies', DEFAULT_QUICK_REPLIES)
 };
 delete settings.notify.finished;
@@ -244,6 +244,11 @@ function onAnswerFinished(c, conversationId, name, secs) {
       } catch { /* 系统通知失败时退回页面内弹窗 */ }
     }
     showPopup(conversationId, '置顶会话回答完成', `${name}${secs ? '\n' + secs : ''}`);
+    return 'popup';
+  }
+  if (n.all_popup) {
+    if (n.sound) playSound(false);
+    showPopup(conversationId, '回答完成', `${name}${secs ? '\n' + secs : ''}`);
     return 'popup';
   }
   if (n.sound) { playSound(false); return 'sound'; }
@@ -544,8 +549,8 @@ function onBroadcast(b) {
     const prev = state.lastStatus.get(conv);
     const now = b.payload.status;
     state.lastStatus.set(conv, now);
-    if (now !== prev && (now === 'limit_reached' || now === 'error')) {
-      const label = now === 'limit_reached' ? '已到限额' : '出错';
+    if (now !== prev && now === 'error') {
+      const label = '出错';
       snackbar(`${label}：${name}${b.payload.detail ? ' — ' + b.payload.detail : ''}`, 'err');
     }
   }

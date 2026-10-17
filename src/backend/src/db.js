@@ -84,7 +84,7 @@ export function openDatabase(dbPath = ':memory:') {
     INSERT INTO messages (conversation_id, message_id, role, msg_index, text, updated_seq, updated_at)
     VALUES (@conversation_id, @message_id, @role, @msg_index, @text, @seq, @now)
     ON CONFLICT(conversation_id, message_id) DO UPDATE SET
-      role = excluded.role, msg_index = excluded.msg_index, text = excluded.text,
+      role = excluded.role, text = excluded.text,   -- 序号以第一次记录为准，不被之后的更新覆盖（长对话里页面只渲染一部分，序号会变）
       updated_seq = excluded.updated_seq, updated_at = excluded.updated_at
     WHERE excluded.updated_seq > messages.updated_seq`);
   const upsertConversation = db.prepare(`
@@ -318,7 +318,6 @@ function deriveConversation(r, openTabs) {
   const pageStatus = st?.status || 'ok';
   let status;
   if (openTabs === 0) status = 'closed';
-  else if (pageStatus === 'limit_reached') status = 'limit_reached';
   else if (pageStatus === 'error') status = 'error';
   else if (generating) status = 'generating';
   else status = 'idle';
