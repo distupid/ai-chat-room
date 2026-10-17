@@ -526,6 +526,29 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.equal(dl[0].textContent, 'report.pdf');
   assert.equal(dl[0].getAttribute('rel'), 'noopener noreferrer');
 
+  // 超长回答：正文高于弹窗 2/3 时自动折叠，保留首尾（各 1/4 弹窗高度），可展开 / 收起
+  const origRect = win.HTMLElement.prototype.getBoundingClientRect;
+  win.HTMLElement.prototype.getBoundingClientRect = function () {
+    const h = this.classList.contains('dialog') ? 600
+      : this.classList.contains('body') && this.textContent.length > 500 ? 1200 : 40;
+    return { x: 0, y: 0, top: 0, left: 0, right: 100, bottom: h, width: 100, height: h };
+  };
+  const longText = '开头第一段\n\n' + '中间内容。'.repeat(200) + '\n\n结尾最后一段';
+  await sendAndAck(ext, ev('message.added', { message_id: 'a-long', role: 'assistant', index: 5, text: longText, text_length: longText.length }));
+  const longSel = '#detailMsgs .msg[data-mid="a-long"]';
+  await waitFor(() => d.querySelector(`${longSel} .longfold`), { label: 'long folded' });
+  assert.equal(d.querySelector(`${longSel} .lhead`).style.height, '150px');
+  assert.equal(d.querySelector(`${longSel} .ltail`).style.height, '150px');
+  assert.match(d.querySelector(`${longSel} .lhead`).textContent, /开头第一段/);
+  assert.match(d.querySelector(`${longSel} .ltail`).textContent, /结尾最后一段/);
+  assert.ok(!d.querySelector('#detailMsgs .msg[data-mid="a1"] .longfold'), '短回答不折叠');
+  d.querySelector(`${longSel} .longbtn`).click();
+  assert.ok(!d.querySelector(`${longSel} .longfold`));
+  assert.equal(d.querySelector(`${longSel} .longbtn`).textContent, '收起');
+  d.querySelector(`${longSel} .longbtn`).click();
+  assert.ok(d.querySelector(`${longSel} .longfold`));
+  win.HTMLElement.prototype.getBoundingClientRect = origRect;
+
   // 详情右上角：快速回复 + 常见回答候选
   // 点卡片打开详情时快速回复已经展开；右上角是置顶按钮
   assert.ok(d.getElementById('composer').classList.contains('open'));

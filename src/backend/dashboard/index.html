@@ -200,6 +200,13 @@
     .msg .body pre { margin: 8px 0; padding: 10px 12px; border-radius: 8px; background: var(--surface-container-highest); overflow-x: auto; font: 12.5px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; white-space: pre; }
     .msg .body code.inl { font: 12.5px ui-monospace, Consolas, monospace; background: var(--surface-container-highest); border-radius: 4px; padding: 1px 4px; }
     .msg.collapsed .body { display: none; }
+    /* 超长消息：首尾各 1/4 弹窗高度，中间折叠 */
+    .msg .longfold .lhead, .msg .longfold .ltail { overflow: hidden; position: relative; }
+    .msg .longfold .lhead { -webkit-mask-image: linear-gradient(#000 75%, transparent); mask-image: linear-gradient(#000 75%, transparent); }
+    .msg .longfold .ltail { display: flex; flex-direction: column; justify-content: flex-end; -webkit-mask-image: linear-gradient(transparent, #000 25%); mask-image: linear-gradient(transparent, #000 25%); }
+    .msg .longfold .ltail > .body { flex: none; }
+    .msg .longbtn { display: block; width: 100%; margin: 6px 0; padding: 6px 0; border: 1px dashed var(--outline-variant); border-radius: 8px; background: transparent; color: var(--primary); font: inherit; font-size: 13px; cursor: pointer; }
+    .msg .longbtn:hover { background: var(--secondary-container); }
     .msg .fold { display: none; font-size: 13px; color: var(--on-surface-variant); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .msg.collapsed .fold { display: block; }
     .msg.fav { border-color: var(--tertiary); }

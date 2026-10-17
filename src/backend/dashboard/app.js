@@ -77,6 +77,7 @@ const state = {
   messages: new Map(),
   streaming: new Set(),
   collapsed: new Set(),
+  longOpen: new Set(),   // 超长消息：用户手动展开了全文的 message_id
   composerOpen: false,
   candIndex: -1,
   drafts: new Map(),
@@ -287,6 +288,7 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
   state.selected = conversationId;
   state.messages = new Map();
   state.streaming = new Set();
+  state.longOpen = new Set();
   state.composerOpen = true;   // 点卡片打开详情时直接展开快速回复
   $('quickText').value = state.drafts.get(conversationId) || '';
   closeCands();
@@ -970,7 +972,52 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
         }, { act: 'fold' })
       ) : null);
   }) : [el('div', { class: 'empty' }, '暂无消息')]));
+  applyLongFold();
   if ((scrollToEnd || state.composerOpen) && nearBottom) body.scrollTop = body.scrollHeight;
+}
+
+/**
+ * 超长消息自动折叠：单条消息正文高于弹窗高度的 2/3 时，只显示开头和结尾（合计弹窗高度的 1/2），
+ * 中间放“展开全文”；展开后末尾有“收起”。手动折叠（只显示首行）的消息不处理。
+ */
+function dialogHeight() {
+  const dlg = $('detailScrim')?.querySelector('.dialog');
+  const h = dlg ? dlg.getBoundingClientRect().height : 0;
+  return h > 0 ? h : (window.innerHeight || 0) * 0.88;
+}
+let longFoldResizeTimer = null;
+window.addEventListener?.('resize', () => {
+  clearTimeout(longFoldResizeTimer);
+  longFoldResizeTimer = setTimeout(() => { if (state.selected) renderDetail(); }, 200);
+});
+function applyLongFold() {
+  const dh = dialogHeight();
+  if (!(dh > 0)) return;
+  for (const msg of $('detailMsgs').querySelectorAll('.msg[data-mid]')) {
+    if (msg.classList.contains('collapsed')) continue;
+    const id = msg.dataset.mid;
+    const body = msg.querySelector(':scope > .body');
+    if (!body) continue;
+    const h = body.getBoundingClientRect().height;
+    if (!(h > dh * 2 / 3)) continue;
+    const fold = el('button', { class: 'longbtn', 'data-act': 'longfold', type: 'button' });
+    if (state.longOpen.has(id)) {
+      fold.textContent = '收起';
+      fold.onclick = (e) => { e.stopPropagation(); state.longOpen.delete(id); renderDetail(); };
+      body.after(fold);
+      continue;
+    }
+    const part = Math.round(dh / 4);   // 首、尾各占 1/4，合计 1/2 弹窗高度
+    const head = el('div', { class: 'lhead', style: `height:${part}px` });
+    const tail = el('div', { class: 'ltail', style: `height:${part}px` });
+    body.replaceWith(el('div', { class: 'longfold' }, head, fold, tail));
+    head.append(body);
+    tail.append(body.cloneNode(true));
+    fold.textContent = '展开全文';
+    fold.title = '中间部分已折叠';
+    fold.onclick = (e) => { e.stopPropagation(); state.longOpen.add(id); renderDetail(); };
+    msg.classList.add('long');
+  }
 }
 
 function regenerateAnswer(index, total) {
