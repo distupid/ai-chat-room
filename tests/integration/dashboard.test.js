@@ -399,7 +399,23 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.ok(!cardEl.querySelector('.sub .time'));
   assert.equal(d.title, 'AI-Chat-Room');
   assert.match(cardEl.querySelector('.sub').textContent, /ChatGPT/);
-  assert.match(d.getElementById('chips').textContent, /全部1/);
+  // 筛选栏三块：状态（没有“全部”，再点一次取消）｜来源｜收藏、归档
+  const chipTexts = () => [...d.querySelectorAll('#chips .chip')].map((b) => b.textContent);
+  assert.ok(!chipTexts().some((t) => /^全部\d/.test(t)), `chips: ${chipTexts()}`);
+  assert.ok(chipTexts().includes('空闲1'));
+  assert.deepEqual([...d.querySelectorAll('#chips .cg.end .chip')].map((b) => b.textContent), ['有收藏0', '已归档0']);
+  const idleChip = () => [...d.querySelectorAll('#chips .chip')].find((b) => /^空闲/.test(b.textContent));
+  idleChip().click();
+  assert.ok(idleChip().classList.contains('on'));
+  idleChip().click();
+  assert.ok(!idleChip().classList.contains('on'), '再点一次取消筛选');
+  // 搜索：平时只有图标，点击展开
+  assert.ok(!d.getElementById('searchBox').classList.contains('open'));
+  d.getElementById('searchBtn').click();
+  assert.ok(d.getElementById('searchBox').classList.contains('open'));
+  d.getElementById('search').dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.ok(!d.getElementById('searchBox').classList.contains('open'));
+  assert.equal(d.getElementById('sitesBtn').textContent.trim(), '', '网站按钮只显示地球图标');
   const cardButtons = () => [...d.querySelectorAll(`${cardSel} button`)].map((b) => b.textContent);
   assert.ok(!cardButtons().some((t) => /快速回复|详情|复制回答|标记完成/.test(t)), `卡片按钮：${cardButtons()}`);
   assert.ok(cardButtons().includes('置顶'));
@@ -497,6 +513,24 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   d.getElementById('detailClose').click();
   assert.ok(!d.getElementById('detailScrim').classList.contains('open'));
 
+  // 有收藏的会话：点开后滚动到收藏的回答（高亮一下）
+  d.querySelector(cardSel).click();
+  await waitFor(() => d.querySelector('#detailMsgs .msg.fav.flash'), { label: 'scroll to favorite' });
+  d.getElementById('detailClose').click();
+
+  // 卡片上的“回复”：向下弹出快速回复栏
+  const replyBtn = () => d.querySelector(`${cardSel} [data-act="reply"]`);
+  replyBtn().click();
+  const panel = await waitFor(() => d.querySelector(`${cardSel} .creply`), { label: 'card reply' });
+  assert.ok(!d.getElementById('detailScrim').classList.contains('open'), '不会打开详情');
+  assert.ok([...panel.querySelectorAll('.qr button')].some((b) => b.textContent === '帮我写单元测试'));
+  [...panel.querySelectorAll('.qr button')].find((b) => b.textContent === '帮我写单元测试').click();
+  assert.equal(panel.querySelector('textarea').value, '帮我写单元测试');
+  panel.querySelector('[data-act="send"]').click();
+  await waitFor(() => ext.of('command').some((m) => m.action === 'reply' && m.text === '帮我写单元测试' && m.command_id !== undefined && ext.of('command').filter((x) => x.action === 'reply').length >= 2), { label: 'card reply command', timeout: 6000 });
+  replyBtn().click();
+  await waitFor(() => !d.querySelector(`${cardSel} .creply`), { label: 'card reply closed' });
+
   // 通知等级：普通会话回答完成 → 音效，不弹窗
   await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 1 }));
   await sendAndAck(ext, ev('generation.finished', { message_id: 'a1', duration_ms: 1200 }));
@@ -526,7 +560,7 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   // 归档：从“全部”消失，出现在“已归档”
   btn('归档').click();
   await waitFor(() => !d.querySelector(cardSel), { label: 'archived hidden' });
-  assert.match(d.getElementById('chips').textContent, /全部0/);
+  assert.ok(!d.querySelector(cardSel));
   assert.match(d.getElementById('chips').textContent, /已归档1/);
   [...d.querySelectorAll('#chips .chip')].find((b) => /已归档/.test(b.textContent)).click();
   await waitFor(() => d.querySelector(`${cardSel}.archived`), { label: 'in archive' });

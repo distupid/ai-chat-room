@@ -17,6 +17,7 @@ const SOURCES = {
   hark: { label: 'Hark', short: 'H', regenerate: false }
 };
 // “全部”和各状态都不含已归档；已归档单独一个筛选
+// 第一栏：状态（再点一次已选中的取消筛选 = 全部）；第三栏：收藏 / 归档
 const STATUS_FILTERS = [
   ['all', '全部'], ['pinned', '置顶'], ['generating', '回答中'], ['limit_reached', '已到限额'], ['error', '出错'],
   ['idle', '空闲'], ['closed', '页面已关'], ['favorite', '有收藏'], ['archived', '已归档']
@@ -24,6 +25,7 @@ const STATUS_FILTERS = [
 const DEFAULT_QUICK_REPLIES = ['继续', '请详细解释一下', '给出完整代码', '总结一下要点', '换一种思路再试试', '用中文回答', '谢谢，没问题了'];
 
 const SVG = {
+  reply: '<svg class="i s18" viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>',
   pin: '<svg class="i s18" viewBox="0 0 24 24"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>',
   copy: '<svg class="i s18" viewBox="0 0 24 24"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z"/></svg>',
   star: '<svg class="i s18" viewBox="0 0 24 24"><path d="m22 9.24-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/></svg>',
@@ -77,6 +79,7 @@ const state = {
   composerOpen: false,
   candIndex: -1,
   drafts: new Map(),
+  cardReply: null,
   pendingCommands: new Map(),
   lastStatus: new Map(),
   refreshTimer: null
@@ -290,7 +293,7 @@ function scheduleRefresh(delay = 400) {
 
 const convById = (id) => state.conversations.find((x) => x.conversation_id === id);
 
-async function openDetail(conversationId) {
+async function openDetail(conversationId, { toFavorite = false } = {}) {
   if (state.selected && state.selected !== conversationId) state.drafts.set(state.selected, $('quickText').value);
   state.selected = conversationId;
   state.messages = new Map();
@@ -307,7 +310,20 @@ async function openDetail(conversationId) {
     if (state.selected !== conversationId) return;
     for (const m of data.messages) state.messages.set(m.message_id, { role: m.role, index: m.msg_index, text: m.text, favorite: !!m.favorite });
     renderDetail(true, true);
+    if (toFavorite) scrollToFavorite();
   } catch (e) { snackbar(`读取消息失败：${e.message}`, 'err'); }
+}
+
+/** 有收藏的会话：打开详情后滚动到（最近的一条）收藏回答并闪一下 */
+function scrollToFavorite() {
+  const favs = $('detailMsgs').querySelectorAll('.msg.fav');
+  const target = favs[favs.length - 1];
+  if (!target) return;
+  const body = $('detailBody');
+  body.scrollTop = Math.max(0, target.offsetTop - body.offsetTop - 8);
+  target.scrollIntoView?.({ block: 'start' });
+  target.classList.add('flash');
+  setTimeout(() => target.classList.remove('flash'), 1700);
 }
 
 function closeDetail() {
@@ -544,13 +560,18 @@ function renderChips() {
   const chip = (on, label, n, onclick) => el('button', { class: `chip ${on ? 'on' : ''}`, onclick },
     on ? el('span', { html: '<svg class="i s18" viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>' }) : null,
     label, n != null ? el('span', { class: 'n' }, n) : null);
-  $('chips').replaceChildren(
-    ...STATUS_FILTERS.map(([key, label]) => chip(state.filter === key, label, counts[key] || 0,
-      () => { state.filter = key; save('filter', key); render(); })),
-    sources.length > 1 ? el('span', { class: 'sep' }) : null,
-    ...(sources.length > 1 ? [['all', '全部来源'], ...sources.map((s) => [s, sourceInfo(s).label])] : [])
+  const pick = (key) => () => { state.filter = state.filter === key ? 'all' : key; save('filter', state.filter); render(); };
+  const group = (items, cls = '') => items.length ? el('div', { class: `cg ${cls}` }, ...items) : null;
+  const statusChips = STATUS_FILTERS.filter(([k]) => !['all', 'favorite', 'archived'].includes(k))
+    .map(([key, label]) => chip(state.filter === key, label, counts[key] || 0, pick(key)));
+  const sourceChips = sources.length > 1
+    ? [['all', '全部来源'], ...sources.map((x) => [x, sourceInfo(x).label])]
       .map(([key, label]) => chip(state.source === key, label, null, () => { state.source = key; save('source', key); render(); }))
-  );
+    : [];
+  const extraChips = [['favorite', '有收藏'], ['archived', '已归档']]
+    .map(([key, label]) => chip(state.filter === key, label, counts[key] || 0, pick(key)));
+  const groups = [group(statusChips), group(sourceChips), group(extraChips, 'end')].filter(Boolean);
+  $('chips').replaceChildren(...groups.flatMap((g, i) => i && !g.classList.contains('end') ? [el('span', { class: 'sep' }), g] : [g]));
 }
 
 function card(c) {
@@ -567,7 +588,7 @@ function card(c) {
   const node = el('article', {
     class: `card s-${c.status} src-${avatarClass(c.source)} ${c.pinned ? 'pinned' : ''} ${c.archived ? 'archived' : ''}`,
     'data-conv': id, tabindex: '0', role: 'button', title: '点击查看详情',
-    onclick: () => openDetail(id),
+    onclick: () => openDetail(id, { toFavorite: c.favorite_count > 0 }),
     onkeydown: (e) => { if (e.target === node && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openDetail(id); } }
   },
     el('div', { class: 'head' },
@@ -598,14 +619,54 @@ function card(c) {
       el('button', { class: `btn ${c.pinned ? 'tonal' : 'outlined'} s`, 'aria-pressed': String(!!c.pinned), onclick: stop(() => togglePin(c)) },
         el('span', { html: SVG.pin, style: 'display:inline-flex' }), c.pinned ? '取消置顶' : '置顶'),
       el('button', { class: 'btn outlined s', onclick: stop(() => toggleArchive(c)) }, c.archived ? '取消归档' : '归档'),
+      el('button', {
+        class: `btn ${state.cardReply === id ? 'tonal' : 'outlined'} s`, 'data-act': 'reply', 'aria-expanded': String(state.cardReply === id),
+        title: offlineTip, onclick: stop(() => toggleCardReply(id))
+      }, el('span', { html: SVG.reply, style: 'display:inline-flex' }), '回复'),
       src.regenerate ? el('button', {
         class: 'btn outlined s', title: offlineTip,
         disabled: !online || busy || c.status === 'generating' || c.assistant_count === 0,
         onclick: stop(() => sendCommand(id, 'regenerate'))
       }, '重新回答') : null
-    )
+    ),
+    state.cardReply === id ? cardReplyPanel(c, online, busy) : null
   );
   return node;
+}
+
+// ------------------------------------------------------------------ 卡片：快速回复栏
+
+function toggleCardReply(id) {
+  if (state.cardReply) state.drafts.set(state.cardReply, document.querySelector('.creply textarea')?.value ?? state.drafts.get(state.cardReply) ?? '');
+  state.cardReply = state.cardReply === id ? null : id;
+  render();
+  if (state.cardReply) document.querySelector('.creply textarea')?.focus();
+}
+
+function cardReplyPanel(c, online, busy) {
+  const id = c.conversation_id;
+  const ta = el('textarea', { class: 'field', placeholder: '发到这个会话，Ctrl+Enter 发送', 'aria-label': '快速回复' });
+  ta.value = state.drafts.get(id) || '';
+  const send = () => {
+    const text = ta.value.trim();
+    if (!text) return snackbar('回复内容不能为空', 'err');
+    if (!sendCommand(id, 'reply', text)) return snackbar('实时连接未建立，无法发送', 'err');
+  };
+  ta.addEventListener('input', () => state.drafts.set(id, ta.value));
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+    else if (e.key === 'Escape') { e.preventDefault(); toggleCardReply(id); }
+  });
+  const quick = settings.quickReplies.filter((t) => t && t.trim()).map((t) => el('button', {
+    type: 'button', title: t, onclick: () => { ta.value = t; state.drafts.set(id, t); ta.focus(); }
+  }, t));
+  return el('div', { class: 'creply', onclick: (e) => e.stopPropagation(), onkeydown: (e) => e.stopPropagation() },
+    ta,
+    quick.length ? el('div', { class: 'qr' }, ...quick) : null,
+    el('div', { class: 'row' },
+      el('span', { class: 'hint' }, !online ? '需要有标签页开着这个会话' : c.status === 'generating' ? '正在回答中，发送会被拒绝' : ''),
+      el('button', { class: 'btn text s', type: 'button', onclick: () => toggleCardReply(id) }, '收起'),
+      el('button', { class: 'btn filled s', type: 'button', 'data-act': 'send', disabled: !online || busy, onclick: send }, busy ? '发送中…' : '发送')));
 }
 
 function render() {
@@ -613,6 +674,8 @@ function render() {
   renderChips();
   const list = filtered();
   const focusedConv = document.activeElement?.closest?.('.card')?.dataset.conv || null;
+  const replyFocus = document.activeElement?.closest?.('.creply') && document.activeElement.tagName === 'TEXTAREA'
+    ? { s: document.activeElement.selectionStart, e: document.activeElement.selectionEnd } : null;
   if (!state.conversations.length) {
     grid.replaceChildren(el('div', { class: 'empty' }, state.wsState === 'open'
       ? '还没有会话。打开 ChatGPT、Duck.ai 或 Hark 的一个对话试试。'
@@ -622,7 +685,10 @@ function render() {
   } else {
     grid.replaceChildren(...list.map(card));
   }
-  if (focusedConv) [...grid.querySelectorAll('.card')].find((n) => n.dataset.conv === focusedConv)?.focus();
+  if (replyFocus) {
+    const ta = grid.querySelector('.creply textarea');
+    if (ta) { ta.focus(); ta.setSelectionRange?.(replyFocus.s, replyFocus.e); }
+  } else if (focusedConv) [...grid.querySelectorAll('.card')].find((n) => n.dataset.conv === focusedConv)?.focus();
   if (state.selected) { renderDetailHead(); renderComposer(); }
 }
 
@@ -814,9 +880,16 @@ function convBusy(id) {
   return [...state.pendingCommands.values()].some((p) => p.conversation_id === id && p.action !== 'focus');
 }
 
+/** 快速回复时把对话固定在底部（最新消息） */
+function scrollDetailBottom() {
+  const body = $('detailBody');
+  body.scrollTop = body.scrollHeight;
+  requestAnimationFrame?.(() => { body.scrollTop = body.scrollHeight; });
+}
+
 function renderDetail(scrollToEnd = false, forceBottom = false) {
   const body = $('detailBody');
-  const nearBottom = forceBottom || body.scrollHeight - body.scrollTop - body.clientHeight < 120;
+  const nearBottom = forceBottom || state.composerOpen || body.scrollHeight - body.scrollTop - body.clientHeight < 120;
   const msgs = [...state.messages.entries()].sort((a, b) => a[1].index - b[1].index);
   const c = convById(state.selected);
   const src = sourceInfo(c?.source);
@@ -852,7 +925,7 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
         }, { act: 'fold' })
       ) : null);
   }) : [el('div', { class: 'empty' }, '暂无消息')]));
-  if (scrollToEnd && nearBottom) body.scrollTop = body.scrollHeight;
+  if ((scrollToEnd || state.composerOpen) && nearBottom) body.scrollTop = body.scrollHeight;
 }
 
 function regenerateAnswer(index, total) {
@@ -878,7 +951,7 @@ function renderComposer() {
 function toggleComposer(open = !state.composerOpen) {
   state.composerOpen = open;
   renderComposer();
-  if (open) { $('quickText').focus(); openCands(); } else closeCands();
+  if (open) { $('quickText').focus(); openCands(); scrollDetailBottom(); } else closeCands();
 }
 
 function candidates() {
@@ -1014,6 +1087,14 @@ $('notifyTest').onclick = () => {
 };
 $('serverRefresh').onclick = loadServerInfo;
 $('search').addEventListener('input', (e) => { state.search = e.target.value; render(); });
+function setSearchOpen(open) {
+  $('searchBox').classList.toggle('open', open);
+  $('searchBtn').setAttribute('aria-expanded', String(open));
+  if (open) $('search').focus();
+}
+$('searchBtn').onclick = (e) => { e.preventDefault(); setSearchOpen(!$('searchBox').classList.contains('open') || !!state.search); };
+$('search').addEventListener('blur', () => { if (!state.search) setSearchOpen(false); });
+$('search').addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('search').value = ''; state.search = ''; render(); setSearchOpen(false); $('searchBtn').focus(); } });
 $('sitesBtn').onclick = (e) => { e.stopPropagation(); toggleSitesMenu(); };
 document.addEventListener('click', (e) => { if (!e.target.closest?.('.sitemenu')) toggleSitesMenu(false); });
 $('siteCancel').onclick = closeAddSite;

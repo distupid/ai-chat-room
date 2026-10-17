@@ -2,34 +2,78 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
+  <meta name="color-scheme" content="light dark" />
   <title>AI-Chat-Room</title>
   <style>
-    body { font: 12px/1.4 system-ui, sans-serif; width: 400px; margin: 10px; }
-    label { display: block; margin-top: 6px; }
-    input { width: 100%; box-sizing: border-box; }
-    pre { background: #f4f4f5; padding: 6px; max-height: 260px; overflow: auto; white-space: pre-wrap; }
-    .state { font-weight: 600; }
-    fieldset { margin-top: 8px; border: 1px solid #ddd; }
-    .ok { color: #16a34a; } .err { color: #dc2626; }
+    /* 与看板一致：Material Design 3 色彩令牌（基线紫色），深浅色跟随系统 */
+    :root {
+      --primary: #6750A4; --on-primary: #FFFFFF; --secondary-container: #E8DEF8; --on-secondary-container: #1D192B;
+      --surface: #FEF7FF; --surface-container-low: #F7F2FA; --surface-container: #F3EDF7; --surface-container-high: #ECE6F0;
+      --on-surface: #1D1B20; --on-surface-variant: #49454F; --outline: #79747E; --outline-variant: #CAC4D0;
+      --error: #B3261E; --st-idle: #146C2E; --st-idle-bg: #C4EED0; --st-error-bg: #F9DEDC; --st-wait: #8A5300; --st-wait-bg: #FFDDB3;
+      color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --primary: #D0BCFF; --on-primary: #381E72; --secondary-container: #4A4458; --on-secondary-container: #E8DEF8;
+        --surface: #141218; --surface-container-low: #1D1B20; --surface-container: #211F26; --surface-container-high: #2B2930;
+        --on-surface: #E6E0E9; --on-surface-variant: #CAC4D0; --outline: #938F99; --outline-variant: #49454F;
+        --error: #F2B8B5; --st-idle: #6DD58C; --st-idle-bg: #0F5223; --st-error-bg: #8C1D18; --st-wait: #FFB95C; --st-wait-bg: #5C3B00;
+        color-scheme: dark;
+      }
+    }
+    * { box-sizing: border-box; scrollbar-color: var(--outline) transparent; }
+    html, body { margin: 0; background: var(--surface); color: var(--on-surface); }
+    body { width: 420px; font: 13px/18px Roboto, "Noto Sans SC", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; letter-spacing: .1px; }
+    button, input { font: inherit; color: inherit; }
+    .appbar { display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: var(--surface-container); }
+    .appbar h1 { margin: 0; font-size: 18px; line-height: 24px; font-weight: 400; flex: 1; }
+    .badge { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; background: var(--st-wait-bg); color: var(--st-wait); }
+    .badge.ok { background: var(--st-idle-bg); color: var(--st-idle); }
+    .badge.err { background: var(--st-error-bg); color: var(--error); }
+    main { padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
+    .card { background: var(--surface-container-low); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .card h2 { margin: 0; font-size: 14px; font-weight: 500; }
+    label { display: flex; flex-direction: column; gap: 4px; }
+    .lbl { font-size: 12px; color: var(--on-surface-variant); }
+    .input { height: 40px; border: 1px solid var(--outline); border-radius: 4px; background: transparent; padding: 0 12px; outline: none; width: 100%; }
+    .input:focus { border: 2px solid var(--primary); padding: 0 11px; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row .grow { flex: 1; }
+    .btn { height: 32px; padding: 0 14px; border-radius: 16px; border: 0; cursor: pointer; font-weight: 500; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+    .btn:disabled { opacity: .38; cursor: default; }
+    .btn.filled { background: var(--primary); color: var(--on-primary); }
+    .btn.tonal { background: var(--secondary-container); color: var(--on-secondary-container); }
+    .btn.outlined { background: transparent; border: 1px solid var(--outline); color: var(--primary); }
+    .btn:not(:disabled):hover { filter: brightness(1.06); }
+    #analyzeMsg { font-size: 12px; min-height: 0; }
+    #analyzeMsg:empty { display: none; }
+    .ok { color: var(--st-idle); } .err { color: var(--error); }
+    pre { margin: 0; background: var(--surface-container-high); color: var(--on-surface-variant); border-radius: 8px; padding: 8px 10px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all; font: 11px/16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   </style>
 </head>
 <body>
-  <div>状态：<span id="state" class="state">-</span></div>
-  <label>后端地址 <input id="url" placeholder="ws://127.0.0.1:8787" /></label>
-  <label>Token（server/data/config.json 中 extension 的 token）<input id="token" type="password" /></label>
-  <button id="save">保存并连接</button>
-  <button id="refresh">刷新诊断</button>
-
-  <fieldset>
-    <legend>DOM 配置</legend>
-    <div>当前：<span id="cfgSource">-</span></div>
-    <button id="analyze">分析当前页面 DOM 并应用</button>
-    <button id="clearCfg">恢复内置默认配置</button>
-    <div id="analyzeMsg"></div>
-    <pre id="cfgReport">-</pre>
-  </fieldset>
-
-  <pre id="diag">-</pre>
+  <header class="appbar">
+    <h1>AI-Chat-Room</h1>
+    <span id="state" class="badge">-</span>
+  </header>
+  <main>
+    <section class="card">
+      <h2>连接</h2>
+      <label><span class="lbl">后端地址</span><input id="url" class="input" placeholder="ws://127.0.0.1:8787" /></label>
+      <label><span class="lbl">Token（server/data/config.json 中 extension 的 token）</span><input id="token" class="input" type="password" autocomplete="off" /></label>
+      <div class="row"><span class="grow"></span><button id="save" class="btn filled">保存并连接</button></div>
+    </section>
+    <section class="card">
+      <div class="row">
+        <button id="refresh" class="btn outlined">刷新诊断</button>
+        <span class="grow"></span>
+        <button id="analyze" class="btn tonal" title="抓取当前标签页 DOM，由后端分析并应用到这个站点">分析当前页面 DOM 并应用</button>
+      </div>
+      <div id="analyzeMsg"></div>
+      <pre id="diag">-</pre>
+    </section>
+  </main>
   <script src="popup.js"></script>
 </body>
 </html>

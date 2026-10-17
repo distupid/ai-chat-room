@@ -4,28 +4,15 @@ async function refresh() {
   const res = await chrome.runtime.sendMessage({ kind: 'get_diagnostics' });
   const d = res?.diagnostics;
   if (!d) return;
-  $('state').textContent = d.state;
+  const label = { open: '已连接', auth_failed: '认证失败', waiting: '等待重连', connecting: '连接中', handshaking: '握手中', stopped: '未连接' }[d.state] || d.state;
+  $('state').textContent = label;
+  $('state').className = `badge ${d.state === 'open' ? 'ok' : d.state === 'auth_failed' ? 'err' : ''}`;
   $('diag').textContent = JSON.stringify({
     state: d.state, url: d.url, client_id: d.client_id, session: d.session,
     queue: d.queue, stats: d.stats, page_events: d.page_events, tabs: d.tabs,
     received_broadcasts: d.received_broadcasts, recent_inbound: d.recent_inbound,
     errors: d.errors, last_close: d.last_close, next_retry_at: d.next_retry_at
   }, null, 2);
-}
-
-async function showDomConfig() {
-  const { domConfig, domConfigReport, domConfigs = {}, domConfigReports = {} } =
-    await chrome.storage.local.get(['domConfig', 'domConfigReport', 'domConfigs', 'domConfigReports']);
-  const all = { ...domConfigs };
-  if (!all.chatgpt && domConfig) all.chatgpt = domConfig;
-  const names = { chatgpt: 'ChatGPT', duckai: 'Duck.ai', hark: 'Hark' };
-  $('cfgSource').textContent = Object.keys(names)
-    .map((k) => `${names[k]}：${all[k] ? `后端分析（${all[k].strategy || '-'}）` : '内置适配'}`).join('；');
-  const reports = { ...domConfigReports };
-  if (!reports.chatgpt && domConfigReport) reports.chatgpt = domConfigReport;
-  $('cfgReport').textContent = Object.keys(all).length
-    ? JSON.stringify(Object.fromEntries(Object.entries(all).map(([k, v]) => [k, { report: reports[k], config: v }])), null, 2)
-    : '-';
 }
 
 function say(text, ok) {
@@ -57,15 +44,8 @@ $('analyze').onclick = async () => {
     }
   } finally {
     $('analyze').disabled = false;
-    showDomConfig();
   }
-};
-$('clearCfg').onclick = async () => {
-  await chrome.runtime.sendMessage({ kind: 'clear_dom_config' });
-  say('已恢复内置默认配置', true);
-  showDomConfig();
 };
 
 refresh();
-showDomConfig();
 setInterval(refresh, 2000);

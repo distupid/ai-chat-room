@@ -26,7 +26,9 @@
       --elev-1: 0 1px 2px rgba(0,0,0,.3), 0 1px 3px 1px rgba(0,0,0,.15);
       --elev-3: 0 4px 8px 3px rgba(0,0,0,.15), 0 1px 3px rgba(0,0,0,.3);
     }
+    [data-theme="light"] { color-scheme: light; }
     [data-theme="dark"] {
+      color-scheme: dark;
       --primary: #D0BCFF; --on-primary: #381E72; --primary-container: #4F378B; --on-primary-container: #EADDFF;
       --secondary-container: #4A4458; --on-secondary-container: #E8DEF8;
       --tertiary: #EFB8C8; --tertiary-container: #633B48;
@@ -57,7 +59,18 @@
     .conn { display: inline-flex; align-items: center; gap: 6px; color: var(--on-surface-variant); font-size: 12px; white-space: nowrap; }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--outline); }
     .dot.on { background: var(--st-idle); } .dot.off { background: var(--error); }
-    .search { display: flex; align-items: center; gap: 8px; height: 48px; padding: 0 16px; border-radius: 28px; background: var(--surface-container-high); min-width: 220px; max-width: 420px; flex: 1; color: var(--on-surface-variant); }
+    /* 滚动条跟随主题 */
+    * { scrollbar-color: var(--outline) transparent; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--on-surface-variant) 40%, transparent); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+    ::-webkit-scrollbar-thumb:hover { background-color: var(--on-surface-variant); }
+    /* 搜索：平时只显示图标，点击展开；高度与旁边的图标按钮一致（40px） */
+    .search { display: flex; align-items: center; gap: 4px; height: 40px; width: 40px; padding: 0; border-radius: 20px; background: transparent; color: var(--on-surface-variant); overflow: hidden; transition: width .2s, background .2s; flex: none; }
+    .search .sbtn { flex: none; }
+    .search input { width: 0; padding: 0; }
+    .search.open { width: min(360px, 50vw); background: var(--surface-container-high); padding-right: 12px; }
+    .search.open input { width: auto; }
     .search input { border: 0; outline: 0; background: transparent; flex: 1; min-width: 0; color: var(--on-surface); }
 
     .icon-btn { width: 40px; height: 40px; border-radius: 20px; border: 0; background: transparent; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; color: var(--on-surface-variant); position: relative; flex: none; }
@@ -83,6 +96,8 @@
     .chip.on { background: var(--secondary-container); color: var(--on-secondary-container); border-color: transparent; }
     .chip .n { font-size: 12px; opacity: .8; }
     .chips .sep { width: 1px; height: 24px; background: var(--outline-variant); margin: 0 4px; }
+    .chips .cg { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .chips .cg.end { margin-left: auto; }
 
     main { padding: 12px 24px 96px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
@@ -95,7 +110,7 @@
     .card.s-generating { border-left-color: var(--st-generating); }
     .card.s-limit_reached { border-left-color: var(--st-limit); }
     .card.s-error { border-left-color: var(--st-error); }
-    .card.s-idle { border-left-color: var(--st-idle); }
+    .card.s-idle { border-left-color: transparent; }
     .card.archived { opacity: .7; }
     .card { --src: var(--tertiary-container); }
     .card.src-chatgpt { --src: #10A37F; } .card.src-duckai { --src: #DE5833; } .card.src-hark { --src: var(--primary); }
@@ -129,6 +144,16 @@
     .preview b { color: var(--on-surface); font-weight: 500; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .card .actions { margin-top: auto; padding-top: 4px; }
+    /* 卡片：向下弹出的快速回复栏 */
+    .creply { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; cursor: default; }
+    .creply .field { min-height: 56px; background: var(--surface-container-lowest); }
+    .creply .qr { display: flex; gap: 6px; flex-wrap: wrap; }
+    .creply .qr button { height: 28px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--outline-variant); background: transparent; color: var(--on-surface-variant); font-size: 12px; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .creply .qr button:hover { background: var(--secondary-container); color: var(--on-secondary-container); }
+    .creply .row { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+    .creply .hint { margin-right: auto; font-size: 12px; color: var(--on-surface-variant); }
+    .msg.flash { animation: flash 1.6s ease-out; }
+    @keyframes flash { 0%, 40% { box-shadow: 0 0 0 3px var(--primary); } 100% { box-shadow: 0 0 0 0 transparent; } }
     .card .side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none; }
     .card .side .time { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); white-space: nowrap; }
     .field { border: 1px solid var(--outline); border-radius: 4px; background: transparent; padding: 10px 12px; width: 100%; resize: vertical; min-height: 64px; outline: none; }
@@ -248,13 +273,14 @@
     <h1>AI-Chat-Room</h1>
     <span class="conn"><span id="connDot" class="dot"></span><span id="connText">未连接</span></span>
     <span class="grow"></span>
-    <label class="search">
-      <svg class="i" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+    <label id="searchBox" class="search">
+      <button id="searchBtn" class="icon-btn sbtn" type="button" title="搜索" aria-label="搜索" aria-expanded="false"><svg class="i" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+      </button>
       <input id="search" type="search" placeholder="搜索标题、内容、会话 ID" />
     </label>
     <div class="sitemenu">
-      <button id="sitesBtn" class="btn outlined s" aria-haspopup="menu" aria-expanded="false" title="已适配的 AI 会话网址">
-        网站<svg class="i s18" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></button>
+      <button id="sitesBtn" class="icon-btn" aria-haspopup="menu" aria-expanded="false" title="网站：已适配的 AI 会话网址" aria-label="网站">
+        <svg class="i" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.93 6h-2.95a15.65 15.65 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.93 8zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96zM4.26 14a8.2 8.2 0 0 1 0-4h3.38a16.5 16.5 0 0 0 0 4H4.26zm.82 2h2.95c.32 1.25.78 2.45 1.38 3.56A7.99 7.99 0 0 1 5.08 16zm2.95-8H5.08a7.99 7.99 0 0 1 4.33-3.56A15.65 15.65 0 0 0 8.03 8zM12 19.96c-.83-1.2-1.48-2.53-1.91-3.96h3.82c-.43 1.43-1.08 2.76-1.91 3.96zM14.34 14H9.66a14.7 14.7 0 0 1 0-4h4.68a14.7 14.7 0 0 1 0 4zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56zM16.36 14a16.5 16.5 0 0 0 0-4h3.38a8.2 8.2 0 0 1 0 4h-3.38z"/></svg></button>
       <div id="sitesMenu" class="menu" role="menu"></div>
     </div>
     <button id="themeBtn" class="icon-btn" title="切换深色 / 浅色"></button>
