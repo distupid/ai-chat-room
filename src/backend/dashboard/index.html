@@ -113,10 +113,11 @@
     .card:hover { box-shadow: var(--elev-1); background: var(--surface-container); }
     .card.active-page:hover { box-shadow: 0 0 0 2px var(--primary), var(--elev-1); }
     .card:focus-visible { outline: 2px solid var(--primary); }
-    .card { --src: var(--tertiary-container); }
+    /* 卡片底色 = 网站主题色淡染（网站配置里的 color 优先，没有就用看板主题色），所有状态统一；页面已关更淡 */
+    .card { --src: var(--primary); background: color-mix(in srgb, var(--src) 10%, var(--surface-container-low)); }
     .card.src-chatgpt { --src: #10A37F; } .card.src-duckai { --src: #DE5833; } .card.src-hark { --src: var(--primary); }
-    .card.s-idle { background: color-mix(in srgb, var(--src) 12%, var(--surface-container-low)); }
-    .card.s-idle:hover { background: color-mix(in srgb, var(--src) 18%, var(--surface-container)); }
+    .card:hover { background: color-mix(in srgb, var(--src) 16%, var(--surface-container)); }
+    .card.s-closed { background: color-mix(in srgb, var(--src) 5%, var(--surface-container-low)); }
     .card .head { display: flex; gap: 12px; align-items: flex-start; }
     .avatar { width: 40px; height: 40px; border-radius: 20px; flex: none; display: flex; align-items: center; justify-content: center; font-weight: 500; font-size: 15px; }
     .avatar.chatgpt { background: #10A37F; color: #fff; }
@@ -130,6 +131,7 @@
     .card .sub { color: var(--on-surface-variant); font-size: 12px; line-height: 16px; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
     .badge { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; white-space: nowrap; }
     .b-generating { background: var(--st-generating-bg); color: var(--st-generating); }
+    .b-limit_reached { background: var(--st-error-bg); color: var(--st-error); }
     .b-error { background: var(--st-error-bg); color: var(--st-error); }
     .b-idle { background: var(--st-idle-bg); color: var(--st-idle); }
     .b-closed { background: var(--st-closed-bg); color: var(--st-closed); }
@@ -343,6 +345,10 @@
     .fab-item[data-state="pending"] .fab-ic { animation: fab-pulse 1.2s ease-in-out infinite; }
     @keyframes fab-pulse { 50% { opacity: .45; } }
     .fab-item[data-conv] .fab { cursor: pointer; }
+    .sent-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+    .sent-file { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; padding: 4px 10px; border-radius: 8px; background: var(--surface-container-high); color: var(--on-surface); font-size: 13px; }
+    .sent-file .sf-nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sent-file small { color: var(--on-surface-variant); flex: none; }
     .fab-item[data-state="ok"] .fab { background: var(--st-idle-bg); color: var(--st-idle); }
     .fab-item[data-state="ok"] .ring { opacity: 0; transition: opacity .3s .15s; }
     .fab-item[data-state="err"] .fab { background: var(--error-container); color: var(--on-error-container); cursor: pointer; }

@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 
 const STATUS = {
   generating: { label: '回答中', order: 1 },
+  limit_reached: { label: '到达上限', order: 2 },
   error: { label: '出错', order: 2 },
   idle: { label: '空闲', order: 3 },
   closed: { label: '页面已关', order: 4 },
@@ -61,6 +62,7 @@ delete settings.notify.finished;
 if (!Array.isArray(settings.quickReplies)) settings.quickReplies = [...DEFAULT_QUICK_REPLIES];
 
 const state = {
+  sentFiles: new Map((() => { try { return JSON.parse(localStorage.getItem('sentFiles') || '[]'); } catch { return []; } })()),   // conversation_id → 已发送的文件 [{ordinal, at, files}]
   files: new Map(),       // conversation_id → 详情输入框里待发送的文件 [{key, name, size, type, status, progress, id, error, xhr, preview}]
   reopening: new Map(),   // conversation_id → 截止时间：页面已关的会话正在后台重新打开
   ws: null,
@@ -568,7 +570,8 @@ async function copyText(text, what = '回答') {
 function sendCommand(conversationId, action, text, { quiet = false, extra = {}, closeOnOk = null, fab = null, fileItems = [] } = {}) {
   if (!state.ws || state.ws.readyState !== 1 || state.wsState !== 'open' || !state.canControl) return false;
   const commandId = randomId('cmd').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
-  state.pendingCommands.set(commandId, { conversation_id: conversationId, action, closeOnOk, fab, text, attachments: extra.attachments || [], fileItems });
+  state.pendingCommands.set(commandId, { conversation_id: conversationId, action, closeOnOk, fab, text, attachments: extra.attachments || [], fileItems,
+    userOrdinal: (convById(conversationId)?.user_count || 0) + 1 });   // 这次发送会成为第几条用户消息（上传的文件挂到这条下面）
   state.ws.send(JSON.stringify(makeEnvelope(MessageType.COMMAND, {
     command_id: commandId, action, conversation_id: conversationId, ...(text ? { text } : {}), ...extra
   })));
@@ -624,7 +627,10 @@ function onCommandResult(msg) {
   const what = { reply: '快速回复', close: '关闭页面' }[p?.action] || '重新回答';
   if (p?.fab) {
     clearTimeout(p.fab._cmdTimer);
-    if (msg.ok) setFab(p.fab, 'ok', '已发送');
+    if (msg.ok) {
+      setFab(p.fab, 'ok', '已发送');
+      if (p.fileItems?.length) rememberSentFiles(p);
+    }
     else sendFailed(p, msg);
     render();
     if (state.selected) { renderComposer(); renderDetail(); }
@@ -843,6 +849,7 @@ function card(c) {
 
   const node = el('article', {
     class: `card s-${c.status} src-${avatarClass(c.source)} ${c.pinned ? 'pinned' : ''}`,
+    style: /^#[0-9a-f]{3,8}$/i.test(sourceInfo(c.source).color || '') ? `--src:${sourceInfo(c.source).color}` : null,
     'data-conv': id, tabindex: '0', role: 'button', title: c.status === 'closed' ? '页面已关：点击查看详情，并在后台重新打开页面' : '点击查看详情',
     onclick: () => activateCard(c),
     onkeydown: (e) => { if (e.target === node && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); activateCard(c); } }
@@ -1074,6 +1081,7 @@ async function loadSites() {
     for (const x of state.sites) {
       SOURCES[x.key] = {
         label: x.name || x.key,
+        color: x.color || (x.config && x.config.color) || null,   // 网站主题色（可选）
         short: (x.name || x.key).slice(0, 1).toUpperCase(),
         regenerate: !!(x.config && x.config.actions && typeof x.config.actions.regenerate_button === 'string' && x.config.actions.regenerate_button.trim()),
         enabled: x.enabled !== false
@@ -1555,6 +1563,8 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
 
   const ctrl = canControlConv(c);
   const dh = Math.round(dialogHeight());
+  const userOrd = new Map();
+  msgs.filter(([, m]) => m.role === 'user').forEach(([id], i) => userOrd.set(id, i + 1));
   const build = (id, m) => {
     const isAnswer = m.role === 'assistant';
     const collapsed = state.collapsed.has(id);
@@ -1569,6 +1579,7 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
         el('span', {}, m.role === 'user' ? '我' : isAnswer ? src.label : m.role),
         el('span', {}, `${m.text.length} 字`),
         m.favorite ? el('span', {}, '已收藏') : null),
+      m.role === 'user' ? sentFilesEl(sentFilesFor(state.selected, userOrd.get(id))) : null,
       el('div', { class: `body ${m.html ? 'rich' : ''}` }, renderBody(m)),
       el('div', { class: 'fold' }, m.text.split('\n').find((l) => l.trim()) || ''),
       isAnswer ? el('div', { class: 'mact' },
@@ -1581,19 +1592,22 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
         }, { act: 'fold' })
       ) : null);
   };
-  if (!msgs.length) $('detailMsgs').replaceChildren(el('div', { class: 'empty' }, '暂无消息'));
+  const userTotal = userOrd.size;
+  const orphan = (state.sentFiles.get(state.selected) || []).filter((x) => x.ordinal > userTotal);
+  if (!msgs.length && !orphan.length) $('detailMsgs').replaceChildren(el('div', { class: 'empty' }, '暂无消息'));
+  else if (!msgs.length) $('detailMsgs').replaceChildren(...orphan.map(orphanFilesEl));
   else {
     // 按消息复用：流式输出时只重建正在变化的那条（富文本解析、代码块渲染都不再每次全部重做）
     const keep = new Set();
     placeChildren($('detailMsgs'), msgs.map(([id, m]) => {
       keep.add(id);
       const ai = answers.indexOf(id);
-      const sig = JSON.stringify([m.role, m.text, m.html, !!m.favorite, state.collapsed.has(id), state.streaming.has(id), state.longOpen.has(id),
+      const sig = JSON.stringify([m.role, m.text, m.html, m.role === 'user' ? sentFilesFor(state.selected, userOrd.get(id)).length : 0, !!m.favorite, state.collapsed.has(id), state.streaming.has(id), state.longOpen.has(id),
         ai, answers.length, canRegen, ctrl, src.label, src.regenerate, dh]);
       let hit = msgCache.get(id);
       if (!hit || hit.sig !== sig) { hit = { sig, node: build(id, m) }; msgCache.set(id, hit); }
       return hit.node;
-    }));
+    }).concat(orphan.map(orphanFilesEl)));
     for (const id of msgCache.keys()) if (!keep.has(id)) msgCache.delete(id);
   }
   applyLongFold();
@@ -1720,6 +1734,29 @@ function sendQuick() {
     state.files.delete(id);
     if (state.selected === id) { renderFiles(); closeDetail(); }
   }, attachments, files);
+}
+
+// 上传成功的文件：记在会话里，详情对话列表中显示在对应的那条用户消息下（页面还没上报这条消息时单独显示一条）
+function rememberSentFiles(p) {
+  const list = state.sentFiles.get(p.conversation_id) || [];
+  list.push({ ordinal: p.userOrdinal, at: Date.now(), files: p.fileItems.map((f) => ({ name: f.name, type: f.type, size: f.size })) });
+  state.sentFiles.set(p.conversation_id, list.slice(-50));
+  try { localStorage.setItem('sentFiles', JSON.stringify([...state.sentFiles].slice(-100))); } catch { /* ignore */ }
+}
+function sentFilesFor(id, ordinal) {
+  return (state.sentFiles.get(id) || []).filter((x) => x.ordinal === ordinal).flatMap((x) => x.files);
+}
+function sentFilesEl(files) {
+  if (!files.length) return null;
+  return el('div', { class: 'sent-files' }, ...files.map((f) => el('span', { class: 'sent-file', title: f.name },
+    el('span', { class: 'sf-ic' }, /^image\//.test(f.type) ? '🖼' : '📎'),
+    el('span', { class: 'sf-nm' }, f.name),
+    f.size != null ? el('small', {}, fmtSize(f.size)) : null)));
+}
+function orphanFilesEl(x) {
+  return el('div', { class: 'msg user', 'data-mid': `files-${x.at}` },
+    el('div', { class: 'meta' }, el('span', {}, '我'), el('span', {}, `${x.files.length} 个文件`)),
+    sentFilesEl(x.files));
 }
 
 function sendReplyWithFab(id, text, onSent, attachments = [], fileItems = []) {

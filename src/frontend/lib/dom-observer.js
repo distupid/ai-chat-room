@@ -1243,6 +1243,17 @@
       statusDirty = false;
       var s;
       try { s = detectStatus(doc, cfg); } catch (e) { stats.errors++; return; }
+      // 发送按钮可用性：发送时发现不可用（sendBlocked）或输入框有字但按钮不可用 → 到达上限；按钮恢复可用后自动解除
+      try {
+        var sb = cfg.actions && cfg.actions.send_button ? doc.querySelectorAll(cfg.actions.send_button) : [];
+        var sbtn = sb.length ? sb[sb.length - 1] : null;
+        var sbOk = sbtn && !sbtn.disabled && sbtn.getAttribute('aria-disabled') !== 'true';
+        var ci = cfg.actions && cfg.actions.composer ? doc.querySelector(cfg.actions.composer) : null;
+        var hasText = ci ? String(ci.tagName === 'TEXTAREA' ? ci.value : ci.textContent || '').trim() !== '' : false;
+        if (sbOk) state.sendBlocked = false;
+        else if (sbtn && hasText && !state.generating) state.sendBlocked = true;
+        if (state.sendBlocked && s.status === 'ok') s = { status: 'limit_reached', detail: '到达上限', model: s.model };
+      } catch (_) { /* ignore */ }
       var caps = null;
       try { caps = detectComposerCaps(doc, cfg.actions); } catch (_) { caps = null; }
       var key = (state.conversationId || '') + '|' + s.status + '|' + (s.detail || '') + '|' + (s.model || '') + '|' + (caps ? JSON.stringify(caps) : '');
@@ -1451,6 +1462,7 @@
       /** 页面当前是否在生成（供快速回复 / 重新回答判断忙碌） */
       isGenerating: function () { return state.generating || !!(cfg.generating && doc.querySelector(cfg.generating)); },
       getConversationId: function () { return convId(win.location.href); },
+      setSendBlocked: function (v) { state.sendBlocked = !!v; statusDirty = true; checkStatus(true); },
       scanNow: function () { scan(true); },
       /** 后端重置数据库后：重新上报 page.opened（新 event_id）并把当前页面的全部消息重新上报一遍 */
       resync: function () {

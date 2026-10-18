@@ -372,6 +372,7 @@ function deriveConversation(r, openTabs, resolveSource = sourceFromUrl) {
   const pageStatus = st?.status || 'ok';
   let status;
   if (openTabs === 0) status = 'closed';
+  else if (pageStatus === 'limit_reached') status = 'limit_reached';
   else if (pageStatus === 'error') status = 'error';
   else if (generating) status = 'generating';
   else status = 'idle';

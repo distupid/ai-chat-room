@@ -174,6 +174,10 @@
         var b = last(doc.querySelectorAll(sel.send_button));
         return isEnabled(b) ? b : null;
       }, files.length ? UPLOAD_WAIT_MS : 3000, files.length ? 200 : 50);
+      // 文字已填好、发送按钮仍不可用：源站限制发送（到达上限）
+      if (!btn && !files.length && text.trim() && last(doc.querySelectorAll(sel.send_button))) {
+        return { ok: false, code: 'limit_reached', detail: '到达上限（发送按钮不可用）' };
+      }
       if (!btn && files.length) return { ok: false, code: 'upload_not_finished', detail: '文件已交给页面，但等不到上传完成（发送按钮一直不可用）' };
       if (btn) btn.click(); else pressEnter(win, input);
       var sent = await waitUntil(win, function () {

@@ -432,7 +432,7 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   const html = readFileSync(join(ROOT, 'src/backend/dashboard/index.html'), 'utf8').replace(/<script type="module"[^>]*><\/script>/, '');
   assert.match(html, /\.card \.title \{[^}]*white-space: nowrap/, '卡片标题不换行');
   assert.match(html, /\.card \.actions \{ margin-top: auto/, '卡片按钮固定在底部');
-  assert.match(html, /\.card\.s-idle \{ background: color-mix\(in srgb, var\(--src\)/, '空闲卡片背景取头像颜色');
+  assert.match(html, /\.card \{ --src: var\(--primary\); background: color-mix\(in srgb, var\(--src\)/, '卡片背景取网站主题色（默认看板主题色）');
   assert.ok(html.indexOf('id="quickText"') < html.indexOf('id="quickCands"'), '常见回答在输入框下方');
   const dom = new JSDOM(html, { url: `${origin}/dashboard`, runScripts: 'outside-only', pretendToBeVisual: true });
   const win = dom.window;
@@ -823,7 +823,7 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.ok(!d.querySelector(`${cardSel} .card-del`), '打开中不显示删除');
   // 页面上报后：卡片恢复真实状态
   await sendAndAck(ext, ev('page.opened', { url: CONV_URL, title: '重新打开' }));
-  await waitFor(() => /空闲|回答中/.test(d.querySelector('#detailSub .badge')?.textContent || ''), { label: 'detail status updated', timeout: 6000 });
+  await waitFor(() => /空闲|回答中|到达上限/.test(d.querySelector('#detailSub .badge')?.textContent || ''), { label: 'detail status updated', timeout: 6000 });
   d.getElementById('detailClose').click();
 
   // 网站下拉：没有“内置”，每个网站都可编辑 / 删除；末尾“添加网站”

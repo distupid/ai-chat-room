@@ -28,7 +28,7 @@ function waitTabComplete(tabId, timeoutMs) {
 }
 
 /** 页面里执行：正文长度（判断单页应用是否渲染完） */
-function pageTextSize() { return document.body ? document.body.innerText.length : 0; }
+function pageTextSize() { return document.body ? document.body.textContent.length * 1000 + document.body.getElementsByTagName('*').length % 1000 : 0; }
 
 /** 等单页应用渲染稳定：正文长度连续两次不变（最多 maxMs） */
 async function waitRendered(tabId, maxMs) {
@@ -65,7 +65,8 @@ async function probeSite(command) {
       opened = true;
       await waitTabComplete(tab.id, 30000);
     }
-    await waitRendered(tab.id, opened ? 15000 : 3000);
+    // React 等 SSR 页面会先水合，失败（如 React #418）时整页重新渲染：等文字和元素数都稳定再抓
+    await waitRendered(tab.id, opened ? 20000 : 6000);
     const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: capturePage });
     if (!res?.result?.html) return { ok: false, code: 'capture_failed', detail: '没能读取页面内容' };
     const { serverUrl, token } = await loadSettings();

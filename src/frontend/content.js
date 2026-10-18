@@ -73,7 +73,10 @@
         actions: observer.getConfig().actions,
         isGenerating: function () { return observer.isGenerating(); },
         conversationId: function () { return observer.getConversationId(); }
-      }, msg.command || {}).then(sendResponse, function (e) {
+      }, msg.command || {}).then(function (r) {
+        if (r && r.code === 'limit_reached' && observer.setSendBlocked) observer.setSendBlocked(true);
+        sendResponse(r);
+      }, function (e) {
         sendResponse({ ok: false, code: 'exception', detail: String(e && e.message || e) });
       });
       return true;
