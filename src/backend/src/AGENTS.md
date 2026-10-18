@@ -6,11 +6,11 @@ HTTP + WebSocket 服务：hello 握手与 token 鉴权、Origin 检查、限流�
 ## 文件
 | 文件 | 内容 |
 |---|---|
-| `server.js` | 连接生命周期、消息分派、HTTP 路由（`/healthz` `/stats` `/api/conversations` `/api/dom-config*` `/dashboard*`）、指令路由 |
+| `server.js` | 连接生命周期、消息分派、HTTP 路由（`/healthz` `/stats` `/api/conversations` `/api/dom-config*` `/api/sites*` `/dashboard*`）、指令路由 |
 | `db.js` | `events`（event_id UNIQUE）、`messages`、`conversations`、`conversation_marks` |
 | `broadcaster.js` | 客户端集合、broadcast / sendTo、慢消费者、失败隔离与计数 |
 | `config.js` | 配置、token 与 scope、默认广播策略、环境变量 `BRIDGE_*` |
-| `dom-analyzer.js` | 页面 HTML → DomConfig v1（jsdom） |
+| `dom-analyzer.js` | 页面 HTML → DomConfig v1（jsdom）；`analyzeNewSite` 给看板添加的网站用（通用结构 + class/属性里的角色词，用观察器试跑选最好的一份） |
 | `ratelimit.js` | 令牌桶 |
 | `../bin/start.js` | 启动入口 |
 
@@ -19,7 +19,7 @@ HTTP + WebSocket 服务：hello 握手与 token 鉴权、Origin 检查、限流�
 - seq 分配顺序 = 广播顺序。
 - 单客户端发送失败不影响其他客户端（每个 send 独立 try/catch）。
 - 默认只绑定 127.0.0.1；拒绝 `http(s)://` Origin 的升级与 API 请求。
-- 无 `read_content` scope 的客户端只收到去掉 `text` 的广播（`redacted: true`）。
+- 无 `read_content` scope 的客户端只收到去掉 `text` 和 `html` 的广播（`redacted: true`）；`messages.html` 存消息的净化富文本（可为空）。
 - 指令只发给最近一次页面事件显示正开着该会话的插件标签页；20 秒超时；回答中返回 `busy`。
 - 日志和 `/stats` 不含正文。
 

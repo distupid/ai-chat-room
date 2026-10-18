@@ -1,4 +1,4 @@
-# ChatGPT WS Bridge
+# AI-Chat-Room（浏览器桥接）
 
 ChatGPT 页面 → Chrome 插件（MV3）→ Node.js 本地后端（Schema 校验 / SQLite 持久化 / WebSocket 广播）的完整双向事件链路。
 
@@ -78,6 +78,8 @@ test/                         单元测试 + 多客户端 E2E 验收测试
 
 业务事件类型：`page.opened`、`page.closed`、`conversation.changed`、`message.added`、`message.updated`、`generation.started`、`generation.finished`，每种都有独立的 payload Schema。
 
+**消息富文本（`html`，可选）**：`message.added` / `message.updated` 的 payload 除 `text` 外可带 `html`（≤ `Limits.MAX_HTML_CHARS` = 200000 字符）：观察器从与 `text` 相同的正文节点、按相同的 `text.exclude` 生成净化后的 HTML，只输出白名单 `p br h1-h6 ul ol li blockquote pre code(class=language-*) table thead tbody tfoot tr th td strong em b i del s sup sub hr a[href http(s)/data/blob] img[src http(s)/data:image]`，span / div 只保留内容（只有行内内容的 div 变成 `<p>`），script / style / iframe / form / button / svg 等整段丢掉，不复制任何事件属性 / style / class。文件链接（`download` 属性或文件扩展名）带 `data-file="文件名"`；没有网址的文件卡片（按钮文字就是文件名，如 Hark 的文件气泡）输出 `<span data-file="文件名">`。只有 p / br 时与 text 等价，不发送；text + html 估算超过 200KB 时也不发送（整条 WebSocket 消息上限 256KB），看板退回 text。后端存进 `messages.html`（旧库自动加列），`GET /api/conversations/:id/messages` 返回；无 `read_content` 的客户端广播里 `text` 和 `html` 都去掉。
+
 **event_id 稳定性**：`message.added` = hash(类型, 会话, message_id)；`message.updated` = hash(类型, 会话, message_id, 内容哈希)。同一内容被反复观察、页面刷新、插件重连重发，都得到同一 event_id。
 
 错误码：`INVALID_JSON`、`SCHEMA_VIOLATION`、`UNSUPPORTED_VERSION`、`NOT_HELLO`、`UNAUTHORIZED`、`FORBIDDEN`、`RATE_LIMITED`、`MESSAGE_TOO_LARGE`、`INTERNAL`。其中 SCHEMA_VIOLATION / UNSUPPORTED_VERSION / FORBIDDEN / MESSAGE_TOO_LARGE 为不可重试，插件会从队列移除对应事件；UNAUTHORIZED 会让插件停止重连直到修改设置。
@@ -117,16 +119,17 @@ test/                         单元测试 + 多客户端 E2E 验收测试
 
 ## DOM 配置：从真实页面分析选择器
 
-ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面 DOM 并应用」**：
+网站改版后选择器会失效。看板网站下拉里的“添加网站”（或“网站配置”里的完整 JSON）用同一个分析器生成配置：
 
-1. 内容脚本抓取当前页面 HTML（去掉 script / style / svg / img 等）
-2. 后台 POST 到 `http://127.0.0.1:8787/api/dom-config/analyze`（`Authorization: Bearer <extension token>`）
-3. 后端 `src/backend/src/dom-analyzer.js` 分析出统一配置（DomConfig v1），保存到 `src/backend/data/dom-config.json`
-4. 插件把配置存进 `chrome.storage.local.domConfig`，所有 ChatGPT 标签页的 dom-observer 立即 `setConfig()` 生效，刷新后依然使用
+1. 插件后台打开网址（已打开的标签页直接用），抓取页面 HTML（去掉 script / style / svg / img 等）
+2. 上传到后端，`src/backend/src/dom-analyzer.js` 分析出统一配置（DomConfig v1）
+3. 确认后写进网站列表；插件同步网站列表（`chrome.storage.local.siteList`）后，对应标签页的 dom-observer 立即 `setConfig()` 生效
+
+（插件弹窗里原来的“分析当前页面 DOM 并应用”已删除；后端 `/api/dom-config*` 接口保留。）
 
 分析顺序：已知结构（旧版 `data-message-author-role`、新版 `data-chatgpt-search-unit-key`）→ 通用发现（找取值以 `user`/`assistant` 结尾的属性）→ 消息 ID（各消息取值互不相同的 UUID 属性）→ 正文选择器（避开按钮文字）→ 生成状态（内置候选 + 抓取时页面上的停止按钮，外加“文本活动”检测）。
 
-配置只包含选择器、属性名和正则字符串，没有可执行代码；观察器会校验每个字段，无效项回退到内置默认值。点 **「恢复内置默认配置」** 可清除。
+配置只包含选择器、属性名和正则字符串，没有可执行代码；观察器会校验每个字段，无效项回退到默认值。重新分析会覆盖旧配置；要清除可调用 `DELETE /api/dom-config`。
 
 | 接口 | 说明 |
 |---|---|
@@ -136,25 +139,46 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 
 都需要带 `publish` 权限的 token（即 extension token），并拒绝普通网页 Origin。
 
-## 支持的站点
+## 网站列表（全部可配置）
 
-| 站点 | 会话 ID | 说明 |
+没有“内置”网站：所有网站（包括默认的 ChatGPT / Duck.ai / Hark）都是后端网站列表（`src/backend/data/sites.json`）里的普通条目，在看板顶栏的网站下拉里一样可以**编辑名称 / 网址**、打开**网站配置**（启用 / 停用、其他域名、DOM 选择器、会话 ID 规则、页面操作选择器，常用项 + 完整 JSON）、**删除**。
+
+| 默认网站 | 会话 ID | 说明 |
 |---|---|---|
 | chatgpt.com / chat.openai.com | URL `/c/<id>` | 快速回复、重新回答都支持 |
 | duck.ai | 助手消息元素 id 中的 UUID，前缀 `duck-` | URL 不带会话 ID；新聊天在第一条回答出现后才有 ID。支持快速回复，不支持重新回答 |
 | hark.com | `/chat` → `hark-main`；`/projects/<id>` → `hark-<id>` | 支持快速回复，不支持重新回答 |
 
-各站点的选择器都是按 2026-10 的真实页面写的内置适配（`src/frontend/lib/dom-observer.js` 的 `SITE_PROFILES`）。页面改版后，在该站点点插件弹窗的“分析当前页面 DOM 并应用”：配置按站点分别保存（`chrome.storage.local.domConfigs[site]`），叠加在内置适配之上。duck.ai / hark.com 的分析会用内置适配在上传的页面上试跑并返回识别报告。
+- **默认种子**：上面三个网站的配置（按 2026-10 的真实页面编写）在 `src/frontend/lib/dom-observer.js` 的 `SEED_SITES`，前后端同一份（后端 `src/backend/src/site-seeds.js` 读取）。后端第一次启动时写进网站列表；旧版 `sites.json` 里没有配置的默认网站会补上种子配置和域名。之后种子只用于“恢复默认”和插件的离线兜底。
+- **恢复默认**：网站配置弹窗里的“恢复默认”把该网站的 DOM 配置和域名恢复为种子（`POST /api/sites/:key/reset`）；删掉的默认网站可以从网站下拉的“恢复默认网站”加回（`POST /api/sites/defaults`，`GET /api/sites` 的 `missing_defaults` 列出缺少的）。
+- **插件怎么用这份列表**：后端在列表变化时给在线插件发 `sync_sites`；插件拉 `GET /api/sites`，存进 `chrome.storage.local.siteList`，并为每个**启用**的网站动态注册内容脚本（`chrome.scripting.registerContentScripts`，匹配本域名、子域名和其他域名；manifest 不再写死内容脚本）。内容脚本按当前域名在 `siteList` 里找网站（最长域名匹配，`www.` 忽略）并用它的配置；网站停用 / 被删除时不观察。还没同步过列表（例如第一次离线启动）时，插件和内容脚本都用默认种子。
+- **配置变化立即生效**：内容脚本监听 `siteList` 变化并 `setConfig()`；停用的网站立即停止观察，重新启用后开始观察（已开着但没注入过内容脚本的页面需要刷新）。
+
+| 接口（网站） | 说明 |
+|---|---|
+| `GET /api/sites` | 网站列表：`key, name, url, host, hosts[], enabled, config, has_default, updated_at` + `missing_defaults`（observer 或 extension token） |
+| `PATCH /api/sites/:key` | `{name?, url?, hosts?, enabled?, config?}`（control）；`config` 必须是 JSON 对象（≤ 128KB），域名不能与其他网站重复 |
+| `POST /api/sites/:key/reset` | 默认网站恢复默认配置（control） |
+| `POST /api/sites/defaults` | 加回删掉的默认网站（control） |
+| `DELETE /api/sites/:key` | 删除（control），任何网站都能删 |
 
 ## 会话管理看板
 
 后端启动后，浏览器打开 `http://127.0.0.1:8787/dashboard`，点右上角**设置**，填入 `src/backend/data/config.json` 里 **observer** 的 token 并连接。
 
 - Material Design 3 界面，右上角一键切换浅色 / 深色 / 跟随系统
-- 按状态筛选：回答中 / 已到限额 / 出错 / 空闲 / 页面已关 / 未完成 / 已完成；多个来源时还可以按来源筛选
+- 按状态筛选：置顶 / 回答中 / 出错 / 空闲 / 页面已关（页面已关的会话只在这里显示，点击会重新打开页面并跳转）；多个来源时还可以按来源筛选；顶栏星标查看收藏会话
 - **点卡片**：有标签页开着这个会话就切换过去，否则新开页面
-- 卡片按钮：快速回复（Ctrl+Enter 发送）、标记完成、重新回答（仅 ChatGPT）、详情
-- **详情**弹窗：完整对话，实时流式更新，代码块和行内代码有格式；右上角可复制最后一条回答、跳转到页面
+- 卡片按钮：置顶、关闭页面（插件关掉开着该会话的标签页）、回复（向下弹出快速回复栏，Enter 发送、Shift+Enter 换行，发送后自动收起；点击常见回答直接发送）
+- 顶栏：已连接 · N 个页面、搜索、网站（全部可编辑 / 配置 / 停用 / 删除，无“内置”，见“网站列表”）、收藏、设置、一键启动（插件在后台打开所有启用的网站）
+- **回答完成**：置顶会话（或开启“所有会话”时任何会话）回答完成直接打开详情并定位到这条回答，不再有提示小弹窗；一次生成只弹一次（会话 + 回答 ID + 生成序号去重），正在看别的会话时排队、关掉当前详情后依次打开；正在输入（4 秒内打过字）时等输入停下再弹；看板在后台时另发系统通知（含回答内容）。
+- **卡片“新建”**：取代原来的“复制”，在后台新建该卡片来源网站的空白会话。
+- **详情**弹窗：完整对话，实时流式更新；消息有 `html` 时按原页面格式显示（标题、列表、表格、引用、粗体等），看板用 `DOMParser` 解析成惰性文档后按白名单逐个节点重建（不复制事件属性 / style，链接只允许 http(s) / data / blob，图片只允许 http(s) / data:image），从不把正文直接写进 `innerHTML`；没有 `html` 时按 `text` 的轻量 Markdown 显示
+  - 代码块：语言标签 +“复制”（复制代码文字）+“下载”（按语言取扩展名，如 `.py` / `.js`，未知为 `.txt`）
+  - 图片：内联显示（最大宽度 100%），点击打开原图，“下载”按钮（跨域图片浏览器可能改为打开）
+  - 文件：文件卡片显示文件名，有网址时可下载 / 打开，没有网址只显示名称
+  - 长消息首尾折叠、复制回答（复制 `text`）、收藏、搜索（按 `text`）照常
+  - 右上角可复制最后一条回答、跳转到页面
 - **设置**：连接（token、连接 / 断开）、外观、系统通知（已到限额 / 回答完成 / 出错，可设为只在看板不在前台时通知，含测试通知）、后台状态（运行时间、在线客户端、事件和指令计数）
 
 ### 会话实体字段（`GET /api/conversations`）
@@ -162,7 +186,7 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 | 字段 | 含义 |
 |---|---|
 | `conversation_id` | URL 中的会话 ID |
-| `source` | 来源，chatgpt.com / chat.openai.com → `chatgpt` |
+| `source` | 来源：页面上报的网站标识；没有时按网站列表的域名匹配（chatgpt.com / chat.openai.com → `chatgpt`），都不匹配取主域名 |
 | `title` / `url` | 页面标题、地址 |
 | `model` | 当前模型（页面上能找到模型切换按钮时） |
 | `status` | `generating` 回答中 / `limit_reached` 已到限额 / `error` 出错 / `idle` 空闲 / `closed` 页面已关 |
@@ -174,14 +198,14 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 | `done` / `done_at` / `activity_after_done` | 标记完成 |
 | `first_seen_at` / `last_seen_at` | 首次 / 最近活动时间 |
 
-“已到限额 / 出错”由新事件 `conversation.status` 上报：观察器每秒在**消息正文以外**的页面文字里匹配提示语（正文、输入框、脚本都跳过），规则在 DomConfig 的 `status.limit_patterns` / `status.error_patterns` 中可改。
+“已到限额 / 出错 / 已删除”由事件 `conversation.status` 上报（`deleted`：页面上没有任何消息且出现“找不到对话 / Unable to load conversation”等提示，规则在 `status.deleted_patterns`；后端随后不再列出该会话）：观察器每秒在**消息正文以外**的页面文字里匹配提示语（正文、输入框、脚本都跳过），规则在 DomConfig 的 `status.limit_patterns` / `status.error_patterns` 中可改。
 
 ### 指令通道
 
 `看板 --command--> 后端 --command(tab_id)--> 插件后台 --> 内容脚本执行 --> command_result 原路返回`
 
 - 需要 `control` 权限。旧的 config.json 里，能读全部会话（subscribe_all + read_content）的 observer token 会自动获得 control；不想要可给该 client 加 `"no_control": true`
-- 指令：`reply` 快速回复、`regenerate` 重新回答、`focus` 切换到该标签页（插件后台执行，不经过页面）
+- 指令：`reply` 快速回复、`regenerate` 重新回答、`focus` 切换到该标签页、`close` 关闭该会话的所有标签页（含 PWA 窗口，按 `tab_ids` + 会话 `url` 查找）（插件后台执行，不经过页面）；后端 → 插件：`probe_site` / `sync_sites` / `open_sites` / `new_chat`（看板不能直接发；`new_chat` 由卡片“新建”经 `POST /api/sites/:key/new-chat` 触发，插件在后台打开该网站的 `config.new_chat_url` 或网站网址）
 - 后端只把指令发给“最近一次页面事件显示正开着这个会话”的那个插件标签页；页面正在回答时返回 `busy`；20 秒没有结果返回 `timeout`
 - 插件端选择器可在 DomConfig 的 `actions` 中覆盖（composer / send_button / regenerate_button / regenerate_menu_item / regenerate_menu_text）
 
@@ -206,3 +230,16 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 
 - ChatGPT 页面 DOM 会改版。选择器集中在 `dom-observer.js` 的 `SELECTORS`（当前：`[data-message-author-role][data-message-id]`、`[data-testid="stop-button"]`、`.result-streaming`），改版后只需改这里。
 - 自动化测试中的页面是 jsdom 模拟的 ChatGPT 结构，不是登录后的 chatgpt.com 真实页面；在真实浏览器里加载插件后，可用 `pnpm observer` 观察实际广播进行人工确认。
+
+## 页面真实状态对账（tabs.snapshot）
+
+插件定期（连上 / 重连、标签页关闭或跳转、每 30 秒检查，内容不变时最多 5 分钟一次）上报 `tabs.snapshot`：
+`{ tabs: [{ tab_id, host, conversation_id, url?, title?, active? }] }`，来自 `chrome.tabs.query({})`（包含 PWA / app / 弹出窗口），`conversation_id` 由内容脚本 `page_info` 回答。
+后端持久化快照但不广播，并对该插件的标签页对账：
+- 后端认为开着、快照里没有，或 host / 会话已变 → 补 `page.closed`（`reason: "reconciled"`）
+- 快照里开着某会话、后端认为已关闭 / 不存在 / 在别的会话 → 补 `page.opened`
+补出的事件和普通事件一样广播，看板实时更新“N 个标签页 / 页面已关”。
+
+补充：
+- 还没进入具体会话的支持网站标签页，`conversation_id` 为 `tab-<client>-<tabId>`（标签页会话），列表返回 `pending: true`；页面关掉后不再出现在列表里。
+- 后端把快照精简为 `{tab_id, host, conversation_id, active}` 广播给订阅 `*` 的看板，用于高亮浏览器窗口当前显示的会话卡片。

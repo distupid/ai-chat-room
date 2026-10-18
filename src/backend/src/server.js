@@ -2,13 +2,14 @@ import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import {
-  ErrorCode, MessageType, PROTOCOL_VERSION, Scope, validateMessage, makeEnvelope, randomId
+  ErrorCode, EventType, MessageType, PROTOCOL_VERSION, Scope, validateMessage, makeEnvelope, randomId, Limits
 } from '../../../contracts/protocol.js';
 import { loadConfig } from './config.js';
 import { openDatabase } from './db.js';
 import { Broadcaster } from './broadcaster.js';
 import { TokenBucket } from './ratelimit.js';
-import { analyzeDom } from './dom-analyzer.js';
+import { analyzeDom, analyzeNewSite } from './dom-analyzer.js';
+import { seedSites, seedByKey, SEED_KEYS, siteHosts, sourceForUrl } from './site-seeds.js';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,9 +68,23 @@ export function createBridgeServer(opts = {}) {
     if (path === '/healthz') return json(res, 200, { ok: true, protocol: PROTOCOL_VERSION });
     if (path === '/stats') return json(res, 200, stats());
     if (DASHBOARD_FILES[path] && req.method === 'GET') return serveDashboardFile(req, res, DASHBOARD_FILES[path]);
-    if (path === '/api/conversations' || path.startsWith('/api/conversations/')) {
+    if (path === '/api/conversations' || path.startsWith('/api/conversations/') || path === '/api/favorites') {
       handleDashboardApi(req, res, path).catch((err) => {
         log.error('[dashboard]', err);
+        if (!res.headersSent) json(res, 500, { ok: false, error: 'internal error' });
+      });
+      return;
+    }
+    if (path === '/api/sites' || path.startsWith('/api/sites/') || path === '/api/admin/reset-db') {
+      handleSitesApi(req, res, path).catch((err) => {
+        log.error('[sites]', err);
+        if (!res.headersSent) json(res, 500, { ok: false, error: 'internal error' });
+      });
+      return;
+    }
+    if (path === '/api/attachments' || path.startsWith('/api/attachments/')) {
+      handleAttachments(req, res, path).catch((err) => {
+        log.error('[attachments]', err);
         if (!res.headersSent) json(res, 500, { ok: false, error: 'internal error' });
       });
       return;
@@ -93,9 +108,64 @@ export function createBridgeServer(opts = {}) {
       'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
-      'content-security-policy': "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'"
+      'content-security-policy': "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; frame-ancestors 'none'"
     });
     res.end(body);
+  }
+
+  // ------------------------------------------------------------- 快速回复附件
+  // 看板先把文件上传到这里（只在内存里保留一段时间），快速回复指令带上附件 ID；
+  // 插件收到指令后用自己的 token 取回文件，再交给源站页面自己的上传控件（和在网页上点上传按钮一样）。
+  const MAX_ATTACHMENT_BYTES = opts.maxAttachmentBytes ?? Limits.MAX_ATTACHMENT_BYTES;
+  const ATTACHMENT_TTL_MS = opts.attachmentTtlMs ?? 30 * 60 * 1000;
+  const MAX_ATTACHMENT_TOTAL = opts.maxAttachmentTotalBytes ?? 200 * 1024 * 1024;
+  const attachments = new Map();   // id → { buf, name, type, size, expires }
+  function pruneAttachments() {
+    const t = Date.now();
+    for (const [id, a] of attachments) if (a.expires <= t) attachments.delete(id);
+    let total = [...attachments.values()].reduce((n, a) => n + a.size, 0);
+    for (const [id, a] of attachments) {   // Map 按插入顺序：超过总量时先删最早的
+      if (total <= MAX_ATTACHMENT_TOTAL) break;
+      attachments.delete(id); total -= a.size;
+    }
+  }
+  /**
+   *   POST /api/attachments   （observer token，需要 control）body = 文件原始内容；
+   *        header x-file-name = encodeURIComponent(文件名)，content-type = 文件类型 → {ok, attachment:{id,name,type,size}}
+   *   GET  /api/attachments/:id（extension token，需要 publish）→ 文件内容
+   */
+  async function handleAttachments(req, res, path) {
+    if (!originAllowed(req.headers.origin, req.headers.host)) return json(res, 403, { ok: false, error: 'forbidden origin' });
+    const client = clientFromRequest(req);
+    if (!client) return json(res, 401, { ok: false, error: 'unauthorized' });
+    pruneAttachments();
+    if (path === '/api/attachments' && req.method === 'POST') {
+      if (!client.scopes.includes(Scope.CONTROL)) return json(res, 403, { ok: false, error: 'control scope required' });
+      let name = 'file';
+      try { name = decodeURIComponent(String(req.headers['x-file-name'] || 'file')); } catch { /* 保持默认 */ }
+      name = name.replace(/[\u0000-\u001f\u007f/\\]/g, '_').trim().slice(0, 255) || 'file';
+      const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      const type = /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(ct) && ct.length <= 128 ? ct : 'application/octet-stream';
+      let buf;
+      try { buf = await readBody(req, MAX_ATTACHMENT_BYTES, true); }
+      catch (e) { return json(res, e.code === 'TOO_LARGE' ? 413 : 400, { ok: false, error: e.code === 'TOO_LARGE' ? `文件超过 ${Math.round(MAX_ATTACHMENT_BYTES / 1048576)} MB` : 'read failed' }); }
+      const id = randomId('att').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+      attachments.set(id, { buf, name, type, size: buf.length, expires: Date.now() + ATTACHMENT_TTL_MS });
+      pruneAttachments();
+      return json(res, 201, { ok: true, attachment: { id, name, type, size: buf.length } });
+    }
+    const one = /^\/api\/attachments\/([A-Za-z0-9_-]{8,64})$/.exec(path);
+    if (one && req.method === 'GET') {
+      if (!client.scopes.includes(Scope.PUBLISH)) return json(res, 403, { ok: false, error: 'publish scope required' });
+      const a = attachments.get(one[1]);
+      if (!a) return json(res, 404, { ok: false, error: '附件不存在或已过期' });
+      res.writeHead(200, {
+        'content-type': a.type, 'content-length': a.size, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
+        'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(a.name)}`
+      });
+      return res.end(a.buf);
+    }
+    return json(res, 405, { ok: false, error: 'method not allowed' });
   }
 
   function clientFromRequest(req) {
@@ -108,7 +178,11 @@ export function createBridgeServer(opts = {}) {
    *   GET /api/conversations                         会话列表
    *   GET /api/conversations/:id/messages            当前消息
    *   GET /api/conversations/:id/events?limit=100    最近事件（不含正文）
-   *   POST /api/conversations/:id/mark  {done: bool}  标记完成 / 取消
+   *   POST /api/conversations/:id/mark  {archived?: bool, pinned?: bool}  归档 / 置顶（旧字段 done 等同 archived）
+   *   POST /api/conversations/:id/messages/:mid/favorite  {favorite: bool}  收藏 / 取消收藏回答
+   *   POST /api/conversations/:id/reopen               页面已关的会话：插件在后台标签页重新打开
+   *   DELETE /api/conversations/:id                      删除页面已关的会话（消息 / 收藏 / 标记 / 事件）
+   *   GET  /api/favorites?limit=200                      收藏的回答（正文快照）
    */
   async function handleDashboardApi(req, res, path) {
     if (!originAllowed(req.headers.origin, req.headers.host)) return json(res, 403, { ok: false, error: 'forbidden origin' });
@@ -118,14 +192,48 @@ export function createBridgeServer(opts = {}) {
       return json(res, 403, { ok: false, error: 'subscribe_all + read_content scope required' });
     }
     const params = new URL(req.url, 'http://x').searchParams;
+    const reopen = /^\/api\/conversations\/([A-Za-z0-9_-]{1,128})\/reopen$/.exec(path);
+    if (reopen && req.method === 'POST') {
+      // 页面已关的会话：让插件在后台标签页重新打开（不抢焦点），页面上报后卡片状态自动更新
+      if (!client.scopes.includes(Scope.CONTROL)) return json(res, 403, { ok: false, error: 'control scope required' });
+      const url = db.conversationUrl(reopen[1]);
+      if (typeof url !== 'string' || !/^https:\/\//.test(url)) return json(res, 404, { ok: false, error: '这个会话没有记录页面地址' });
+      const target = onlineExtensions()[0];
+      if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件', url });
+      sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: randomId('reopen').slice(0, 40), action: 'new_chat', conversation_id: 'sites', text: url.slice(0, 2048) }));
+      return json(res, 202, { ok: true, url });
+    }
+    const del = /^\/api\/conversations\/([A-Za-z0-9_-]{1,128})$/.exec(path);
+    if (del && req.method === 'DELETE') {
+      // 删除会话（只允许页面已关的会话）：从数据库移除它的消息、收藏、标记和事件
+      if (db.openTabsFor(del[1]).length) return json(res, 409, { ok: false, error: '页面还开着，先关闭页面再删除' });
+      return json(res, 200, { ok: true, conversation_id: del[1], removed: db.deleteConversation(del[1]) });
+    }
     const mark = /^\/api\/conversations\/([A-Za-z0-9_-]{1,128})\/mark$/.exec(path);
     if (mark && req.method === 'POST') {
       let body = {};
       try { body = JSON.parse((await readBody(req, 4096)) || '{}'); } catch { return json(res, 400, { ok: false, error: 'invalid json' }); }
-      db.setDone(mark[1], body.done !== false);
-      return json(res, 200, { ok: true, conversation_id: mark[1], done: body.done !== false });
+      const out = { ok: true, conversation_id: mark[1] };
+      const archived = typeof body.archived === 'boolean' ? body.archived : typeof body.done === 'boolean' ? body.done : undefined;
+      if (archived !== undefined) { db.setArchived(mark[1], archived); out.archived = archived; }
+      if (typeof body.pinned === 'boolean') { db.setPinned(mark[1], body.pinned); out.pinned = body.pinned; }
+      if (archived === undefined && out.pinned === undefined) return json(res, 400, { ok: false, error: 'archived or pinned required' });
+      return json(res, 200, out);
+    }
+    const fav = /^\/api\/conversations\/([A-Za-z0-9_-]{1,128})\/messages\/([^/]{1,400})\/favorite$/.exec(path);
+    if (fav && req.method === 'POST') {
+      try { fav[2] = decodeURIComponent(fav[2]); } catch { return json(res, 400, { ok: false, error: 'invalid message id' }); }
+      if (!fav[2] || fav[2].length > 128) return json(res, 400, { ok: false, error: 'invalid message id' });
+      let body = {};
+      try { body = JSON.parse((await readBody(req, 4096)) || '{}'); } catch { return json(res, 400, { ok: false, error: 'invalid json' }); }
+      const favorite = body.favorite !== false;
+      if (!db.setFavorite(fav[1], fav[2], favorite)) return json(res, 404, { ok: false, error: 'message not found' });
+      return json(res, 200, { ok: true, conversation_id: fav[1], message_id: fav[2], favorite });
     }
     if (req.method !== 'GET') return json(res, 405, { ok: false, error: 'method not allowed' });
+    if (path === '/api/favorites') {
+      return json(res, 200, { ok: true, favorites: db.listFavorites(clampInt(params.get('limit'), 1, 1000, 200)) });
+    }
     if (path === '/api/conversations') {
       return json(res, 200, { ok: true, max_seq: db.maxSeq(), now: Date.now(), conversations: db.listConversations(clampInt(params.get('limit'), 1, 1000, 200)) });
     }
@@ -164,6 +272,250 @@ export function createBridgeServer(opts = {}) {
       return json(res, result.ok ? 200 : 422, result);
     }
     return json(res, 405, { ok: false, error: 'method not allowed' });
+  }
+
+  // ------------------------------------------------------------- 已适配网站
+  // 网站列表（data/sites.json）：没有“内置”网站。首次启动用默认种子（ChatGPT / Duck.ai / Hark，含 DOM 配置）初始化，
+  // 之后全部网站一样：可编辑名称 / 网址 / 域名 / DOM 配置、停用、删除；插件按这份列表注册内容脚本、按域名选配置。
+  // 默认网站删除后不会自动回来，可在看板“恢复默认网站”加回；某个默认网站的配置可“恢复默认”。
+  const MAX_SITE_CONFIG_BYTES = 128 * 1024;
+  const sitesPath = opts.sitesPath ?? (opts.configPath ? join(dirname(opts.configPath), 'sites.json') : null);
+  let customSites = null;
+  if (sitesPath && existsSync(sitesPath)) {
+    try { const v = JSON.parse(readFileSync(sitesPath, 'utf8')); if (Array.isArray(v)) customSites = v.filter((x) => x && typeof x === 'object' && x.key); } catch { customSites = null; }
+  }
+  let sitesDirty = false;
+  if (!customSites) { customSites = seedSites(); sitesDirty = true; }
+  else {
+    // 旧版 sites.json 只存“添加的网站”：补上默认网站（只补一次，之后删除了就不再出现）
+    if (!customSites.some((x) => x.seeded) && !SEED_KEYS.every((k) => customSites.some((x) => x.key === k))) {
+      customSites = [...seedSites().filter((d) => !customSites.some((x) => x.key === d.key)), ...customSites];
+      sitesDirty = true;
+    }
+    // 旧版默认网站没有 DOM 配置（适配写在插件里）：补上种子配置和域名
+    for (const x of customSites) {
+      const seed = SEED_KEYS.includes(x.key) ? seedByKey(x.key) : null;
+      if (seed && !x.config) { x.config = seed.config; sitesDirty = true; }
+      if (seed && !Array.isArray(x.hosts)) { x.hosts = seed.hosts; sitesDirty = true; }
+    }
+  }
+  for (const x of customSites) {
+    delete x.builtin;
+    x.seeded = true;
+    if (typeof x.enabled !== 'boolean') x.enabled = true;
+    if (!Array.isArray(x.hosts)) x.hosts = [];
+  }
+  /** 对外的网站条目：去掉内部标记；has_default = 有默认种子，可“恢复默认” */
+  const siteOut = ({ seeded, ...x }) => ({ ...x, has_default: SEED_KEYS.includes(x.key) });
+  const missingDefaults = () => seedSites().filter((d) => !customSites.some((x) => x.key === d.key || siteHosts(x).some((h) => siteHosts(d).includes(h))));
+  db.setSourceResolver?.((url) => sourceForUrl(url, customSites));
+  function saveSites() {
+    if (!sitesPath) return;
+    mkdirSync(dirname(sitesPath), { recursive: true });
+    writeFileSync(sitesPath, JSON.stringify(customSites, null, 2) + '\n');
+  }
+  if (sitesDirty) saveSites();
+  // probe_id → { status: pending|done|error, url, target, requester, result, error, at }
+  const probes = new Map();
+  const PROBE_TTL_MS = 10 * 60 * 1000;
+  function prune() { const now = Date.now(); for (const [k, v] of probes) if (now - v.at > PROBE_TTL_MS) probes.delete(k); }
+  function onlineExtensions() {
+    return [...broadcaster.clients.values()].filter((r) => r.scopes.has(Scope.PUBLISH) && r.ws.readyState === 1);
+  }
+  /** 通知所有在线插件：网站列表变了，重新拉取并注册内容脚本 */
+  function notifySitesChanged() {
+    for (const rec of onlineExtensions()) {
+      sendTo(rec, makeEnvelope(MessageType.COMMAND, { command_id: randomId('sync'), action: 'sync_sites', conversation_id: 'sites' }));
+    }
+  }
+
+  /**
+   * GET    /api/sites                     网站列表（含 DOM 配置、enabled、hosts、has_default）+ missing_defaults；observer 或 extension token
+   * POST   /api/sites/probe {url}         看板：让插件打开网址抓取 DOM 并分析；返回 {probe_id}（control）
+   * GET    /api/sites/probe/:id           看板轮询分析结果（control）
+   * POST   /api/sites/probe/:id/dom       插件上传抓到的页面 {html, url, title}（publish，且必须是被指派的插件）
+   * POST   /api/sites {probe_id, name}    看板确认添加（control）
+   * PATCH  /api/sites/:key {name?, url?, hosts?, enabled?, config?}  编辑网站（control）
+   * POST   /api/sites/:key/reset          默认网站的 DOM 配置 / 域名恢复默认（control）
+   * POST   /api/sites/defaults            把删掉的默认网站加回来（control）
+   * DELETE /api/sites/:key                删除网站（control）
+   * POST   /api/sites/launch              一键启动：让插件在后台打开所有网站（control）
+   */
+  async function handleSitesApi(req, res, path) {
+    if (!originAllowed(req.headers.origin, req.headers.host)) return json(res, 403, { ok: false, error: 'forbidden origin' });
+    const client = clientFromRequest(req);
+    if (!client) return json(res, 401, { ok: false, error: 'unauthorized' });
+    const can = (sc) => client.scopes.includes(sc);
+    const body = async (max = 8192) => {
+      try { return JSON.parse((await readBody(req, max)) || '{}'); } catch (e) { const err = new Error(e.code === 'TOO_LARGE' ? 'payload too large' : 'invalid json'); err.status = e.code === 'TOO_LARGE' ? 413 : 400; throw err; }
+    };
+    try {
+      if (path === '/api/sites' && req.method === 'GET') {
+        if (!can(Scope.READ_CONTENT) && !can(Scope.PUBLISH)) return json(res, 403, { ok: false, error: 'forbidden' });
+        return json(res, 200, { ok: true, sites: customSites.map(siteOut), missing_defaults: missingDefaults().map((x) => x.key) });
+      }
+      const dom = /^\/api\/sites\/probe\/([A-Za-z0-9_-]{8,64})\/dom$/.exec(path);
+      if (dom && req.method === 'POST') {
+        if (!can(Scope.PUBLISH)) return json(res, 403, { ok: false, error: 'publish scope required' });
+        const p = probes.get(dom[1]);
+        if (!p || p.targetName !== client.name || p.status !== 'pending') return json(res, 404, { ok: false, error: 'probe not found' });
+        const b = await body(MAX_DOM_UPLOAD_BYTES);
+        if (typeof b.html !== 'string') return json(res, 400, { ok: false, error: 'html required' });
+        const result = analyzeNewSite(b.html, { url: typeof b.url === 'string' && /^https:\/\//.test(b.url) ? b.url : p.url, title: b.title });
+        Object.assign(p, { status: result.ok ? 'done' : 'error', result, error: result.ok ? null : (result.report.hint || result.report.error), title: String(b.title || '').slice(0, 200) });
+        log.info(`[sites] probe ${dom[1]} ${p.url}: ${result.ok ? result.report.strategy + ' messages=' + result.report.message_count : result.report.error}`);
+        return json(res, 200, { ok: true });
+      }
+      if (!can(Scope.CONTROL)) return json(res, 403, { ok: false, error: 'control scope required' });
+      if (path === '/api/admin/reset-db' && req.method === 'POST') {
+        // 重置数据库：清空会话 / 消息 / 收藏 / 置顶归档 / 事件，网站列表和设置保留；随后让插件把开着的页面重新上报一遍
+        const b = await body();
+        if (b.confirm !== 'RESET') return json(res, 400, { ok: false, error: 'confirm required' });
+        const removed = db.resetAll();
+        for (const rec of onlineExtensions()) sendTo(rec, makeEnvelope(MessageType.COMMAND, { command_id: randomId('resync').slice(0, 40), action: 'resync', conversation_id: 'sites' }));
+        log.info(`[admin] database reset by ${client.name}: ${JSON.stringify(removed)}`);
+        return json(res, 200, { ok: true, removed });
+      }
+      if (path === '/api/sites/launch' && req.method === 'POST') {
+        const target = onlineExtensions()[0];
+        if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件' });
+        const urls = customSites.filter((x) => x.enabled !== false).map((x) => x.url).filter((u) => /^https:\/\//.test(u));
+        if (!urls.length) return json(res, 400, { ok: false, error: '网站列表是空的' });
+        sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: randomId('launch').slice(0, 40), action: 'open_sites', conversation_id: 'sites', text: urls.join('\n').slice(0, 20000) }));
+        log.info(`[sites] launch ${urls.length} sites via ${target.clientId}`);
+        return json(res, 202, { ok: true, count: urls.length });
+      }
+      const nc = path.match(/^\/api\/sites\/([^/]+)\/new-chat$/);
+      if (nc && req.method === 'POST') {
+        // 卡片“新建”：让插件在后台打开这个网站的新空白会话（不切换到该标签页）
+        const site = customSites.find((x) => x.key === decodeURIComponent(nc[1]));
+        if (!site) return json(res, 404, { ok: false, error: '网站列表里没有这个网站' });
+        const url = typeof site.config?.new_chat_url === 'string' && /^https:\/\//.test(site.config.new_chat_url) ? site.config.new_chat_url : site.url;
+        if (!/^https:\/\//.test(url || '')) return json(res, 400, { ok: false, error: '这个网站没有可用的网址' });
+        const target = onlineExtensions()[0];
+        if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件' });
+        sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: randomId('newchat').slice(0, 40), action: 'new_chat', conversation_id: 'sites', text: url.slice(0, 2048) }));
+        log.info(`[sites] new chat ${site.key} via ${target.clientId}`);
+        return json(res, 202, { ok: true, url });
+      }
+      if (path === '/api/sites/probe' && req.method === 'POST') {
+        const b = await body();
+        let u;
+        try { u = new URL(String(b.url || '')); } catch { return json(res, 400, { ok: false, error: '网址无效' }); }
+        if (u.protocol !== 'https:') return json(res, 400, { ok: false, error: '只支持 https 网址' });
+        const target = onlineExtensions()[0];
+        if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件' });
+        prune();
+        const id = randomId('probe').slice(0, 40);
+        probes.set(id, { status: 'pending', url: u.toString(), target: target.clientId, targetName: target.name, at: Date.now(), result: null, error: null });
+        sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: id, action: 'probe_site', conversation_id: 'probe', text: u.toString().slice(0, 2048) }));
+        return json(res, 202, { ok: true, probe_id: id });
+      }
+      const pr = /^\/api\/sites\/probe\/([A-Za-z0-9_-]{8,64})$/.exec(path);
+      if (pr && req.method === 'GET') {
+        const p = probes.get(pr[1]);
+        if (!p) return json(res, 404, { ok: false, error: 'probe not found' });
+        if (p.status === 'pending' && Date.now() - p.at > 90000) Object.assign(p, { status: 'error', error: '插件没有在 90 秒内返回页面' });
+        const host = new URL(p.url).hostname;
+        return json(res, 200, {
+          ok: true, status: p.status, url: p.url, error: p.error,
+          report: p.result?.report ?? null,
+          suggested_name: (p.title || '').split(/[|\-–·]/)[0].trim().slice(0, 40) || host,
+          exists: customSites.some((x) => siteHosts(x).includes(host.replace(/^www\./, '')))
+        });
+      }
+      if (path === '/api/sites' && req.method === 'POST') {
+        const b = await body();
+        const p = probes.get(String(b.probe_id || ''));
+        if (!p || p.status !== 'done' || !p.result?.ok) return json(res, 400, { ok: false, error: '没有可添加的分析结果' });
+        const host = new URL(p.url).hostname;
+        const same = (a, b) => a.replace(/^www\./, '') === b.replace(/^www\./, '');
+        if (customSites.some((x) => SEED_KEYS.includes(x.key) && siteHosts(x).some((h) => same(h, host)))) return json(res, 409, { ok: false, error: '这个网站已经在列表里了，可以直接编辑它的配置' });
+        const name = String(b.name || '').trim().slice(0, 40) || host;
+        const site = { key: p.result.config.site, name, url: p.url, host, hosts: [], enabled: true, config: p.result.config, added_at: Date.now(), updated_at: Date.now(), seeded: true };
+        customSites = [...customSites.filter((x) => x.host !== host && x.key !== site.key), site];
+        saveSites();
+        probes.delete(String(b.probe_id));
+        notifySitesChanged();
+        log.info(`[sites] added ${site.key} ${host}`);
+        return json(res, 200, { ok: true, site: siteOut(site) });
+      }
+      if (path === '/api/sites/defaults' && req.method === 'POST') {
+        const add = missingDefaults().map((x) => ({ ...x, updated_at: Date.now(), seeded: true }));
+        if (add.length) { customSites = [...add, ...customSites]; saveSites(); notifySitesChanged(); }
+        return json(res, 200, { ok: true, added: add.map((x) => x.key), sites: customSites.map(siteOut) });
+      }
+      const reset = /^\/api\/sites\/([a-z0-9_-]{1,32})\/reset$/.exec(path);
+      if (reset && req.method === 'POST') {
+        const site = customSites.find((x) => x.key === reset[1]);
+        if (!site) return json(res, 404, { ok: false, error: 'site not found' });
+        const seed = seedByKey(site.key);
+        if (!seed) return json(res, 400, { ok: false, error: '这个网站没有默认配置' });
+        Object.assign(site, { config: seed.config, hosts: seed.hosts, updated_at: Date.now() });
+        saveSites();
+        notifySitesChanged();
+        return json(res, 200, { ok: true, site: siteOut(site) });
+      }
+      const del = /^\/api\/sites\/([a-z0-9_-]{1,32})$/.exec(path);
+      if (del && req.method === 'PATCH') {
+        const site = customSites.find((x) => x.key === del[1]);
+        if (!site) return json(res, 404, { ok: false, error: 'site not found' });
+        const b = await body(MAX_SITE_CONFIG_BYTES + 8192);
+        const patch = {};
+        if (b.name != null) {
+          const name = String(b.name).trim().slice(0, 40);
+          if (!name) return json(res, 400, { ok: false, error: '名称不能为空' });
+          patch.name = name;
+        }
+        const others = customSites.filter((x) => x !== site);
+        const taken = (h) => others.some((x) => siteHosts(x).includes(String(h).replace(/^www\./, '')));
+        if (b.url != null) {
+          let u;
+          try { u = new URL(String(b.url).trim()); } catch { return json(res, 400, { ok: false, error: '网址无效' }); }
+          if (u.protocol !== 'https:') return json(res, 400, { ok: false, error: '只支持 https 网址' });
+          if (taken(u.hostname)) return json(res, 409, { ok: false, error: '另一个网站已经用了这个域名' });
+          patch.url = u.toString();
+          patch.host = u.hostname;
+        }
+        if (b.hosts != null) {
+          if (!Array.isArray(b.hosts) || b.hosts.length > 10) return json(res, 400, { ok: false, error: '域名列表无效（最多 10 个）' });
+          const hosts = [...new Set(b.hosts.map((h) => String(h).trim().toLowerCase()).filter(Boolean))];
+          if (hosts.some((h) => !/^(?=.{1,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(h))) return json(res, 400, { ok: false, error: '域名无效（只写域名，例如 chat.example.com）' });
+          if (hosts.some(taken)) return json(res, 409, { ok: false, error: '另一个网站已经用了这个域名' });
+          patch.hosts = hosts;
+        }
+        if (b.enabled != null) {
+          if (typeof b.enabled !== 'boolean') return json(res, 400, { ok: false, error: 'enabled 必须是 true / false' });
+          patch.enabled = b.enabled;
+        }
+        if (b.config !== undefined) {
+          const c = b.config;
+          if (!c || typeof c !== 'object' || Array.isArray(c)) return json(res, 400, { ok: false, error: 'DOM 配置必须是 JSON 对象' });
+          if (Buffer.byteLength(JSON.stringify(c)) > MAX_SITE_CONFIG_BYTES) return json(res, 413, { ok: false, error: 'DOM 配置太大' });
+          if (c.message != null && (typeof c.message !== 'object' || Array.isArray(c.message))) return json(res, 400, { ok: false, error: 'config.message 必须是对象' });
+          patch.config = { ...c, config_version: c.config_version || 1, site: site.key };
+        }
+        const behaviorChanged = ['host', 'hosts', 'enabled', 'config'].some((k) => k in patch &&
+          JSON.stringify(patch[k]) !== JSON.stringify(site[k]));
+        Object.assign(site, patch);
+        if (behaviorChanged) site.updated_at = Date.now();
+        saveSites();
+        if (behaviorChanged) notifySitesChanged();
+        return json(res, 200, { ok: true, site: siteOut(site) });
+      }
+      if (del && req.method === 'DELETE') {
+        const before = customSites.length;
+        customSites = customSites.filter((x) => x.key !== del[1]);
+        if (customSites.length === before) return json(res, 404, { ok: false, error: 'site not found' });
+        saveSites();
+        notifySitesChanged();
+        return json(res, 200, { ok: true });
+      }
+      return json(res, 405, { ok: false, error: 'method not allowed' });
+    } catch (e) {
+      if (e.status) return json(res, e.status, { ok: false, error: e.message });
+      throw e;
+    }
   }
 
   const wss = new WebSocketServer({
@@ -273,6 +625,7 @@ export function createBridgeServer(opts = {}) {
   // command_id → { requester, target, timer }
   const pendingCommands = new Map();
   const COMMAND_TIMEOUT_MS = opts.commandTimeoutMs ?? 20000;
+  const ATTACH_COMMAND_TIMEOUT_MS = opts.attachCommandTimeoutMs ?? 120000;
 
   function sendTo(rec, msg) {
     if (!rec || rec.ws.readyState !== 1) return false;
@@ -285,13 +638,30 @@ export function createBridgeServer(opts = {}) {
     });
   }
 
+  /** close：把这个插件里开着该会话的所有标签页 + 会话地址一起发过去（PWA 窗口里的标签页也能关掉） */
+  function closeExtras(conversationId, clientId) {
+    const tabIds = [...new Set(db.openTabsFor(conversationId).filter((t) => t.client_id === clientId).map((t) => t.tab_id))].slice(0, 50);
+    const url = db.conversationUrl(conversationId);
+    return { tab_ids: tabIds, ...(typeof url === 'string' && /^https:\/\//.test(url) ? { url: url.slice(0, 2048) } : {}) };
+  }
+
   /** 看板（control 权限）→ 找到开着该会话的插件标签页 → 转发指令 */
   function onCommand(conn, msg) {
     if (!conn.rec.scopes.has(Scope.CONTROL)) {
       return sendError(conn, msg.id, ErrorCode.FORBIDDEN, 'token lacks control scope', false);
     }
     counters.commands_received++;
-    if (msg.action === 'reply' && !msg.text?.trim()) return reply(conn, commandResult(msg.command_id, false, 'text_required', '回复内容不能为空'));
+    if (['probe_site', 'sync_sites', 'open_sites', 'new_chat', 'resync'].includes(msg.action)) return reply(conn, commandResult(msg.command_id, false, 'forbidden_action', '该指令只能由后端发出'));
+    let files = [];
+    if (msg.action === 'reply' && Array.isArray(msg.attachments) && msg.attachments.length) {
+      pruneAttachments();
+      for (const x of msg.attachments) {
+        const a = attachments.get(x.id);
+        if (!a) return reply(conn, commandResult(msg.command_id, false, 'attachment_expired', `附件已过期，请重新选择：${x.name}`));
+        files.push({ id: x.id, name: a.name, type: a.type, size: a.size, url: `/api/attachments/${x.id}` });
+      }
+    }
+    if (msg.action === 'reply' && !msg.text?.trim() && !files.length) return reply(conn, commandResult(msg.command_id, false, 'text_required', '回复内容不能为空'));
     if (pendingCommands.has(msg.command_id)) return reply(conn, commandResult(msg.command_id, false, 'duplicate_command', null));
 
     let target = null;
@@ -308,14 +678,17 @@ export function createBridgeServer(opts = {}) {
       if (!pendingCommands.delete(msg.command_id)) return;
       counters.commands_failed++;
       sendTo(conn.rec, commandResult(msg.command_id, false, 'timeout', '插件没有在规定时间内返回结果'));
-    }, COMMAND_TIMEOUT_MS);
+    }, files.length ? ATTACH_COMMAND_TIMEOUT_MS : COMMAND_TIMEOUT_MS);   // 带文件时页面要先上传，给更长时间
     timer.unref?.();
     pendingCommands.set(msg.command_id, { requester: conn.rec, target: target.clientId, timer });
     sendTo(target, makeEnvelope(MessageType.COMMAND, {
       command_id: msg.command_id,
       action: msg.action,
       conversation_id: msg.conversation_id,
-      ...(msg.action === 'reply' ? { text: msg.text } : {}),
+      ...(msg.action === 'reply' && msg.text?.trim() ? { text: msg.text } : {}),
+      ...(files.length ? { attachments: files } : {}),
+      ...(msg.action === 'regenerate' && msg.answer_index != null ? { answer_index: msg.answer_index, answer_total: msg.answer_total } : {}),
+      ...(msg.action === 'close' ? closeExtras(msg.conversation_id, target.clientId) : {}),
       tab_id: tabId,
       requested_by: conn.rec.clientId
     }));
@@ -324,6 +697,11 @@ export function createBridgeServer(opts = {}) {
 
   /** 插件 → 看板：只接受被转发对象自己返回的结果 */
   function onCommandResult(conn, msg) {
+    const probe = probes.get(msg.command_id);
+    if (probe && probe.target === conn.rec.clientId && !msg.ok && probe.status === 'pending') {
+      Object.assign(probe, { status: 'error', error: msg.detail || msg.code || '插件抓取页面失败' });
+      return undefined;
+    }
     const p = pendingCommands.get(msg.command_id);
     if (!p || p.target !== conn.rec.clientId) return undefined;
     pendingCommands.delete(msg.command_id);
@@ -380,13 +758,59 @@ export function createBridgeServer(opts = {}) {
     }));
     if (result.duplicate) { counters.events_duplicate++; return; }
     counters.events_persisted++;
-    if (!policy.broadcast_event_types.includes(ev.event_type)) return;
+    if (ev.event_type === EventType.TABS_SNAPSHOT) {
+      reconcileTabs(conn, ev.payload.tabs || []);
+      // 只把“哪个标签页在哪个会话、是否是窗口当前标签页”广播给看板（用于高亮对应卡片），不带网址和标题
+      const slim = { ...ev, payload: { tabs: (ev.payload.tabs || []).map((t) => ({ tab_id: t.tab_id, host: t.host, conversation_id: t.conversation_id, active: !!t.active })) } };
+      return broadcastStored(conn, slim, result.seq);
+    }
+    broadcastStored(conn, ev, result.seq);
+  }
 
-    const stored = { ...ev, seq: result.seq, client_id: conn.rec.clientId };
+  function broadcastStored(conn, ev, seq) {
+    if (!policy.broadcast_event_types.includes(ev.event_type)) return;
+    const stored = { ...ev, seq, client_id: conn.rec.clientId };
     broadcaster.broadcast(
       (rec) => toBroadcast(stored, rec, false),
       (rec) => (policy.echo_to_sender || rec.clientId !== conn.rec.clientId) && subscribedTo(rec, ev.conversation_id)
     );
+  }
+
+  /**
+   * 用插件上报的“浏览器里真实开着的标签页”对账（不广播快照本身）：
+   * - 后端认为开着、但快照里没有（或已换了网站 / 会话）的标签页 → 补一条 page.closed（reason: reconciled）
+   * - 快照里开着某个会话、但后端认为已关闭 / 不存在 / 在别的会话 → 补一条 page.opened
+   */
+  function reconcileTabs(conn, snapshot, now = Date.now()) {
+    const clientId = conn.rec.clientId;
+    const snap = new Map(snapshot.map((t) => [t.tab_id, t]));
+    const states = db.tabStatesForClient(clientId);
+    const latest = new Map(states.map((s) => [s.tab_id, s]));
+    const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ''; } };
+    const synth = (type, tabId, conversationId, payload) => {
+      const ev = {
+        type: MessageType.EVENT, event_id: `sync:${tabId}:${now.toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+        event_type: type, occurred_at: now, conversation_id: conversationId, tab_id: tabId, payload
+      };
+      try {
+        const r = db.persistEvent(clientId, ev, now);
+        if (!r.duplicate) { counters.events_reconciled = (counters.events_reconciled || 0) + 1; broadcastStored(conn, ev, r.seq); }
+      } catch (err) { log.error('[db] reconcile persist failed', err); }
+    };
+    for (const s of states) {
+      if (s.event_type === EventType.PAGE_CLOSED || !s.conversation_id) continue;
+      const t = snap.get(s.tab_id);
+      const gone = !t
+        || (s.url && t.host && hostOf(s.url) && hostOf(s.url) !== t.host)
+        || (t.conversation_id && t.conversation_id !== s.conversation_id);
+      if (gone) synth(EventType.PAGE_CLOSED, s.tab_id, s.conversation_id, { url: s.url.slice(0, 2048), reason: 'reconciled' });
+    }
+    for (const t of snapshot) {
+      if (!t.conversation_id) continue;
+      const s = latest.get(t.tab_id);
+      const known = s && s.event_type !== EventType.PAGE_CLOSED && s.conversation_id === t.conversation_id;
+      if (!known) synth(EventType.PAGE_OPENED, t.tab_id, t.conversation_id, { url: (t.url || '').slice(0, 2048), title: (t.title || '').slice(0, 512) });
+    }
   }
 
   function subscribedTo(rec, conversationId) {
@@ -394,13 +818,13 @@ export function createBridgeServer(opts = {}) {
     return conversationId != null && rec.subscriptions.has(conversationId);
   }
 
-  /** 构造广播消息；无 read_content 权限时去掉消息正文 */
+  /** 构造广播消息；无 read_content 权限时去掉消息正文（text 和 html） */
   function toBroadcast(stored, rec, replay) {
     const canRead = rec.scopes.has(Scope.READ_CONTENT);
     let payload = stored.payload;
     let redacted = false;
-    if (!canRead && typeof payload.text === 'string') {
-      const { text, ...rest } = payload;
+    if (!canRead && (typeof payload.text === 'string' || typeof payload.html === 'string')) {
+      const { text, html, ...rest } = payload;
       payload = rest;
       redacted = true;
     }
@@ -526,7 +950,7 @@ function isSameOriginDashboard(origin, host) {
   return h === '127.0.0.1' || h === 'localhost' || h === '::1';
 }
 
-function readBody(req, limit) {
+function readBody(req, limit, raw = false) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -536,7 +960,8 @@ function readBody(req, limit) {
     });
     req.on('end', () => {
       if (size > limit) { const err = new Error('too large'); err.code = 'TOO_LARGE'; return reject(err); }
-      resolve(Buffer.concat(chunks).toString('utf8'));
+      const buf = Buffer.concat(chunks);
+      resolve(raw ? buf : buf.toString('utf8'));
     });
     req.on('error', reject);
   });

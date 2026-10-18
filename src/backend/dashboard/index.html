@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
-  <title>会话管理 · Chat Bridge</title>
+  <title>AI-Chat-Room</title>
   <style>
     /* Material Design 3 色彩令牌（基线紫色主题） */
     :root, [data-theme="light"] {
@@ -26,7 +26,9 @@
       --elev-1: 0 1px 2px rgba(0,0,0,.3), 0 1px 3px 1px rgba(0,0,0,.15);
       --elev-3: 0 4px 8px 3px rgba(0,0,0,.15), 0 1px 3px rgba(0,0,0,.3);
     }
+    [data-theme="light"] { color-scheme: light; }
     [data-theme="dark"] {
+      color-scheme: dark;
       --primary: #D0BCFF; --on-primary: #381E72; --primary-container: #4F378B; --on-primary-container: #EADDFF;
       --secondary-container: #4A4458; --on-secondary-container: #E8DEF8;
       --tertiary: #EFB8C8; --tertiary-container: #633B48;
@@ -49,20 +51,33 @@
     button, input, textarea, select { font: inherit; color: inherit; }
     svg.i { width: 24px; height: 24px; fill: currentColor; flex: none; }
     svg.i.s18 { width: 18px; height: 18px; }
+    svg.i.s22 { width: 22px; height: 22px; }
 
     /* 顶部应用栏 */
     .appbar { position: sticky; top: 0; z-index: 10; background: var(--surface-container); display: flex; align-items: center; gap: 8px; padding: 8px 16px; min-height: 64px; }
-    .appbar h1 { font-size: 22px; line-height: 28px; font-weight: 400; margin: 0 12px 0 4px; white-space: nowrap; }
+    .appbar h1 { font-size: 22px; line-height: 28px; font-weight: 400; margin: 0 12px 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
     .appbar .grow { flex: 1; }
     .conn { display: inline-flex; align-items: center; gap: 6px; color: var(--on-surface-variant); font-size: 12px; white-space: nowrap; }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--outline); }
     .dot.on { background: var(--st-idle); } .dot.off { background: var(--error); }
-    .search { display: flex; align-items: center; gap: 8px; height: 48px; padding: 0 16px; border-radius: 28px; background: var(--surface-container-high); min-width: 220px; max-width: 420px; flex: 1; color: var(--on-surface-variant); }
+    /* 滚动条跟随主题 */
+    * { scrollbar-color: var(--outline) transparent; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--on-surface-variant) 40%, transparent); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+    ::-webkit-scrollbar-thumb:hover { background-color: var(--on-surface-variant); }
+    /* 搜索：平时只显示图标，点击展开；高度与旁边的图标按钮一致（40px） */
+    .search { display: flex; align-items: center; gap: 4px; height: 40px; width: 40px; padding: 0; border-radius: 20px; background: transparent; color: var(--on-surface-variant); overflow: hidden; transition: width .2s, background .2s; flex: none; }
+    .search .sbtn { flex: none; }
+    .search input { width: 0; padding: 0; }
+    .search.open { width: min(360px, 50vw); background: var(--surface-container-high); padding-right: 12px; }
+    .search.open input { width: auto; }
     .search input { border: 0; outline: 0; background: transparent; flex: 1; min-width: 0; color: var(--on-surface); }
 
     .icon-btn { width: 40px; height: 40px; border-radius: 20px; border: 0; background: transparent; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; color: var(--on-surface-variant); position: relative; flex: none; }
     .icon-btn:hover { background: color-mix(in srgb, var(--on-surface-variant) 8%, transparent); }
     .icon-btn:focus-visible { outline: 2px solid var(--primary); }
+    .icon-btn.on { color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); }
 
     .btn { height: 40px; padding: 0 24px; border-radius: 20px; border: 0; cursor: pointer; font-weight: 500; letter-spacing: .1px; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
     .btn.s { height: 32px; padding: 0 12px; border-radius: 16px; font-size: 13px; }
@@ -74,6 +89,8 @@
     .btn.outlined { background: transparent; color: var(--primary); border: 1px solid var(--outline); }
     .btn.text { background: transparent; color: var(--primary); padding: 0 12px; }
     .btn.outlined:hover:not(:disabled), .btn.text:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 8%, transparent); }
+    .btn.text.danger { color: var(--error, #b3261e); }
+    .btn.text.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--error, #b3261e) 8%, transparent); }
 
     /* 筛选芯片 */
     .chips { display: flex; gap: 8px; flex-wrap: wrap; padding: 16px 24px 4px; align-items: center; }
@@ -82,20 +99,25 @@
     .chip.on { background: var(--secondary-container); color: var(--on-secondary-container); border-color: transparent; }
     .chip .n { font-size: 12px; opacity: .8; }
     .chips .sep { width: 1px; height: 24px; background: var(--outline-variant); margin: 0 4px; }
+    .chips .cg { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
     main { padding: 12px 24px 96px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+    /* align-items:start：展开回复栏只让这一张卡片变高，不拉伸同一行的其他卡片 */
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; align-items: start; }
     .empty { grid-column: 1 / -1; text-align: center; color: var(--on-surface-variant); padding: 64px 16px; }
 
     /* 会话卡片（filled card，可点击） */
-    .card { background: var(--surface-container-low); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 10px; cursor: pointer; position: relative; outline: none; transition: box-shadow .15s, background .15s; border-left: 4px solid var(--st-closed); }
+    .card { background: var(--surface-container-low); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 10px; cursor: pointer; position: relative; outline: none; transition: box-shadow .15s, background .15s; }
+    /* 双向绑定：浏览器窗口里正显示着这个会话 */
+    .card.active-page { box-shadow: 0 0 0 2px var(--primary); }
     .card:hover { box-shadow: var(--elev-1); background: var(--surface-container); }
+    .card.active-page:hover { box-shadow: 0 0 0 2px var(--primary), var(--elev-1); }
     .card:focus-visible { outline: 2px solid var(--primary); }
-    .card.s-generating { border-left-color: var(--st-generating); }
-    .card.s-limit_reached { border-left-color: var(--st-limit); }
-    .card.s-error { border-left-color: var(--st-error); }
-    .card.s-idle { border-left-color: var(--st-idle); }
-    .card.done { opacity: .7; }
+    /* 卡片底色 = 网站主题色淡染（网站配置里的 color 优先，没有就用看板主题色），所有状态统一；页面已关更淡 */
+    .card { --src: var(--primary); background: color-mix(in srgb, var(--src) 10%, var(--surface-container-low)); }
+    .card.src-chatgpt { --src: #10A37F; } .card.src-duckai { --src: #DE5833; } .card.src-hark { --src: var(--primary); }
+    .card:hover { background: color-mix(in srgb, var(--src) 16%, var(--surface-container)); }
+    .card.s-closed { background: color-mix(in srgb, var(--src) 5%, var(--surface-container-low)); }
     .card .head { display: flex; gap: 12px; align-items: flex-start; }
     .avatar { width: 40px; height: 40px; border-radius: 20px; flex: none; display: flex; align-items: center; justify-content: center; font-weight: 500; font-size: 15px; }
     .avatar.chatgpt { background: #10A37F; color: #fff; }
@@ -103,28 +125,116 @@
     .avatar.hark { background: var(--primary); color: var(--on-primary); }
     .avatar.other { background: var(--tertiary-container); color: var(--on-surface); }
     .card .tt { flex: 1; min-width: 0; }
-    .card .title { font-size: 16px; line-height: 24px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .card .title { font-size: 16px; line-height: 24px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 4px; min-width: 0; }
+    .card .title .tx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .card .title svg { flex: none; color: var(--primary); }
     .card .sub { color: var(--on-surface-variant); font-size: 12px; line-height: 16px; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
     .badge { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; white-space: nowrap; }
     .b-generating { background: var(--st-generating-bg); color: var(--st-generating); }
-    .b-limit_reached { background: var(--st-limit-bg); color: var(--st-limit); }
+    .b-limit_reached { background: var(--st-error-bg); color: var(--st-error); }
     .b-error { background: var(--st-error-bg); color: var(--st-error); }
     .b-idle { background: var(--st-idle-bg); color: var(--st-idle); }
     .b-closed { background: var(--st-closed-bg); color: var(--st-closed); }
+    .b-opening { background: var(--st-closed-bg); color: var(--primary); }
     .tags { display: flex; gap: 6px; flex-wrap: wrap; }
     .tag { height: 22px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--outline-variant); font-size: 11px; display: inline-flex; align-items: center; color: var(--on-surface-variant); }
     .tag.warn { border-color: var(--error); color: var(--error); }
-    .notice { font-size: 13px; border-radius: 8px; padding: 8px 12px; background: var(--st-limit-bg); color: var(--st-limit); }
-    .notice.err { background: var(--st-error-bg); color: var(--st-error); }
     .preview { font-size: 13px; color: var(--on-surface-variant); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; white-space: pre-wrap; word-break: break-word; }
     .preview b { color: var(--on-surface); font-weight: 500; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .quick { display: none; flex-direction: column; gap: 8px; }
-    .quick.open { display: flex; }
+    .card .actions { margin-top: auto; padding-top: 4px; flex-wrap: nowrap; gap: 6px; }
+    /* 四个按钮保持同一行：平分宽度，文字放不下时省略 */
+    .card .actions .btn { flex: 1 1 0; min-width: 0; padding: 0 8px; justify-content: center; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    /* 卡片：向下弹出的快速回复栏 */
+    .creply { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; cursor: default; }
+    .creply .field { min-height: 56px; background: var(--surface-container-lowest); }
+    .creply .qr { display: flex; gap: 6px; flex-wrap: wrap; }
+    .creply .qr button { height: 28px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--outline-variant); background: transparent; color: var(--on-surface-variant); font-size: 12px; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .creply .qr button:hover { background: var(--secondary-container); color: var(--on-secondary-container); }
+    .creply .row { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+    .creply .hint { margin-right: auto; font-size: 12px; color: var(--on-surface-variant); }
+    .msg.flash { animation: flash 1.6s ease-out; }
+    @keyframes flash { 0%, 40% { box-shadow: 0 0 0 3px var(--primary); } 100% { box-shadow: 0 0 0 0 transparent; } }
+    .card .side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none; }
+    .card .side-top { display: flex; align-items: center; gap: 2px; }
+    /* 页面已关卡片的删除按钮：macOS 红色关闭按钮样式，悬停卡片时显示 × */
+    .card .card-del { all: unset; box-sizing: border-box; width: 14px; height: 14px; margin-left: 6px; border-radius: 50%; cursor: pointer;
+      display: inline-grid; place-items: center; background: #ff5f57; border: 0.5px solid #e0443e; color: transparent;
+      box-shadow: inset 0 0 0 0.5px rgba(255,255,255,.25); transition: transform .12s ease, filter .12s ease, color .12s ease; }
+    .card .card-del svg { width: 8px; height: 8px; display: block; }
+    .card:hover .card-del, .card .card-del:focus-visible { color: #7d1712; }
+    .card .card-del:hover { filter: brightness(1.05); transform: scale(1.12); }
+    .card .card-del:active { filter: brightness(0.85); transform: scale(0.95); }
+    .card .card-del:focus-visible { outline: 2px solid color-mix(in srgb, #ff5f57 45%, transparent); outline-offset: 2px; }
+    .card .side .time { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); white-space: nowrap; }
     .field { border: 1px solid var(--outline); border-radius: 4px; background: transparent; padding: 10px 12px; width: 100%; resize: vertical; min-height: 64px; outline: none; }
     .field:focus { border: 2px solid var(--primary); padding: 9px 11px; }
-    .quick .row { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
-    .quick .hint { margin-right: auto; font-size: 12px; color: var(--on-surface-variant); }
+
+    .msg .body img.rich { display: block; max-width: 100%; max-height: 480px; border-radius: 8px; margin: 8px 0; cursor: zoom-in; }
+    .msg .body a.dl { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; margin: 4px 0; border-radius: 8px; border: 1px solid var(--outline-variant); color: var(--primary); text-decoration: none; font-size: 13px; }
+    .msg .body a.dl:hover { background: var(--secondary-container); }
+    .msg .body a.dl svg { width: 18px; height: 18px; fill: currentColor; }
+    /* 富文本（原页面格式）：代码块、图片、文件、表格、标题、列表 */
+    .msg .body.rich p { white-space: normal; }
+    .msg .body.rich h1, .msg .body.rich h2, .msg .body.rich h3, .msg .body.rich h4, .msg .body.rich h5, .msg .body.rich h6 { margin: 12px 0 6px; line-height: 1.35; font-weight: 600; }
+    .msg .body.rich h1 { font-size: 20px; } .msg .body.rich h2 { font-size: 18px; } .msg .body.rich h3 { font-size: 16px; }
+    .msg .body.rich h4, .msg .body.rich h5, .msg .body.rich h6 { font-size: 14px; }
+    .msg .body.rich ul, .msg .body.rich ol { margin: 4px 0 8px; padding-left: 22px; }
+    .msg .body.rich li { margin: 2px 0; }
+    .msg .body.rich li > p { margin: 0; }
+    .msg .body.rich blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid var(--outline-variant); color: var(--on-surface-variant); }
+    .msg .body.rich hr { border: 0; border-top: 1px solid var(--outline-variant); margin: 12px 0; }
+    .msg .body.rich a:not(.filechip):not(.imgdl) { color: var(--primary); }
+    .msg .body .tablewrap { overflow-x: auto; margin: 8px 0; }
+    .msg .body table { border-collapse: collapse; font-size: 13px; }
+    .msg .body th, .msg .body td { border: 1px solid var(--outline-variant); padding: 4px 8px; text-align: left; vertical-align: top; }
+    .msg .body th { background: var(--surface-container-highest); font-weight: 600; }
+    .msg .body .codeblock { margin: 8px 0; border-radius: 8px; overflow: hidden; background: var(--surface-container-highest); }
+    .msg .body .codeblock pre { margin: 0; border-radius: 0; }
+    .msg .body .codeblock .cbh { display: flex; align-items: center; gap: 4px; padding: 2px 6px 2px 12px; font-size: 12px; color: var(--on-surface-variant); border-bottom: 1px solid var(--outline-variant); }
+    .msg .body .codeblock .lang { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Consolas, monospace; }
+    .msg .body .codeblock .cbtn { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px; border: 0; border-radius: 14px; background: transparent; color: var(--primary); cursor: pointer; font-size: 12px; }
+    .msg .body .codeblock .cbtn:hover { background: color-mix(in srgb, var(--primary) 10%, transparent); }
+    .msg .body .codeblock .cbtn .ic, .msg .body .filechip .ic, .msg .body a.imgdl .ic { display: inline-flex; }
+    .msg .body .codeblock .cbtn svg { width: 16px; height: 16px; fill: currentColor; }
+    .msg .body .imgblock { display: inline-flex; flex-direction: column; align-items: flex-start; max-width: 100%; margin: 4px 0; vertical-align: top; }
+    .msg .body .imgblock img.rich { margin: 4px 0; }
+    .msg .body a.imgdl { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 10px; border-radius: 13px; border: 1px solid var(--outline-variant); color: var(--primary); text-decoration: none; font-size: 12px; }
+    .msg .body a.imgdl:hover { background: var(--secondary-container); }
+    .msg .body a.imgdl svg { width: 16px; height: 16px; fill: currentColor; }
+    .msg .body .filechip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; height: 34px; padding: 0 10px; margin: 4px 4px 4px 0; border-radius: 8px; border: 1px solid var(--outline-variant); background: var(--surface-container-low); color: var(--on-surface); text-decoration: none; font-size: 13px; vertical-align: middle; }
+    .msg .body a.filechip { color: var(--primary); }
+    .msg .body a.filechip:hover { background: var(--secondary-container); }
+    .msg .body .filechip .fn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .msg .body .filechip svg { width: 18px; height: 18px; fill: currentColor; flex: none; }
+    .msg .body .filechip.nolink { color: var(--on-surface-variant); cursor: default; }
+
+    /* 详情：快速回复 */
+    .composer { display: none; flex-direction: column; gap: 8px; padding: 12px 24px 20px; border-top: 1px solid var(--outline-variant); position: relative; }
+    .composer.open { display: flex; }
+    .composer .row { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
+    .composer .attach { width: 36px; height: 36px; border-radius: 18px; margin-left: -6px; }
+    .composer .attach:hover { background: color-mix(in srgb, var(--on-surface) 8%, transparent); }
+    .composer .attach svg { width: 20px; height: 20px; }
+    .composer.dragging .field { outline: 2px dashed var(--primary); outline-offset: 2px; }
+    .qfiles { display: none; flex-wrap: wrap; gap: 8px; }
+    .qfiles.has { display: flex; }
+    .qfile { position: relative; display: flex; align-items: center; gap: 8px; max-width: 260px; padding: 6px 4px 6px 10px; border-radius: 12px; background: var(--surface-container-high); font-size: 13px; overflow: hidden; }
+    .qfile .ft { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: var(--primary-container); color: var(--on-primary-container); font-size: 10px; font-weight: 700; flex: none; text-transform: uppercase; overflow: hidden; }
+    .qfile .ft img { width: 100%; height: 100%; object-fit: cover; }
+    .qfile .fn { display: flex; flex-direction: column; min-width: 0; }
+    .qfile .fn b { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .qfile .fn small { color: var(--on-surface-variant); font-size: 11px; }
+    .qfile.err { background: var(--error-container); color: var(--on-error-container); }
+    .qfile.err .fn small { color: inherit; }
+    .qfile .icon-btn { width: 28px; height: 28px; }
+    .qfile .bar { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--primary); transition: width .2s; }
+    .composer .hint { margin-right: auto; font-size: 12px; color: var(--on-surface-variant); }
+    .cands { display: none; max-height: 200px; overflow-y: auto; background: var(--surface-container-lowest); border: 1px solid var(--outline-variant); border-radius: 12px; padding: 6px 0; }
+    .cands.open { display: block; }
+    .cands .ch { font-size: 11px; color: var(--on-surface-variant); padding: 4px 16px; }
+    .cand { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 8px 16px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cand:hover, .cand.on { background: var(--secondary-container); color: var(--on-secondary-container); }
 
     /* 对话框 */
     .scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 30; display: none; align-items: center; justify-content: center; padding: 24px; }
@@ -149,6 +259,28 @@
     .msg .body p:last-child { margin-bottom: 0; }
     .msg .body pre { margin: 8px 0; padding: 10px 12px; border-radius: 8px; background: var(--surface-container-highest); overflow-x: auto; font: 12.5px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; white-space: pre; }
     .msg .body code.inl { font: 12.5px ui-monospace, Consolas, monospace; background: var(--surface-container-highest); border-radius: 4px; padding: 1px 4px; }
+    .msg.collapsed .body { display: none; }
+    /* 超长消息：首尾各 1/4 弹窗高度，中间折叠 */
+    .msg .longfold .lhead, .msg .longfold .ltail { overflow: hidden; position: relative; }
+    .msg .longfold .lhead { -webkit-mask-image: linear-gradient(#000 75%, transparent); mask-image: linear-gradient(#000 75%, transparent); }
+    .msg .longfold .ltail { display: flex; flex-direction: column; justify-content: flex-end; -webkit-mask-image: linear-gradient(transparent, #000 25%); mask-image: linear-gradient(transparent, #000 25%); }
+    .msg .longfold .ltail > .body { flex: none; }
+    .msg .longbtn { display: block; width: 100%; margin: 6px 0; padding: 6px 0; border: 1px dashed var(--outline-variant); border-radius: 8px; background: transparent; color: var(--primary); font: inherit; font-size: 13px; cursor: pointer; }
+    .msg .longbtn:hover { background: var(--secondary-container); }
+    .msg .fold { display: none; font-size: 13px; color: var(--on-surface-variant); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .msg.collapsed .fold { display: block; }
+    .msg.fav { border-color: var(--tertiary); }
+    .mact { display: flex; gap: 2px; margin-top: 6px; margin-left: -8px; }
+    .mact .icon-btn { width: 32px; height: 32px; border-radius: 16px; }
+    .mact .icon-btn.on { color: var(--tertiary); }
+    .mact .icon-btn:disabled { opacity: .38; cursor: default; }
+    .mact .icon-btn:disabled:hover { background: transparent; }
+
+    /* 设置：常见回答 */
+    .qr-list { display: flex; flex-direction: column; gap: 6px; }
+    .qr-item { display: flex; gap: 4px; align-items: center; }
+    .qr-item .input { height: 40px; }
+    .qr-item .icon-btn:disabled { opacity: .38; cursor: default; }
 
     /* 设置 */
     .sec { padding: 12px 0; border-bottom: 1px solid var(--outline-variant); }
@@ -174,29 +306,95 @@
     .kv .k { color: var(--on-surface-variant); }
     .clients { margin-top: 8px; font-size: 12px; color: var(--on-surface-variant); }
 
+    /* 网站下拉 */
+    .sitemenu { position: relative; }
+    .menu { display: none; position: absolute; right: 0; top: calc(100% + 4px); min-width: 260px; max-height: 70vh; overflow-y: auto; background: var(--surface-container); border-radius: 8px; box-shadow: var(--elev-2, var(--elev-3)); padding: 8px 0; z-index: 25; }
+    .menu.open { display: block; }
+    .mi { display: flex; align-items: center; gap: 12px; width: 100%; height: 48px; padding: 0 12px; border: 0; background: transparent; color: var(--on-surface); cursor: pointer; text-align: left; font-size: 14px; }
+    .mi:hover, .mi:focus-visible { background: var(--secondary-container); outline: none; }
+    .mi .avatar { width: 28px; height: 28px; font-size: 12px; }
+    .mi .nm { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .mi .nm small { color: var(--on-surface-variant); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mi .del, .mi .ed, .mi .cfg { width: 32px; height: 32px; }
+    .mi.add { border-top: 1px solid var(--outline-variant); margin-top: 4px; color: var(--primary); }
+    .mi.add .plus { width: 28px; height: 28px; border-radius: 14px; border: 1px dashed var(--primary); display: inline-flex; align-items: center; justify-content: center; font-size: 18px; }
+    .probe-st { font-size: 13px; color: var(--on-surface-variant); margin: 12px 0; }
+    .probe-st.err { color: var(--error); }
+    .probe-res { display: none; flex-direction: column; gap: 10px; }
+    .probe-res.open { display: flex; }
+    .probe-res .kv { display: grid; grid-template-columns: 96px 1fr; gap: 4px 12px; font-size: 13px; }
+    .probe-res .kv span:nth-child(odd) { color: var(--on-surface-variant); }
+    .probe-res .smp { font-size: 12px; border: 1px solid var(--outline-variant); border-radius: 8px; padding: 8px 12px; display: flex; flex-direction: column; gap: 4px; }
+    .probe-res .smp div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .probe-res .warn { font-size: 12px; color: var(--st-limit); }
+
     /* Snackbar */
-    #snackbars { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 40; align-items: center; }
-    .snackbar { background: var(--inverse-surface); color: var(--inverse-on-surface); border-radius: 4px; padding: 14px 16px; min-width: 288px; max-width: 560px; box-shadow: var(--elev-3); font-size: 14px; display: flex; gap: 12px; align-items: center; }
-    .snackbar.err { border-left: 4px solid var(--error); }
-    .snackbar.ok { border-left: 4px solid var(--st-idle); }
-  </style>
+    /* 右下角状态按钮：发送进度 / 提示（替代 snackbar） */
+    #fabs { position: fixed; right: 24px; bottom: 24px; display: flex; flex-direction: column; align-items: flex-end; gap: 12px; z-index: 40; pointer-events: none; }
+    .fab-item { position: relative; display: flex; align-items: center; gap: 10px; pointer-events: auto; animation: fab-in .2s ease-out; transition: opacity .2s, transform .2s; }
+    .fab-item.leaving { opacity: 0; transform: scale(.6); }
+    @keyframes fab-in { from { opacity: 0; transform: scale(.6); } to { opacity: 1; transform: none; } }
+    .fab { position: relative; width: 52px; height: 52px; border-radius: 50%; border: 0; padding: 0; display: grid; place-items: center; cursor: default;
+      background: var(--surface-container-high); color: var(--primary); box-shadow: var(--elev-3); transition: background .2s, color .2s; }
+    .fab .ring { position: absolute; inset: 2px; width: 48px; height: 48px; transform: rotate(-90deg); }
+    .fab .ring circle { fill: none; stroke-width: 3; }
+    .fab .ring .track { stroke: var(--outline-variant, rgba(0,0,0,.12)); }
+    .fab .ring .bar { stroke: currentColor; stroke-linecap: round; transition: stroke-dashoffset .2s linear; }
+    .fab-ic { display: grid; place-items: center; }
+    .fab-ic .i { fill: currentColor; }
+    .fab-item[data-state="pending"] .fab-ic { animation: fab-pulse 1.2s ease-in-out infinite; }
+    @keyframes fab-pulse { 50% { opacity: .45; } }
+    .fab-item[data-conv] .fab { cursor: pointer; }
+    .sent-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+    .sent-file { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; padding: 4px 10px; border-radius: 8px; background: var(--surface-container-high); color: var(--on-surface); font-size: 13px; }
+    .sent-file .sf-nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sent-file small { color: var(--on-surface-variant); flex: none; }
+    .fab-item[data-state="ok"] .fab { background: var(--st-idle-bg); color: var(--st-idle); }
+    .fab-item[data-state="ok"] .ring { opacity: 0; transition: opacity .3s .15s; }
+    .fab-item[data-state="err"] .fab { background: var(--error-container); color: var(--on-error-container); cursor: pointer; }
+    .fab-item[data-state="err"] .ring { display: none; }
+    .fab-label { background: var(--inverse-surface); color: var(--inverse-on-surface); border-radius: 16px; padding: 6px 12px; font-size: 13px; max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: var(--elev-3); }
+    .fab-item[data-state="err"] .fab-label { display: none; }
+    .fab-panel { display: none; position: absolute; right: 0; bottom: 64px; width: min(340px, calc(100vw - 48px)); background: var(--surface-container-high); color: var(--on-surface); border-radius: 16px; padding: 14px 16px; box-shadow: var(--elev-3); }
+    .fab-item.open .fab-panel { display: block; animation: fab-in .15s ease-out; }
+    .fab-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fab-text { color: var(--error); font-size: 13px; }
+    .fab-detail { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: var(--surface-container-highest); font-size: 13px; white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow: auto; }
+    .fab-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+    @media (prefers-reduced-motion: reduce) { .fab-item, .fab-item[data-state="pending"] .fab-ic, .fab .ring .bar { animation: none; transition: none; } }
+    .menu .mi.editing { flex-wrap: wrap; cursor: default; gap: 6px; height: auto; padding: 8px 12px; }
+    .menu .mi.editing .input { height: 32px; flex: 1 1 100%; padding: 0 8px; }
+    .menu .mi.editing .row { display: flex; gap: 6px; justify-content: flex-end; flex: 1 1 100%; }
+    .mi.off .nm, .mi.off .avatar { opacity: .5; }
+    .mi .off-tag { font-size: 11px; color: var(--on-surface-variant); border: 1px solid var(--outline-variant); border-radius: 6px; padding: 0 6px; }
+    .cfg-fields { display: grid; grid-template-columns: 1fr; gap: 8px; margin: 12px 0; }
+    .cfg-fields .input { height: 36px; font: 12.5px ui-monospace, Consolas, monospace; }
+    .cfg-json { font: 12px/1.5 ui-monospace, Consolas, monospace; min-height: 200px; white-space: pre; }
+    .dialog .df .grow { flex: 1; }
+</style>
 </head>
 <body>
   <header class="appbar">
-    <h1>会话管理</h1>
+    <h1>AI-Chat-Room</h1>
     <span class="conn"><span id="connDot" class="dot"></span><span id="connText">未连接</span></span>
     <span class="grow"></span>
-    <label class="search">
-      <svg class="i" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+    <label id="searchBox" class="search">
+      <button id="searchBtn" class="icon-btn sbtn" type="button" title="搜索" aria-label="搜索" aria-expanded="false"><svg class="i" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+      </button>
       <input id="search" type="search" placeholder="搜索标题、内容、会话 ID" />
     </label>
-    <select id="sort" class="icon-btn" style="width:auto;padding:0 8px" title="排序">
-      <option value="activity">最近活动</option>
-      <option value="status">需要处理的在前</option>
-    </select>
+    <div class="sitemenu">
+      <button id="sitesBtn" class="icon-btn" aria-haspopup="menu" aria-expanded="false" title="网站：已适配的 AI 会话网址" aria-label="网站">
+        <svg class="i" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.93 6h-2.95a15.65 15.65 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.93 8zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96zM4.26 14a8.2 8.2 0 0 1 0-4h3.38a16.5 16.5 0 0 0 0 4H4.26zm.82 2h2.95c.32 1.25.78 2.45 1.38 3.56A7.99 7.99 0 0 1 5.08 16zm2.95-8H5.08a7.99 7.99 0 0 1 4.33-3.56A15.65 15.65 0 0 0 8.03 8zM12 19.96c-.83-1.2-1.48-2.53-1.91-3.96h3.82c-.43 1.43-1.08 2.76-1.91 3.96zM14.34 14H9.66a14.7 14.7 0 0 1 0-4h4.68a14.7 14.7 0 0 1 0 4zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56zM16.36 14a16.5 16.5 0 0 0 0-4h3.38a8.2 8.2 0 0 1 0 4h-3.38z"/></svg></button>
+      <div id="sitesMenu" class="menu" role="menu"></div>
+    </div>
     <button id="themeBtn" class="icon-btn" title="切换深色 / 浅色"></button>
+    <button id="favBtn" class="icon-btn" title="查看收藏会话" aria-pressed="false" aria-label="收藏会话"></button>
     <button id="settingsBtn" class="icon-btn" title="设置">
       <svg class="i" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87a.47.47 0 0 0 .12.61l2.03 1.58c-.05.31-.09.64-.09.94s.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.47.47 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
+    </button>
+    <button id="launchBtn" class="icon-btn" title="一键启动：后台打开所有网站" aria-label="一键启动">
+      <svg class="i" viewBox="0 0 24 24"><path d="M9.19 6.35c-2.04 2.29-3.44 5.58-3.57 5.89L2 10.69l4.05-4.05c.47-.47 1.15-.68 1.81-.55l1.33.26zM11.17 17s3.74-1.55 5.89-3.7c5.4-5.4 4.5-9.62 4.21-10.57-.95-.3-5.17-1.19-10.57 4.21C8.55 9.09 7 12.83 7 12.83L11.17 17zm6.48-2.19c-2.29 2.04-5.58 3.44-5.89 3.57L13.31 22l4.05-4.05c.47-.47.68-1.15.55-1.81l-.26-1.33zM9 18c0 .83-.34 1.58-.88 2.12C6.94 21.3 2 22 2 22s.7-4.94 1.88-6.12A3 3 0 0 1 9 18zm4-9c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2z"/></svg>
     </button>
   </header>
 
@@ -208,11 +406,11 @@
     <div class="dialog">
       <div class="dh">
         <h2 id="detailTitle">-</h2>
+        <button id="detailPin" class="icon-btn" title="置顶" aria-pressed="false">
+          <svg class="i" viewBox="0 0 24 24"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>
+        </button>
         <button id="detailJump" class="icon-btn" title="跳转到页面">
           <svg class="i" viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
-        </button>
-        <button id="detailCopy" class="icon-btn" title="复制最后一条回答">
-          <svg class="i" viewBox="0 0 24 24"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z"/></svg>
         </button>
         <button id="detailClose" class="icon-btn" title="关闭">
           <svg class="i" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
@@ -220,6 +418,66 @@
       </div>
       <div id="detailSub" class="dsub"></div>
       <div id="detailBody" class="db"><div id="detailMsgs" class="msgs"></div></div>
+      <div id="composer" class="composer">
+        <div id="quickFiles" class="qfiles" aria-label="要发送的文件"></div>
+        <textarea id="quickText" class="field" placeholder="发到这个会话，Enter 发送，Shift+Enter 换行；点击常见回答直接发送"></textarea>
+        <div id="quickCands" class="cands" role="listbox"></div>
+        <div class="row">
+          <button id="quickAttach" class="icon-btn attach" type="button" hidden></button>
+          <input id="quickFile" type="file" hidden />
+          <span id="quickHint" class="hint"></span>
+          <button id="quickSend" class="btn filled s">发送</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- 添加网站：插件打开网址 → 抓取 DOM → 分析 → 确认添加 -->
+  <div id="siteScrim" class="scrim" role="dialog" aria-modal="true" aria-labelledby="siteTitle">
+    <div class="dialog narrow">
+      <div class="dh"><h2 id="siteTitle">添加网站</h2></div>
+      <div class="db">
+        <label><span class="lbl">会话网址（打开一段已有消息的对话，浏览器里需已登录）</span>
+          <input id="siteUrl" class="input" type="url" placeholder="https://example.com/chat/xxxx" /></label>
+        <div id="siteStatus" class="probe-st"></div>
+        <div id="siteResult" class="probe-res">
+          <div id="siteKv" class="kv"></div>
+          <div id="siteSamples" class="smp"></div>
+          <div id="siteWarn" class="warn"></div>
+          <label><span class="lbl">显示名称</span><input id="siteName" class="input" maxlength="40" /></label>
+        </div>
+      </div>
+      <div class="df">
+        <button id="siteCancel" class="btn text">取消</button>
+        <button id="siteProbe" class="btn tonal">获取 DOM</button>
+        <button id="siteConfirm" class="btn filled" disabled>确认添加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 网站配置：启用 / 停用、域名、DOM 配置（常用项 + 完整 JSON）、恢复默认 -->
+  <div id="siteCfgScrim" class="scrim" role="dialog" aria-modal="true" aria-labelledby="siteCfgTitle">
+    <div class="dialog narrow">
+      <div class="dh"><h2 id="siteCfgTitle">网站配置</h2></div>
+      <div class="db">
+        <div class="switch-row">
+          <div><div class="t">启用</div><div class="d">停用后插件不再观察这个网站（已开的页面刷新后生效）</div></div>
+          <button id="siteCfgEnabled" class="switch" role="switch" aria-checked="true" type="button"></button>
+        </div>
+        <label><span class="lbl">其他域名（逗号分隔；本域名及子域名都会匹配）</span>
+          <input id="siteCfgHosts" class="input" placeholder="例如 chat.example.com, example.com" /></label>
+        <div id="siteCfgFields" class="cfg-fields"></div>
+        <label><span class="lbl">完整 DOM 配置（JSON）</span>
+          <textarea id="siteCfgJson" class="field cfg-json" spellcheck="false" rows="12"></textarea></label>
+        <div id="siteCfgErr" class="probe-st err"></div>
+      </div>
+      <div class="df">
+        <button id="siteCfgReset" class="btn text" type="button">恢复默认</button>
+        <span class="grow"></span>
+        <button id="siteCfgCancel" class="btn text" type="button">取消</button>
+        <button id="siteCfgSave" class="btn filled" type="button">保存</button>
+      </div>
     </div>
   </div>
 
@@ -244,39 +502,46 @@
           </div>
         </section>
         <section class="sec">
-          <h3>外观</h3>
-          <div class="seg" id="themeSeg">
-            <button data-theme-opt="light">浅色</button>
-            <button data-theme-opt="dark">深色</button>
-            <button data-theme-opt="system">跟随系统</button>
-          </div>
-        </section>
-        <section class="sec">
-          <h3>系统通知</h3>
+          <h3>通知</h3>
           <div class="switch-row">
-            <div><div class="t">启用系统弹窗通知</div><div class="d" id="notifyPerm"></div></div>
+            <div><div class="t">普通会话回答完成：音效</div><div class="d">播放一声提示音</div></div>
+            <button class="switch" role="switch" data-notify="sound"></button>
+          </div>
+          <div class="switch-row">
+            <div><div class="t">置顶会话回答完成：弹出详情</div><div class="d">直接打开这条回答所在会话的详情并定位到回答；看板在后台时另发系统通知（需启用下方系统通知），同时播放提示音</div></div>
+            <button class="switch" role="switch" data-notify="pinned_popup"></button>
+          </div>
+          <div class="switch-row">
+            <div><div class="t">所有会话回答完成：弹出详情</div><div class="d">不只置顶会话，任何会话回答完成都直接打开详情；正在看别的会话时排队，关掉当前详情后依次打开（音效按上面的设置）</div></div>
+            <button class="switch" role="switch" data-notify="all_popup"></button>
+          </div>
+          <div class="switch-row">
+            <div><div class="t">启用系统通知</div><div class="d" id="notifyPerm"></div></div>
             <button id="notifyEnabled" class="switch" role="switch" aria-checked="false"></button>
           </div>
-          <div class="switch-row"><div class="t">已到限额</div><button class="switch" role="switch" data-notify="limit_reached"></button></div>
-          <div class="switch-row"><div class="t">回答完成</div><button class="switch" role="switch" data-notify="finished"></button></div>
-          <div class="switch-row"><div class="t">出错</div><button class="switch" role="switch" data-notify="error"></button></div>
-          <div class="switch-row">
-            <div><div class="t">只在看板不在前台时通知</div><div class="d">看板页面正在看时用页面内提示</div></div>
-            <button class="switch" role="switch" data-notify="background_only"></button>
+          <div class="row2"><button id="soundTest" class="btn text">试听音效</button><button id="notifyTest" class="btn text">发送测试通知</button></div>
+        </section>
+        <section class="sec">
+          <h3>常见回答</h3>
+          <div class="d lbl">快速回复时弹出的候选，按顺序显示</div>
+          <div id="qrList" class="qr-list"></div>
+          <div class="row2">
+            <label style="flex:1"><input id="qrNew" class="input" placeholder="新增一条常见回答" maxlength="2000" /></label>
+            <button id="qrAdd" class="btn tonal">添加</button>
           </div>
-          <div class="row2"><button id="notifyTest" class="btn text">发送测试通知</button></div>
+          <div class="row2"><button id="qrReset" class="btn text">恢复默认</button></div>
         </section>
         <section class="sec">
           <h3>后台</h3>
           <div id="serverInfo" class="kv"><span class="k">状态</span><span>-</span></div>
           <div id="serverClients" class="clients"></div>
-          <div class="row2"><button id="serverRefresh" class="btn text">刷新</button></div>
+          <div class="row2"><button id="serverRefresh" class="btn text">刷新</button><button id="resetDb" class="btn text danger" title="清空所有会话、消息、收藏、置顶和归档记录">重置数据库</button></div>
         </section>
       </div>
     </div>
   </div>
 
-  <div id="snackbars"></div>
+  <div id="fabs" aria-live="polite"></div>
   <script type="module" src="/dashboard/app.js"></script>
 </body>
 </html>

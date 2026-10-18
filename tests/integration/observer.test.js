@@ -177,3 +177,95 @@ test('新版页面结构：识别角色、消息 ID、正文，并通过文本�
   assert.ok(results.every((x) => x.r.ok));
   page.close();
 });
+
+test('性能：没变化的消息不重复提取正文；输入框里打字不触发扫描；属性变化（图片地址）照常上报', async () => {
+  const { JSDOM } = await import('jsdom');
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { ROOT } = await import('../helpers.js');
+  const msgs = Array.from({ length: 20 }, (_, i) =>
+    `<div data-message-author-role="${i % 2 ? 'assistant' : 'user'}" data-message-id="m-${i}"><div class="markdown"><p>第 ${i} 条</p></div></div>`).join('');
+  const dom = new JSDOM(`<!doctype html><html><body><main>${msgs}</main><form data-chatgpt-composer><div contenteditable="true" id="prompt-textarea"></div></form></body></html>`,
+    { url: CONV_URL, runScripts: 'outside-only' });
+  const w = dom.window;
+  w.eval(readFileSync(join(ROOT, 'src/frontend/lib/dom-observer.js'), 'utf8'));
+  const events = [];
+  const obs = w.ChatGPTBridgeObserver.createChatGPTObserver({ document: w.document, window: w, emit: (e) => events.push(e), debounceMs: 10, updateThrottleMs: 0, pollMs: 50 });
+  obs.start();
+  assert.equal(events.filter((e) => e.event_type === 'message.added').length, 20);
+  const base = obs.stats.extractions;
+  assert.equal(base, 20);
+
+  // 空闲轮询：没有任何变化时不再提取正文
+  await sleep(200);
+  assert.ok(obs.stats.scans > 2);
+  assert.equal(obs.stats.extractions, base, '没变化的消息走缓存');
+
+  // 只改一条：只重新提取这一条
+  w.document.querySelector('[data-message-id="m-19"] p').append('（更新）');
+  await waitFor(() => events.some((e) => e.event_type === 'message.updated' && e.payload.text === '第 19 条（更新）'), { label: 'updated' });
+  assert.equal(obs.stats.extractions, base + 1);
+
+  // 输入框里打字：不触发扫描（轮询照常）
+  obs.stop();
+  const quiet = w.ChatGPTBridgeObserver.createChatGPTObserver({ document: w.document, window: w, emit: () => {}, debounceMs: 10, pollMs: 1e9, streamPollMs: 1e9 });
+  quiet.start();
+  const scans = quiet.stats.scans;
+  const ed = w.document.getElementById('prompt-textarea');
+  for (let i = 0; i < 10; i++) { ed.append('字'); await sleep(15); }
+  await sleep(50);
+  assert.equal(quiet.stats.scans, scans, '输入框变化不扫描');
+  w.document.querySelector('[data-message-id="m-0"] p').append('!');
+  await waitFor(() => quiet.stats.scans > scans, { label: '正文变化照常扫描' });
+
+  // 只改属性（图片地址）：富文本照常更新
+  const img = w.document.createElement('img');
+  img.setAttribute('src', 'https://files.example.com/a.png');
+  img.setAttribute('alt', '图');
+  w.document.querySelector('[data-message-id="m-1"] .markdown').append(img);
+  const seen = [];
+  quiet.stop();
+  const o3 = w.ChatGPTBridgeObserver.createChatGPTObserver({ document: w.document, window: w, emit: (e) => seen.push(e), debounceMs: 10, updateThrottleMs: 0, pollMs: 1e9, streamPollMs: 1e9 });
+  o3.start();
+  img.setAttribute('src', 'https://files.example.com/b.png');
+  await waitFor(() => seen.some((e) => e.event_type === 'message.updated' && /b\.png/.test(e.payload.html || '')), { label: 'img src update' });
+  o3.stop();
+  w.close();
+});
+
+test('发送的消息被页面换成新节点 / 同一 ID 渲染两份时，只上报一条（Muse 重复）', async () => {
+  const { bg, results } = offlineBackground();
+  const page = openChatGPTPage({
+    url: CONV_URL, tabId: 3, background: bg,
+    html: '<!doctype html><html><body><main id="t"><div data-message-author-role="assistant" data-message-id="a0">你好</div></main></body></html>'
+  });
+  await waitFor(() => results.some((x) => x.m.event.event_type === 'message.added'), { label: 'a0 added' });
+  const t = page.doc.getElementById('t');
+  // 乐观显示：临时气泡（没有 ID）
+  const tmp = page.doc.createElement('div');
+  tmp.setAttribute('data-message-author-role', 'user');
+  tmp.textContent = '帮我写首诗';
+  t.appendChild(tmp);
+  await waitFor(() => results.filter((x) => x.m.event.event_type === 'message.added').length === 2, { label: 'tmp added' });
+  // 服务器确认：临时气泡换成带正式 ID 的节点，并且同一 ID 渲染了两份
+  tmp.remove();
+  for (let i = 0; i < 2; i++) {
+    const real = page.doc.createElement('div');
+    real.setAttribute('data-message-author-role', 'user');
+    real.setAttribute('data-message-id', 'u1');
+    real.textContent = '帮我写首诗';
+    t.appendChild(real);
+  }
+  await sleep(1500);
+  const users = results.filter((x) => x.m.event.event_type === 'message.added' && x.m.event.payload.role === 'user');
+  assert.equal(users.length, 1, '用户消息只上报一次');
+  // 再发一条不同的消息照常上报
+  const u2 = page.doc.createElement('div');
+  u2.setAttribute('data-message-author-role', 'user');
+  u2.setAttribute('data-message-id', 'u2');
+  u2.textContent = '再来一首';
+  t.appendChild(u2);
+  await waitFor(() => results.filter((x) => x.m.event.event_type === 'message.added' && x.m.event.payload.role === 'user').length === 2, { label: 'u2' });
+  assert.ok(results.every((x) => x.r.ok));
+  page.close();
+});

@@ -18,12 +18,12 @@
 
   /*
    * DOM 配置（DomConfig v1）。与后端 POST /api/dom-config/analyze 返回的 config 同一格式，
-   * 插件把它存在 chrome.storage.local.domConfig，内容脚本加载后调用 observer.setConfig() 立即生效。
+   * 插件从网站列表（chrome.storage.local.siteList）按域名选出，列表变化时内容脚本调用 observer.setConfig() 立即生效。
    * 只包含选择器/属性名/正则字符串，不含任何可执行代码。
    */
   var DEFAULT_CONFIG = {
     config_version: 1,
-    source: 'builtin',
+    source: 'default:chatgpt',
     site: 'chatgpt',
     // 会话 ID：先按 url_pattern（第 1 个捕获组）从 URL 取；取不到再按 dom 从页面元素取；再取不到用 fallback_id
     conversation: {
@@ -70,11 +70,16 @@
      * 正则不区分大小写。注意不要匹配页脚“ChatGPT 可能会出错”这类常驻文字。
      */
     status: {
-      limit_patterns: [
-        "you(?:'|\u2019)ve (?:hit|reached) (?:your|the|our) [^.]{0,60}limit",
-        "(?:limit|cap) (?:resets|will reset)",
-        "\u5df2\u8fbe\u5230[^\u3002]{0,30}(?:\u4e0a\u9650|\u9650\u989d|\u9650\u5236)",
-        "(?:\u4e0a\u9650|\u9650\u989d)[^\u3002]{0,20}\u91cd\u7f6e"
+      // 会话在源站被删除 / 不存在（只在页面上没有任何消息时才判定）
+      deleted_patterns: [
+        'unable to load conversation',
+        'conversation not found',
+        'this conversation (?:has been|was) deleted',
+        '(?:conversation|chat) (?:does not|doesn(?:\'|\u2019)t) exist',
+        '\u627e\u4e0d\u5230(?:\u8be5|\u8fd9\u4e2a)?(?:\u5bf9\u8bdd|\u4f1a\u8bdd|\u804a\u5929)',
+        '\u65e0\u6cd5\u52a0\u8f7d(?:\u8be5|\u8fd9\u4e2a)?(?:\u5bf9\u8bdd|\u4f1a\u8bdd)',
+        '(?:\u5bf9\u8bdd|\u4f1a\u8bdd)(?:\u5df2\u88ab|\u5df2)?\u5220\u9664',
+        '(?:\u5bf9\u8bdd|\u4f1a\u8bdd)\u4e0d\u5b58\u5728'
       ],
       error_patterns: [
         'something went wrong',
@@ -98,13 +103,19 @@
       send_button: '[data-testid="send-button"], form[data-chatgpt-composer] button[aria-label*="发送"], button[aria-label*="Send"]',
       regenerate_button: 'button[aria-label="重新生成回复"], button[aria-label*="重新生成"], button[aria-label*="Regenerate"], [data-testid="regenerate-turn-action-button"]',
       regenerate_menu_item: '[role="menuitem"]',
-      regenerate_menu_text: '重试|再试一次|重新生成|Try again|Regenerate|Retry'
+      regenerate_menu_text: '重试|再试一次|重新生成|Try again|Regenerate|Retry',
+      // 输入框的上传按钮（看板照着它的图标 / 文字画按钮）和页面自己的文件选择框（看板选的文件交给它上传）
+      attach_button: '[data-testid="composer-plus-btn"], button[aria-label*="添加文件"], button[aria-label*="附件"], button[aria-label*="上传"], ' +
+        'button[aria-label*="Attach"], button[aria-label*="attach"], button[aria-label*="Upload"], button[aria-label*="upload"], ' +
+        'button[aria-label*="Add files"], button[aria-label*="Add photos"], [data-testid*="attach"], [data-testid*="upload"]',
+      file_input: 'input[type="file"]'
     }
   };
 
   /*
-   * 其他站点的内置适配（2026-10 按真实页面编写）。字段与 DomConfig 相同；
-   * 弹窗“分析当前页面”得到的配置会叠加在对应站点的内置适配之上。
+   * 其他站点的默认适配（2026-10 按真实页面编写）。字段与 DomConfig 相同。
+   * 只作为“默认种子”：后端第一次启动时写进网站列表，之后和看板添加的网站一样可编辑 / 停用 / 删除；
+   * 插件只在还没拿到网站列表（例如第一次离线启动）时才直接用这里的种子。
    */
   var SITE_PROFILES = {
     chatgpt: DEFAULT_CONFIG,
@@ -112,7 +123,7 @@
     // duck.ai：URL 里没有会话 ID，从助手消息元素的 id（<会话uuid>-assistant-message-<n>-<m>）取
     duckai: {
       config_version: 1,
-      source: 'builtin:duckai',
+      source: 'default:duckai',
       site: 'duckai',
       conversation: {
         url_pattern: null,
@@ -157,7 +168,7 @@
     // 文件卡片看 data-align（end=用户），助手正文是 Markdown（含 <p>）、卡片（data-artifact-card），其余为用户
     hark: {
       config_version: 1,
-      source: 'builtin:hark',
+      source: 'default:hark',
       site: 'hark',
       conversation: {
         url_pattern: '/projects/([A-Za-z0-9_-]{4,100})',
@@ -185,7 +196,7 @@
         exclude: '[aria-hidden="true"], time, [data-reply-parent], [data-testid="card-disclosure"], button[aria-label="折叠"]'
       },
       generating: { selector: '', activity_idle_ms: 2000 },
-      status: { limit_patterns: [], error_patterns: [], model_selector: '', exclude_messages: true, check_interval_ms: 2000 },
+      status: { error_patterns: [], model_selector: '', exclude_messages: true, check_interval_ms: 2000 },
       actions: {
         composer: 'textarea[data-testid="chat-input"]',
         send_button: 'button[data-testid="send-button"]',
@@ -194,21 +205,58 @@
     }
   };
 
-  /** 按域名选择站点适配 */
-  function siteForHost(host) {
-    host = String(host || '').toLowerCase();
-    if (/(^|\.)duck\.ai$/.test(host)) return 'duckai';
-    if (/(^|\.)hark\.com$/.test(host)) return 'hark';
-    return 'chatgpt';
+  /*
+   * 默认网站种子（后端网站列表的初始内容；“恢复默认”也用它）。
+   * host：主域名；hosts：同一网站的其他域名（都按“本域名或其子域名”匹配，www. 忽略）。
+   */
+  var SEED_SITES = [
+    { key: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', host: 'chatgpt.com', hosts: ['chatgpt.com', 'chat.openai.com'], enabled: true, config: DEFAULT_CONFIG },
+    { key: 'duckai', name: 'Duck.ai', url: 'https://duck.ai/', host: 'duck.ai', hosts: ['duck.ai'], enabled: true, config: SITE_PROFILES.duckai },
+    { key: 'hark', name: 'Hark', url: 'https://www.hark.com/chat', host: 'www.hark.com', hosts: ['hark.com'], enabled: true, config: SITE_PROFILES.hark }
+  ];
+
+  function normHost(h) { return String(h || '').toLowerCase().replace(/\.$/, '').replace(/^www\./, ''); }
+
+  /** 网站的全部域名（去掉 www.、去重） */
+  function siteHosts(site) {
+    var out = [];
+    var list = [site && site.host].concat(site && Array.isArray(site.hosts) ? site.hosts : []);
+    for (var i = 0; i < list.length; i++) {
+      var h = normHost(list[i]);
+      if (h && /^[a-z0-9.-]+$/.test(h) && out.indexOf(h) < 0) out.push(h);
+    }
+    return out;
   }
 
-  // 兼容旧导出
-  var SELECTORS = {
-    message: DEFAULT_CONFIG.message.selector,
-    userText: DEFAULT_CONFIG.text.user,
-    assistantText: DEFAULT_CONFIG.text.assistant,
-    generating: DEFAULT_CONFIG.generating.selector
-  };
+  /**
+   * 按域名在网站列表里找网站（本域名或其子域名，匹配最长的那个）；list 省略 = 默认种子。
+   * 返回网站条目（含 key / config / enabled）或 null。
+   */
+  function findSite(host, list) {
+    host = normHost(host);
+    if (!host) return null;
+    var sites = Array.isArray(list) ? list : SEED_SITES;
+    var best = null, bestLen = -1;
+    for (var i = 0; i < sites.length; i++) {
+      var hs = siteHosts(sites[i]);
+      for (var j = 0; j < hs.length; j++) {
+        var h = hs[j];
+        if ((host === h || host.slice(-(h.length + 1)) === '.' + h) && h.length > bestLen) { best = sites[i]; bestLen = h.length; }
+      }
+    }
+    return best;
+  }
+
+  function seedByKey(key) {
+    for (var i = 0; i < SEED_SITES.length; i++) if (SEED_SITES[i].key === key) return SEED_SITES[i];
+    return null;
+  }
+
+  /** 按域名选择站点标识（list 省略 = 默认种子）；找不到返回 null */
+  function siteForHost(host, list) {
+    var s = findSite(host, list);
+    return s ? s.key : null;
+  }
 
   function str(v, max) { return typeof v === 'string' && v.length <= (max || 2000) ? v : null; }
 
@@ -288,7 +336,7 @@
     }
     var actions = {};
     var ca = cfg.actions && typeof cfg.actions === 'object' ? cfg.actions : {};
-    ['composer', 'send_button', 'regenerate_button', 'regenerate_menu_item', 'regenerate_menu_text'].forEach(function (k) {
+    ['composer', 'send_button', 'regenerate_button', 'regenerate_menu_item', 'regenerate_menu_text', 'attach_button', 'file_input'].forEach(function (k) {
       var v = typeof ca[k] === 'string' ? ca[k] : (typeof da[k] === 'string' ? da[k] : D.actions[k]);
       actions[k] = String(v).slice(0, 2000);
     });
@@ -319,11 +367,14 @@
       idInner: idInner,
       userText: pickSel(t.user, 'user' in dt ? dt.user : D.text.user, 'text.user', true),
       assistantText: pickSel(t.assistant, 'assistant' in dt ? dt.assistant : D.text.assistant, 'text.assistant', true),
-      textExclude: pickSel(t.exclude, 'exclude' in dt ? dt.exclude : D.text.exclude, 'text.exclude', true),
+      // 配置里的 exclude 之外总是排除：读屏 / 搜索用的替身文字、sr-only 标签、复制排除区、代码块工具栏
+      textExclude: [pickSel(t.exclude, 'exclude' in dt ? dt.exclude : D.text.exclude, 'text.exclude', true), BASE_EXCLUDE].filter(Boolean).join(', '),
+      // 同一组（如同一轮回答拆成 文字 + 文件卡片 + 文字 多个节点）合并成一条消息：组 ID 属性
+      groupAttr: str(m.group_attr === undefined ? dm.group_attr : m.group_attr, 200) || '',
       generating: pickSel(g.selector, 'selector' in dg ? dg.selector : D.generating.selector, 'generating.selector', true),
       activityIdleMs: isFinite(idle) && idle >= 0 && idle <= 60000 ? idle
         : (dg.activity_idle_ms != null ? dg.activity_idle_ms : D.generating.activity_idle_ms),
-      limitPatterns: patterns(st.limit_patterns, Array.isArray(ds.limit_patterns) ? ds.limit_patterns : D.status.limit_patterns, 'status.limit'),
+      deletedPatterns: patterns(st.deleted_patterns, Array.isArray(ds.deleted_patterns) ? ds.deleted_patterns : D.status.deleted_patterns, 'status.deleted'),
       errorPatterns: patterns(st.error_patterns, Array.isArray(ds.error_patterns) ? ds.error_patterns : D.status.error_patterns, 'status.error'),
       modelSelector: pickSel(st.model_selector, 'model_selector' in ds ? ds.model_selector : D.status.model_selector, 'status.model_selector', true),
       statusExcludeMessages: typeof st.exclude_messages === 'boolean' ? st.exclude_messages : !!ds.exclude_messages,
@@ -429,6 +480,17 @@
     return text.replace(/\u00a0/g, ' ').trim();
   }
 
+  /** 代码块是否“每行一个元素”：没有换行符，或子元素带 line / block 类（空行里可能只有一个换行符） */
+  function isLineCode(code) {
+    if (code.children.length < 2) return false;
+    if ((code.textContent || '').indexOf('\n') < 0) return true;
+    var c0 = code.firstElementChild, c1 = c0 && c0.nextElementSibling;
+    return /(?:^|\s)(?:line|block)(?:\s|$)/.test(String(c0.className || '')) && !!c1 && /(?:^|\s)(?:line|block)(?:\s|$)/.test(String(c1.className || ''));
+  }
+
+  var BASE_EXCLUDE = '[data-message-accessibility-surrogate], [data-message-search-surrogate], .sr-only, .visually-hidden, ' +
+    '[data-copy-exclude="true"], [data-streamdown="code-block-header"], [data-streamdown="code-block-actions"]';
+
   var BLOCK_TAGS = {
     P: 1, DIV: 1, LI: 1, UL: 1, OL: 1, PRE: 1, H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, TABLE: 1, TR: 1,
     BLOCKQUOTE: 1, SECTION: 1, ARTICLE: 1, HR: 1, FIGURE: 1, HEADER: 1, FOOTER: 1, DL: 1, DT: 1, DD: 1
@@ -446,14 +508,27 @@
       if (SKIP_TEXT_TAGS[tag]) return;
       if (node !== root && node.matches && node.matches(exclude)) return;
       if (tag === 'BR') { out.push('\n'); return; }
+      // 图片 → ![alt](url)；下载 / 文件链接 → [文字](url "download")：看板按原样式显示
+      if (tag === 'IMG') {
+        var src = node.currentSrc || node.src || node.getAttribute('src') || '';
+        if (/^https?:\/\//i.test(src) && !(node.width && node.width < 32 && node.height && node.height < 32)) {
+          out.push('\n\n![' + String(node.getAttribute('alt') || '').replace(/[\[\]\n]/g, ' ').trim() + '](' + src.replace(/[\s)]/g, encodeURIComponent) + ')\n\n');
+        }
+        return;
+      }
+      if (tag === 'A' && isDownloadLink(node)) {
+        var label = (node.textContent || '').replace(/\s+/g, ' ').replace(/[\[\]]/g, '').trim() || '下载文件';
+        out.push('[' + label + '](' + node.href.replace(/[\s)]/g, encodeURIComponent) + ' "download")');
+        return;
+      }
       var block = BLOCK_TAGS[tag];
       if (block) out.push('\n');
       else if (tag === 'TD' || tag === 'TH') out.push('\t');
-      // 代码高亮器（duck.ai 的 shiki）把每行放进一个 <span>、行间没有换行符：按行补换行
-      var lineSpans = tag === 'CODE' && (node.textContent || '').indexOf('\n') < 0 && node.children.length > 1;
+      // 代码高亮器（shiki / streamdown）把每行放进一个 <span>、行间没有换行符：按行补换行
+      var lineSpans = tag === 'CODE' && isLineCode(node);
       for (var ch = node.firstChild; ch; ch = ch.nextSibling) {
         walk(ch);
-        if (lineSpans && ch.nodeType === 1) out.push('\n');
+        if (lineSpans && ch.nodeType === 1 && !/\n$/.test(ch.textContent || '')) out.push('\n');
       }
       if (block) out.push('\n');
     })(root);
@@ -464,26 +539,314 @@
       .replace(/^\s+|\s+$/g, '');
   }
 
-  // 只取正文，避免把“复制/编辑”等按钮区域算进去；找不到正文节点时退回整个消息节点
-  function getNodeText(el, role, c) {
-    var sel = role === 'user' ? c.userText : role === 'assistant' ? c.assistantText : null;
-    var body = sel && el.querySelector ? el.querySelector(sel) : null;
-    return extractText(body || el, c.textExclude);
+  var FILE_EXT_RE = /\.(pdf|zip|rar|7z|tar|gz|csv|xlsx?|docx?|pptx?|txt|json|md|png|jpe?g|gif|webp|svg|mp3|mp4|wav|mov|py|js|ts|html?)(?:[?#]|$)/i;
+  /** 纯文本里的下载链接：只认 http(s) 网址（规则同 isFileLink） */
+  function isDownloadLink(a) {
+    var href = a.href || '';
+    return /^https?:\/\//i.test(href) && isFileLink(a, href);
   }
 
-  /** 来源：chatgpt.com / chat.openai.com → chatgpt；其他站点取主域名 */
-  function sourceFromUrl(href) {
+  /*
+   * 富文本：把消息正文转成净化后的 HTML（与 text 同一个节点、同样的 exclude 规则）。
+   * 逐个节点重建字符串，不复制页面上的任何属性 / 事件，只输出白名单：
+   *   p br h1-h6 ul ol li blockquote pre code(language-*) table thead tbody tfoot tr th td
+   *   strong em b i del s sup sub a[href http(s)/data/blob] img[src http(s)/data:image] hr
+   * span / div 等其他元素只保留内容（div 只有行内内容时变成 <p>）；script / style / iframe / form / button / svg 等整个丢掉。
+   * 文件：带 download 或文件扩展名的链接输出 <a data-file="文件名">；没有网址的文件卡片（按钮 / 元素文字就是文件名）输出 <span data-file="文件名">。
+   */
+  var MAX_HTML = 200000;
+  var HTML_KEEP = {
+    P: 'p', BR: 'br', H1: 'h1', H2: 'h2', H3: 'h3', H4: 'h4', H5: 'h5', H6: 'h6', UL: 'ul', OL: 'ol', LI: 'li',
+    BLOCKQUOTE: 'blockquote', TABLE: 'table', THEAD: 'thead', TBODY: 'tbody', TFOOT: 'tfoot', TR: 'tr', TH: 'th', TD: 'td',
+    STRONG: 'strong', EM: 'em', B: 'b', I: 'i', DEL: 'del', S: 's', SUP: 'sup', SUB: 'sub', HR: 'hr', CODE: 'code'
+  };
+  var HTML_VOID = { br: 1, hr: 1 };
+  var HTML_DROP = {
+    SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1, SVG: 1, svg: 1, IFRAME: 1, FRAME: 1, OBJECT: 1, EMBED: 1, FORM: 1,
+    INPUT: 1, TEXTAREA: 1, SELECT: 1, OPTION: 1, CANVAS: 1, VIDEO: 1, AUDIO: 1, SOURCE: 1, LINK: 1, META: 1, MATH: 1, math: 1, DIALOG: 1
+  };
+  var FILE_NAME_RE = /^[^\s\\/:*?"<>|]{1,120}\.[A-Za-z0-9]{1,8}$/;
+  var BLOCK_CHILD_SEL = 'p, div, ul, ol, li, pre, table, blockquote, h1, h2, h3, h4, h5, h6, hr, section, article, figure';
+
+  function escHtml(v) {
+    return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function safeHref(u) {
+    u = String(u || '').trim();
+    return /^(https?:|blob:)/i.test(u) || /^data:/i.test(u) ? u.slice(0, 8000) : null;
+  }
+  function safeImgSrc(u) {
+    u = String(u || '').trim();
+    if (/^https?:\/\//i.test(u)) return u.slice(0, 8000);
+    if (/^data:image\/(png|jpe?g|gif|webp|bmp|avif);base64,[A-Za-z0-9+/=\s]+$/i.test(u)) return u.replace(/\s+/g, '');
+    return null;
+  }
+  function langOf(code, root) {
+    var cls = String(code && code.getAttribute && code.getAttribute('class') || '');
+    var m = /(?:^|\s)(?:language|lang)-([A-Za-z0-9+#._-]{1,30})/.exec(cls);
+    if (m) return m[1].toLowerCase();
+    var holder = code && code.closest ? code.closest('[data-language]') : null;
+    if (holder && root && root.contains(holder)) {
+      var dl = String(holder.getAttribute('data-language') || '').trim();
+      if (/^[A-Za-z0-9+#._-]{1,30}$/.test(dl)) return dl.toLowerCase();
+    }
+    return '';
+  }
+  function fileNameOfUrl(href) {
+    try {
+      var seg = decodeURIComponent(new URL(href).pathname.split('/').pop() || '');
+      return FILE_NAME_RE.test(seg) ? seg : '';
+    } catch (_) { return ''; }
+  }
+  function isFileLink(a, href) {
+    if (a.hasAttribute('download')) return true;
+    if (/^(data|blob):/i.test(href)) return true;
+    var path = '';
+    try { path = new URL(href).pathname; } catch (_) { return false; }
+    return FILE_EXT_RE.test(path) || /\/(download|files?)\//i.test(path);
+  }
+
+  /** 代码块文字：跳过 exclude（代码块工具栏），高亮器“每行一个 span、没有换行符”时按行补换行 */
+  function codeText(node, exclude, root) {
+    var out = [];
+    (function walk(n) {
+      if (n.nodeType === 3) { out.push(n.nodeValue); return; }
+      if (n.nodeType !== 1 || HTML_DROP[n.tagName] || SKIP_TEXT_TAGS[n.tagName]) return;
+      if (n !== root && exclude && n.matches && n.matches(exclude)) return;
+      if (n.tagName === 'BR') { out.push('\n'); return; }
+      var lineSpans = n.tagName === 'CODE' && isLineCode(n);
+      for (var ch = n.firstChild; ch; ch = ch.nextSibling) {
+        walk(ch);
+        if (lineSpans && ch.nodeType === 1 && !/\n$/.test(ch.textContent || '')) out.push('\n');
+      }
+    })(node);
+    return out.join('').replace(/\u00a0/g, ' ').replace(/\n+$/, '');
+  }
+
+  function extractHtml(root, exclude) {
+    var out = [];
+    function skip(n) { return n !== root && exclude && n.matches && n.matches(exclude); }
+    function hasBlockChild(n) {
+      for (var ch = n.firstElementChild; ch; ch = ch.nextElementSibling) {
+        if (HTML_DROP[ch.tagName] || skip(ch)) continue;
+        if (ch.matches && ch.matches(BLOCK_CHILD_SEL)) return true;
+        if (hasBlockChild(ch)) return true;
+      }
+      return false;
+    }
+    function children(n) { for (var ch = n.firstChild; ch; ch = ch.nextSibling) walk(ch); }
+    function walk(n) {
+      if (n.nodeType === 3) {
+        var t = n.nodeValue.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ');
+        if (t) out.push(escHtml(t));
+        return;
+      }
+      if (n.nodeType !== 1) return;
+      var tag = n.tagName;
+      if (HTML_DROP[tag] || SKIP_TEXT_TAGS[tag] || skip(n)) return;
+      // 代码块：整块取文字，带语言
+      if (tag === 'PRE' || (tag === 'CODE' && n.parentElement && n.parentElement.tagName === 'PRE')) {
+        var code = tag === 'PRE' ? (n.querySelector('code') || n) : n;
+        var lang = langOf(code, root);
+        out.push('<pre><code' + (lang ? ' class="language-' + escHtml(lang) + '"' : '') + '>' + escHtml(codeText(n, exclude, n)) + '</code></pre>');
+        return;
+      }
+      if (tag === 'IMG') {
+        var src = safeImgSrc(n.currentSrc || n.getAttribute('src') || n.src || '');
+        if (src && !(n.width && n.width < 32 && n.height && n.height < 32)) {
+          out.push('<img src="' + escHtml(src) + '" alt="' + escHtml(String(n.getAttribute('alt') || '').slice(0, 300)) + '">');
+        }
+        return;
+      }
+      if (tag === 'A') {
+        var href = safeHref(n.getAttribute('href') ? (n.href || n.getAttribute('href')) : '');
+        if (!href) { children(n); return; }
+        var label = (n.textContent || '').replace(/\s+/g, ' ').trim();
+        if (isFileLink(n, href)) {
+          var dl = String(n.getAttribute('download') || '').trim();
+          var name = (FILE_NAME_RE.test(dl) ? dl : '') || fileNameOfUrl(href) || (FILE_NAME_RE.test(label) ? label : '') || label.slice(0, 120) || '下载文件';
+          out.push('<a href="' + escHtml(href) + '" data-file="' + escHtml(name) + '"' + (n.hasAttribute('download') ? ' download="' + escHtml(FILE_NAME_RE.test(dl) ? dl : name) + '"' : '') + '>');
+          children(n);
+          out.push('</a>');
+          return;
+        }
+        out.push('<a href="' + escHtml(href) + '">');
+        children(n);
+        out.push('</a>');
+        return;
+      }
+      // 没有网址的文件卡片：按钮（或 role=button）的文字就是文件名
+      if (tag === 'BUTTON' || (n.getAttribute && n.getAttribute('role') === 'button')) {
+        var bt = (n.textContent || '').replace(/\s+/g, ' ').trim();
+        if (FILE_NAME_RE.test(bt)) out.push('<span data-file="' + escHtml(bt) + '">' + escHtml(bt) + '</span>');
+        return;
+      }
+      var keep = HTML_KEEP[tag];
+      if (keep) {
+        if (HTML_VOID[keep]) { out.push('<' + keep + '>'); return; }
+        out.push('<' + keep + '>');
+        children(n);
+        out.push('</' + keep + '>');
+        return;
+      }
+      // div 等块：只有行内内容时变成段落，否则只保留内容
+      if (BLOCK_TAGS[tag] && n !== root && !hasBlockChild(n) && (n.textContent || '').trim()) {
+        out.push('<p>');
+        children(n);
+        out.push('</p>');
+        return;
+      }
+      children(n);
+    }
+    walk(root);
+    return out.join('').replace(/<p>\s*<\/p>/g, '').trim();
+  }
+
+  /** 估算 JSON 编码后的 UTF-8 字节数（引号 / 反斜杠按转义后 2 字节算） */
+  function jsonBytes(s) {
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c === 34 || c === 92) n += 2;
+      else if (c < 0x80) n += 1;
+      else if (c < 0x800) n += 2;
+      else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }
+      else n += 3;
+    }
+    return n;
+  }
+  // text + html 合计不超过这个字节数（整条 WebSocket 消息上限 256KB，留出信封和转义余量）
+  var MAX_RICH_BYTES = 200 * 1024;
+
+  /** 消息的富文本：只有 p / br 时与纯文本等价，不发送；超过上限时不发送（看板退回 text） */
+  function getNodeHtml(el, role, c, text) {
+    var body = bodyOf(el, role, c);
+    var html;
+    try { html = extractHtml(body || el, c.textExclude); } catch (_) { return null; }
+    if (!html || !/<(?!\/?(?:p|br)>)[a-z]/i.test(html)) return null;
+    if (html.length > MAX_HTML || jsonBytes(html) + jsonBytes(text || '') > MAX_RICH_BYTES) return null;
+    return html;
+  }
+
+  // 只取正文，避免把“复制/编辑”等按钮区域算进去；找不到正文节点时退回整个消息节点
+  function getNodeText(el, role, c) {
+    return extractText(bodyOf(el, role, c) || el, c.textExclude);
+  }
+
+  /** 正文节点：取第一个不在排除区（替身文字、sr-only 等）里的匹配 */
+  function bodyOf(el, role, c) {
+    var sel = role === 'user' ? c.userText : role === 'assistant' ? c.assistantText : null;
+    if (!sel || !el.querySelectorAll) return null;
+    var list = el.querySelectorAll(sel);
+    for (var i = 0; i < list.length; i++) {
+      var b = list[i];
+      if (!c.textExclude) return b;
+      var bad = false;
+      for (var p = b; p && p !== el; p = p.parentElement) if (p.matches && p.matches(c.textExclude)) { bad = true; break; }
+      if (!bad) return b;
+    }
+    return null;
+  }
+
+  /**
+   * 虚拟列表：滚出视口的消息只剩一个读屏 / 搜索用的替身节点（如 Muse 的
+   * <span data-message-accessibility-surrogate class="sr-only">助手消息：……</span>）。正文为空时用它的文字（去掉“助手消息：”标签），
+   * 标记为 partial：已经上报过完整内容的消息不会被替身覆盖。
+   */
+  var SURROGATE_SEL = '[data-message-accessibility-surrogate], [data-message-search-surrogate]';
+  function surrogateText(el) {
+    var sg = el.querySelector && el.querySelector(SURROGATE_SEL);
+    if (!sg) return '';
+    return String(sg.textContent || '').replace(/\u00a0/g, ' ').replace(/^\s*[^\s:：]{1,12}[：:]\s*/, '').replace(/^\s+|\s+$/g, '');
+  }
+
+  /** 来源：网站列表（省略 = 默认种子）里匹配的网站标识；都不匹配时取主域名 */
+  function sourceFromUrl(href, list) {
     var host = '';
     try { host = new URL(href).hostname; } catch (_) { return 'unknown'; }
-    if (/(^|\.)chatgpt\.com$/.test(host) || /(^|\.)chat\.openai\.com$/.test(host)) return 'chatgpt';
-    if (/(^|\.)duck\.ai$/.test(host)) return 'duckai';
-    if (/(^|\.)hark\.com$/.test(host)) return 'hark';
+    var key = siteForHost(host, list);
+    if (key) return key;
     var parts = host.split('.');
     var name = (parts.length >= 2 ? parts[parts.length - 2] : host).toLowerCase().replace(/[^a-z0-9_-]/g, '');
     return name.slice(0, 32) || 'unknown';
   }
 
   var SKIP_STATUS_TAGS = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEXTAREA: 1, INPUT: 1, TEMPLATE: 1 };
+
+  // ---------------------------------------------------------------- 输入框上传按钮（给看板照着画）
+  var SVG_SHAPES = { path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, ellipse: 1 };
+  var SHAPE_ATTRS = ['d', 'cx', 'cy', 'r', 'rx', 'ry', 'x', 'y', 'width', 'height', 'x1', 'y1', 'x2', 'y2', 'points',
+    'fill', 'stroke', 'stroke-width', 'fill-rule', 'clip-rule', 'transform', 'opacity'];
+  var SAFE_SVG_VALUE = /^[0-9A-Za-z.,#%()\s+-]*$/;
+  function svgVal(v) {
+    v = v == null ? '' : String(v).trim();
+    if (!v || v.length > 4000 || !SAFE_SVG_VALUE.test(v) || /url\s*\(|javascript|expression/i.test(v)) return null;
+    return v;
+  }
+  /** 只取图形数据（标签名 + 白名单属性），看板自己拼 SVG；颜色是 currentColor 等关键字或纯色 */
+  function iconOf(svg, depth) {
+    if (!svg || (depth || 0) > 2) return null;
+    var shapes = [];
+    var nodes = svg.querySelectorAll('path, circle, rect, line, polyline, polygon, ellipse');
+    for (var i = 0; i < nodes.length && shapes.length < 30; i++) {
+      var tag = String(nodes[i].tagName).toLowerCase();
+      if (!SVG_SHAPES[tag]) continue;
+      var attrs = {};
+      var n = 0;
+      SHAPE_ATTRS.forEach(function (k) {
+        var v = svgVal(nodes[i].getAttribute(k));
+        if (v != null && n < 16) { attrs[k] = v; n++; }
+      });
+      shapes.push({ tag: tag, attrs: attrs });
+    }
+    // <use href="#sprite"> 一类图标：跟着引用找真正的图形
+    if (!shapes.length) {
+      var use = svg.querySelector('use');
+      var ref = use && (use.getAttribute('href') || use.getAttribute('xlink:href'));
+      var target = ref && ref.charAt(0) === '#' ? svg.ownerDocument.getElementById(ref.slice(1)) : null;
+      if (target && target !== svg && !target.contains(svg)) return iconOf(target, (depth || 0) + 1);   // <symbol> / <svg> 都有 viewBox 和图形子节点
+      return null;
+    }
+    var icon = { shapes: shapes };
+    var vb = svg.getAttribute('viewBox');
+    if (vb && /^[0-9.\s-]+$/.test(vb) && vb.length <= 64) icon.view_box = vb.trim();
+    [['fill', 'fill'], ['stroke', 'stroke'], ['stroke-width', 'stroke_width'], ['stroke-linecap', 'stroke_linecap'], ['stroke-linejoin', 'stroke_linejoin']].forEach(function (p) {
+      var v = svgVal(svg.getAttribute(p[0]));
+      if (v != null) icon[p[1]] = v;
+    });
+    return icon;
+  }
+  /** 读取源站输入框的上传按钮：文字、图标，以及页面文件选择框的 accept / multiple；页面没有上传功能时返回 null */
+  function detectComposerCaps(doc, actions) {
+    if (!actions) return null;
+    var btn = null, input = null;
+    try {
+      var composer = actions.composer ? doc.querySelectorAll(actions.composer) : [];
+      var comp = composer.length ? composer[composer.length - 1] : null;
+      var form = comp && comp.closest ? comp.closest('form') : null;
+      var pick = function (sel) {
+        if (!sel) return null;
+        var list = (form || doc).querySelectorAll(sel);
+        if (!list.length && form) list = doc.querySelectorAll(sel);
+        return list.length ? list[list.length - 1] : null;
+      };
+      btn = pick(actions.attach_button);
+      input = pick(actions.file_input);
+    } catch (_) { return null; }
+    if (!btn && !input) return null;
+    var attach = {};
+    var label = btn ? (btn.getAttribute('aria-label') || btn.getAttribute('title') || rawText(btn)) : '';
+    label = String(label || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+    if (label) attach.label = label;
+    if (input) {
+      var acc = String(input.getAttribute('accept') || '').trim();
+      if (acc) attach.accept = acc.slice(0, 500);
+      attach.multiple = input.hasAttribute('multiple');
+    }
+    var icon = btn ? iconOf(btn.querySelector('svg')) : null;
+    if (icon) attach.icon = icon;
+    return { attach: attach };
+  }
 
   /**
    * 在消息正文以外的文字中检测“已到限额 / 出错”，并读取当前模型。
@@ -500,7 +863,20 @@
     }
     if (!body || !doc.createTreeWalker) return result;
     var exclude = [c.userText, c.assistantText].filter(Boolean).join(', ');
-    var walker = doc.createTreeWalker(body, 4 /* NodeFilter.SHOW_TEXT */);
+    // 页面上一条消息都没有时，才检查“会话已删除 / 不存在”
+    var noMessages = !!c.messageSelector && !doc.querySelector(c.messageSelector);
+    // 整棵跳过消息节点 / 正文 / 输入框（长对话里正文很大，逐个文字节点检查会拖慢页面）
+    var skipSel = [exclude, c.statusExcludeMessages ? c.messageSelector : '', '[contenteditable="true"], [contenteditable=""]'].filter(Boolean).join(', ');
+    var walker = doc.createTreeWalker(body, 1 | 4 /* SHOW_ELEMENT | SHOW_TEXT */, {
+      acceptNode: function (n) {
+        if (n.nodeType === 1) {
+          if (SKIP_STATUS_TAGS[n.tagName]) return 2;   // FILTER_REJECT：跳过整个子树
+          try { if (skipSel && n.matches(skipSel)) return 2; } catch (_) { /* 选择器无效 */ }
+          return 3;                                    // FILTER_SKIP：不返回元素本身，继续看子节点
+        }
+        return 1;
+      }
+    });
     var errorHit = null;
     var node;
     var visited = 0;
@@ -511,20 +887,26 @@
       var parent = node.parentElement;
       if (!parent || SKIP_STATUS_TAGS[parent.tagName]) continue;
       var i;
-      var limitMatch = false;
-      for (i = 0; i < c.limitPatterns.length; i++) if (c.limitPatterns[i].test(t)) { limitMatch = true; break; }
+      if (noMessages && c.deletedPatterns && c.deletedPatterns.length) {
+        for (i = 0; i < c.deletedPatterns.length; i++) {
+          if (c.deletedPatterns[i].test(t) && !parent.closest('[contenteditable="true"], [contenteditable=""]')) {
+            result.status = 'deleted';
+            result.detail = t.trim().slice(0, 300);
+            return result;
+          }
+        }
+      }
       var errorMatch = false;
-      if (!limitMatch && !errorHit) {
+      if (!errorHit) {
         for (i = 0; i < c.errorPatterns.length; i++) if (c.errorPatterns[i].test(t)) { errorMatch = true; break; }
       }
-      if (!limitMatch && !errorMatch) continue;
+      if (!errorMatch) continue;
       // 过滤：对话正文、可编辑区域（输入框草稿）
       if (exclude && parent.closest(exclude)) continue;
       if (c.statusExcludeMessages && parent.closest(c.messageSelector)) continue;
       if (parent.closest('[contenteditable="true"], [contenteditable=""]')) continue;
       var block = parent.closest('p, div, section, li, [role="alert"], [role="status"]') || parent;
       var detail = rawText(block).replace(/\s+/g, ' ').slice(0, 300) || t.trim().slice(0, 300);
-      if (limitMatch) { result.status = 'limit_reached'; result.detail = detail; return result; }
       errorHit = detail;
     }
     if (errorHit) { result.status = 'error'; result.detail = errorHit; }
@@ -549,9 +931,13 @@
     var streamPollMs = options.streamPollMs == null ? DEFAULT_STREAM_POLL_MS : options.streamPollMs;
     var tickMs = Math.max(10, Math.min(pollMs, streamPollMs));
     var idleTicks = 0;
-    var site = options.site || siteForHost(win.location && win.location.hostname);
-    var base = SITE_PROFILES[site] || DEFAULT_CONFIG;
+    // 站点配置：options.baseConfig（插件从网站列表里按域名选出的配置）→ 默认种子（按 options.site 或域名）→ 通用默认
+    // options.config 是叠加在上面的覆盖配置（测试 / 调试用），可省略
+    var seed = options.site ? seedByKey(options.site) : findSite(win.location && win.location.hostname);
+    var base = options.baseConfig && typeof options.baseConfig === 'object' ? options.baseConfig : (seed ? seed.config : DEFAULT_CONFIG);
+    var site = options.site || (base && base !== DEFAULT_CONFIG && base.site) || (seed && seed.key) || sourceFromUrl(win.location && win.location.href);
     var cfg = resolveConfig(options.config, doc, base);
+    if (site && !str(options.config && options.config.site, 40)) cfg.site = site;
     function convId(href) { return conversationIdFor(href, doc, cfg); }
 
     // 每次内容脚本加载唯一；页面级事件用它区分“这一次”与“上一次页面加载”
@@ -559,9 +945,12 @@
 
     var state = {
       started: false,
+      maxIndex: null,                                   // 已分配的最大消息序号
+      indexBase: Math.floor(Date.now() / 1000) * 1000,  // 本页面第一次分配序号的基数
       url: win.location.href,
       conversationId: null,
       messages: Object.create(null),
+      alias: Object.create(null),                       // 被页面换掉的节点：新键 → 原消息 ID
       generating: false,
       generationStartedAt: 0,
       generationMessageId: null,
@@ -578,7 +967,7 @@
     var debounceTimer = null;
     var pollTimer = null;
     var listeners = [];
-    var stats = { mutations: 0, scans: 0, emitted: 0, errors: 0 };
+    var stats = { mutations: 0, scans: 0, extractions: 0, emitted: 0, errors: 0 };
 
     function safeEmit(event) {
       stats.emitted++;
@@ -605,52 +994,197 @@
       listeners.push(function () { target.removeEventListener(type, handler); });
     }
 
-    function getMessageKey(el, role, index) {
-      var id = rawMessageIdOf(el, cfg);
-      if (id) return id.slice(0, 128);
-      // 缺少 message-id 时的回退键：角色 + 位置。
-      // 不能把文本哈希放进键里，否则流式输出时每次扫描都会变成一条“新消息”。
-      return 'fallback:' + role + ':' + index;
+    /**
+     * 稳定的消息序号：已见过的消息保持原序号；新消息按它在已知消息之间的位置插入
+     * （追加在后面 → 比已知最大值大；长对话向上加载的历史 → 比后面那条小）。
+     * 新页面第一次扫描以当前时间为基数，保证本次看到的最新消息排在以前记录的消息之后。
+     */
+    var STEP = 1000;
+    function assignIndexes(items) {
+      var n = items.length;
+      var j;
+      for (j = 0; j < n; j++) { var kn = state.messages[items[j].id]; if (kn) items[j].index = kn.index; }
+      j = 0;
+      while (j < n) {
+        if (items[j].index != null) { j++; continue; }
+        var a = j;
+        while (j < n && items[j].index == null) j++;
+        var len = j - a;
+        var prev = a > 0 ? items[a - 1].index : null;
+        var next = j < n ? items[j].index : null;
+        for (var q = 0; q < len; q++) {
+          var idx;
+          if (prev == null && next == null) {
+            idx = (state.maxIndex != null ? state.maxIndex : state.indexBase - STEP) + (q + 1) * STEP;
+          } else if (next == null) {
+            idx = Math.max(prev, state.maxIndex != null ? state.maxIndex : prev) + (q + 1) * STEP;
+          } else if (prev == null) {
+            idx = Math.max(0, next - (len - q) * STEP);
+          } else {
+            var stepIn = (next - prev) / (len + 1);
+            idx = stepIn >= 1 ? prev + Math.floor(stepIn * (q + 1)) : prev + q + 1;
+          }
+          items[a + q].index = idx;
+        }
+      }
+      for (j = 0; j < n; j++) if (state.maxIndex == null || items[j].index > state.maxIndex) state.maxIndex = items[j].index;
     }
 
-    function scanMessages(conversationId, force) {
+    /*
+     * 消息节点 → 提取结果缓存 {role, rawId, text, html, hash}。
+     * 正文提取（extractText + extractHtml + 哈希）是扫描里最贵的部分：流式输出时每 100ms 扫描一次，
+     * 长对话里绝大多数消息没有变化。MutationObserver 记录到某个消息节点内部有变化时才删掉它的缓存；
+     * 没有 MutationObserver 时不缓存。兜底：每 FULL_REFRESH_MS 和强制刷新（生成结束、切换配置）时全部重新提取，
+     * 防止属性过滤之外的变化被漏掉。
+     */
+    var FULL_REFRESH_MS = 10000;
+    var cache = new WeakMap();
+    var lastFullAt = 0;
+    function resetCache() { cache = new WeakMap(); lastFullAt = now(); }
+
+    function extractItem(el) {
+      var c = cache.get(el);
+      if (c) return c;
+      stats.extractions++;
+      var role = normalizeRole(roleOf(el, cfg));
+      var text = getNodeText(el, role, cfg);
+      var partial = false;
+      if (!text) { text = surrogateText(el); partial = !!text; }
+      var html = partial ? null : getNodeHtml(el, role, cfg, text.slice(0, MAX_TEXT));
+      c = {
+        role: role,
+        rawId: rawMessageIdOf(el, cfg),
+        group: cfg.groupAttr ? (el.getAttribute(cfg.groupAttr) || '').trim().slice(0, 128) : '',
+        partial: partial,
+        text: text,
+        html: html,
+        // 内容哈希含富文本：只有图片 / 格式变化（文字不变）也会上报 message.updated
+        hash: html ? fnv1a64(text + '\u0000' + html) : fnv1a64(text)
+      };
+      if (observer) cache.set(el, c);
+      return c;
+    }
+
+    function isNested(el, inResult) {
+      if (!inResult) return !!(el.parentElement && el.parentElement.closest && el.parentElement.closest(cfg.messageSelector));
+      for (var p = el.parentElement; p; p = p.parentElement) if (inResult.has(p)) return true;
+      return false;
+    }
+
+    /**
+     * 页面把刚发送的消息换成另一个节点（乐观显示的临时气泡 → 服务器确认后的正式消息，ID 或位置变了）：
+     * 新键的消息与一条刚上报过、现在已不在页面上的同角色同内容消息相同时，沿用旧 ID，避免详情里出现两条。
+     */
+    var REPLACE_WINDOW_MS = 120000;
+    function reuseReplacedIds(items) {
+      var present = Object.create(null), j, id;
+      for (j = 0; j < items.length; j++) {
+        id = state.alias[items[j].id] || items[j].id;
+        if (state.messages[id]) present[id] = 1;
+      }
+      for (j = 0; j < items.length; j++) {
+        var it = items[j];
+        var mapped = state.alias[it.id];
+        if (mapped && !present[mapped + '#taken']) { it.id = mapped; present[mapped + '#taken'] = 1; continue; }
+        if (state.messages[it.id]) continue;
+        var t = now();
+        for (id in state.messages) {
+          var kn = state.messages[id];
+          if (present[id] || kn.role !== it.x.role || kn.hash !== it.x.hash || t - kn.lastEmit > REPLACE_WINDOW_MS) continue;
+          state.alias[it.id] = id;
+          present[id] = 1;
+          present[id + '#taken'] = 1;
+          it.id = id;
+          break;
+        }
+      }
+    }
+
+    /** 相邻、同组 ID、同角色的节点合并成一条消息（ID = 组 ID）：文字和富文本按顺序拼接，有一段是替身就整体算 partial */
+    function mergeGroups(items) {
+      var out = [];
+      for (var j = 0; j < items.length; j++) {
+        var it = items[j];
+        var prev = out[out.length - 1];
+        if (prev && it.x.group && prev.group === it.x.group && prev.x.role === it.x.role) {
+          var a = prev.x, b = it.x;
+          var text = [a.text, b.text].filter(Boolean).join('\n\n');
+          var html = a.html || b.html
+            ? [a.html || textHtml(a.text), b.html || textHtml(b.text)].join('')
+            : null;
+          prev.x = { role: a.role, rawId: prev.group, group: prev.group, partial: a.partial || b.partial, text: text, html: html,
+            hash: html ? fnv1a64(text + '\u0000' + html) : fnv1a64(text) };
+          continue;
+        }
+        out.push(it.x.group ? { id: it.x.group, group: it.x.group, x: it.x } : it);
+      }
+      return out;
+    }
+
+    function textHtml(t) { return t ? '<p>' + escHtml(t).replace(/\n/g, '<br>') + '</p>' : ''; }
+
+    function scanMessages(conversationId, force, fresh) {
+      if (fresh || !observer || now() - lastFullAt >= FULL_REFRESH_MS) resetCache();
       var nodes = doc.querySelectorAll(cfg.messageSelector); // querySelectorAll 结果本身不含重复节点
       var lastAssistantId = null;
 
+      // 第一遍：收集当前渲染出来的消息（长对话里页面只渲染一部分，DOM 位置不能当作消息序号）
+      var items = [];
+      var seen = Object.create(null);
+      var seenHash = Object.create(null);
+      // 嵌套的消息节点（两种选择器同时命中父子）只处理最外层：沿父节点查是否在本次结果里（比逐个 closest(选择器) 快）
+      var inResult = typeof Set === 'function' ? new Set(nodes) : null;
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
-        // 嵌套的消息节点（两种选择器同时命中父子）只处理最外层
-        if (el.parentElement && el.parentElement.closest && el.parentElement.closest(cfg.messageSelector)) continue;
-        var role = normalizeRole(roleOf(el, cfg));
-        var rawId = rawMessageIdOf(el, cfg);
-        var text = getNodeText(el, role, cfg);
-
+        if (isNested(el, inResult)) continue;
+        var x = extractItem(el);
         // 空节点且没有 ID：多半是正在创建的占位节点
-        if (!rawId && !text) continue;
+        if (!x.rawId && !x.text) continue;
+        // 键：消息 ID；缺少时回退为 角色 + 位置（不能用文本哈希，否则流式输出时每次扫描都会变成一条“新消息”）
+        var key = x.rawId ? x.rawId.slice(0, 128) : 'fallback:' + x.role + ':' + i;
+        // 同一条消息拆成多行（文字气泡 + 卡片共用一个 message-id）时分开记录，避免互相覆盖；
+        // 但内容完全相同的同 ID 节点（页面为同一条消息渲染了两份，如 Muse 的发送气泡）只算一条
+        if (seen[key]) {
+          if (seenHash[key] && seenHash[key][x.hash]) continue;
+          key = (key + '#' + (++seen[key])).slice(0, 128);
+        } else seen[key] = 1;
+        var base = x.rawId ? x.rawId.slice(0, 128) : key;
+        (seenHash[base] || (seenHash[base] = Object.create(null)))[x.hash] = 1;
+        items.push({ id: key, x: x });
+      }
+      if (cfg.groupAttr) items = mergeGroups(items);
+      reuseReplacedIds(items);
+      assignIndexes(items);
 
-        var id = getMessageKey(el, role, i);
+      for (var k = 0; k < items.length; k++) {
+        var it = items[k];
+        var id = it.id;
+        var role = it.x.role;
+        var hash = it.x.hash;
         if (role === 'assistant') lastAssistantId = id;
-
-        var hash = fnv1a64(text);
         var known = state.messages[id];
+        if (known && known.hash === hash) continue;
+        // 替身文字（虚拟列表滚出视口）不覆盖已经上报过的内容
+        if (known && it.x.partial) continue;
+
+        var text = it.x.text;
         var payload = {
           message_id: id,
           role: role,
-          index: i,
+          index: it.index,
           text: text.slice(0, MAX_TEXT),
           text_length: text.length,
           truncated: text.length > MAX_TEXT
         };
+        if (it.x.html) payload.html = it.x.html;
 
         if (!known) {
-          state.messages[id] = { hash: hash, lastEmit: now(), role: role, index: i };
+          state.messages[id] = { hash: hash, lastEmit: now(), role: role, index: it.index };
           // 不带内容哈希：页面刷新后再次观察到同一条消息时 event_id 相同，后端按重复处理
           send('message.added', conversationId, payload, id);
           continue;
         }
 
-        known.index = i;
-        if (known.hash === hash) continue;
         if (role === 'assistant') state.lastAssistantChangeAt = now();
 
         var elapsed = now() - known.lastEmit;
@@ -679,12 +1213,16 @@
 
       // 路由变了：旧会话的消息状态和生成状态都不带过去
       state.messages = Object.create(null);
+      state.alias = Object.create(null);
+      state.maxIndex = null;
       state.generating = false;
       state.generationStartedAt = 0;
       state.generationMessageId = null;
       state.lastAssistantChangeAt = 0;
       state.statusKey = null;
       state.lastStatusCheckAt = 0;
+      statusDirty = true;
+      resetCache();
       state.routeSequence++;
 
       send('conversation.changed', nextId,
@@ -693,18 +1231,37 @@
       return true;
     }
 
+    // 状态检测要遍历页面文字：上次检测后页面（输入框以外）没有任何变化时跳过，最多 FULL_REFRESH_MS 强制检测一次
+    var statusDirty = true;
+    var lastStatusFullAt = 0;
     function checkStatus(force) {
       var t = now();
       if (!force && state.lastStatusCheckAt && t - state.lastStatusCheckAt < cfg.statusIntervalMs) return;
+      if (!force && observer && !statusDirty && t - lastStatusFullAt < FULL_REFRESH_MS) return;
       state.lastStatusCheckAt = t;
+      lastStatusFullAt = t;
+      statusDirty = false;
       var s;
       try { s = detectStatus(doc, cfg); } catch (e) { stats.errors++; return; }
-      var key = (state.conversationId || '') + '|' + s.status + '|' + (s.detail || '') + '|' + (s.model || '');
+      // 发送按钮可用性：发送时发现不可用（sendBlocked）或输入框有字但按钮不可用 → 到达上限；按钮恢复可用后自动解除
+      try {
+        var sb = cfg.actions && cfg.actions.send_button ? doc.querySelectorAll(cfg.actions.send_button) : [];
+        var sbtn = sb.length ? sb[sb.length - 1] : null;
+        var sbOk = sbtn && !sbtn.disabled && sbtn.getAttribute('aria-disabled') !== 'true';
+        var ci = cfg.actions && cfg.actions.composer ? doc.querySelector(cfg.actions.composer) : null;
+        var hasText = ci ? String(ci.tagName === 'TEXTAREA' ? ci.value : ci.textContent || '').trim() !== '' : false;
+        if (sbOk) state.sendBlocked = false;
+        else if (sbtn && hasText && !state.generating) state.sendBlocked = true;
+        if (state.sendBlocked && s.status === 'ok') s = { status: 'limit_reached', detail: '到达上限', model: s.model };
+      } catch (_) { /* ignore */ }
+      var caps = null;
+      try { caps = detectComposerCaps(doc, cfg.actions); } catch (_) { caps = null; }
+      var key = (state.conversationId || '') + '|' + s.status + '|' + (s.detail || '') + '|' + (s.model || '') + '|' + (caps ? JSON.stringify(caps) : '');
       if (key === state.statusKey) return;
       state.statusKey = key;
       state.statusSequence++;
       send('conversation.status', state.conversationId,
-        { source: cfg.site || sourceFromUrl(win.location.href), status: s.status, detail: s.detail, model: s.model },
+        Object.assign({ source: cfg.site || sourceFromUrl(win.location.href), status: s.status, detail: s.detail, model: s.model }, caps ? { composer: caps } : {}),
         loadId + '|status|' + state.statusSequence);
     }
 
@@ -732,7 +1289,7 @@
           loadId + '|' + state.generationSequence);
       } else if (!isGenerating && state.generating) {
         // 结束前强制扫描一次（绕过节流），补齐最后一段流式文本
-        var finalAssistantId = scanMessages(conversationId, true);
+        var finalAssistantId = scanMessages(conversationId, true, true);
         state.generating = false;
         send('generation.finished', conversationId,
           {
@@ -763,6 +1320,62 @@
       }, Math.max(0, delay == null ? debounceMs : delay));
     }
 
+    // 属性变化只关心可能影响识别 / 正文的属性：固定几项 + 配置里选择器 / 属性名用到的
+    var BASE_ATTRS = ['data-message-id', 'data-message-author-role', 'data-testid', 'class', 'id', 'src', 'href', 'download', 'data-language', 'contenteditable'];
+    function attributeFilter() {
+      var out = BASE_ATTRS.slice();
+      function add(a) { if (a && /^[A-Za-z_][\w.:-]*$/.test(a) && out.indexOf(a) < 0 && out.length < 64) out.push(a); }
+      [cfg.messageSelector, cfg.userText, cfg.assistantText, cfg.textExclude, cfg.generating, cfg.modelSelector,
+        cfg.idInner && cfg.idInner.selector, cfg.convDom && cfg.convDom.selector]
+        .concat(cfg.roleRules.map(function (r) { return r.selector; }))
+        .forEach(function (sel) {
+          var re = /\[\s*([A-Za-z_][\w-]*)/g, m;
+          while (sel && (m = re.exec(sel))) add(m[1]);
+        });
+      cfg.idAttrs.forEach(add);
+      cfg.roleSources.forEach(function (r) { add(r.attr); });
+      if (cfg.idInner) add(cfg.idInner.attr);
+      if (cfg.convDom) add(cfg.convDom.attr);
+      return out;
+    }
+    function observeRoot() {
+      var root = doc.documentElement || doc.body;
+      if (!observer || !root) return;
+      observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: attributeFilter() });
+    }
+
+    // 输入框（看板快速回复写入 / 用户打字）里的变化与消息、状态无关，不触发扫描
+    function composerSelector() {
+      var sel = '[contenteditable="true"], [contenteditable=""]';
+      var a = cfg.actions && cfg.actions.composer;
+      return a && validSelector(doc, a) ? a + ', ' + sel : sel;
+    }
+    var composerSel = composerSelector();
+
+    /** 变化所在的消息节点（含嵌套的外层）删掉缓存；全是输入框里的变化时不扫描 */
+    function onMutations(records) {
+      stats.mutations += records.length;
+      var relevant = false;
+      if (records.length > 500) { cache = new WeakMap(); relevant = true; }
+      else {
+        for (var i = 0; i < records.length; i++) {
+          var t = records[i].target;
+          var el = t && t.nodeType === 1 ? t : t && t.parentElement;
+          if (!el || !el.closest) { relevant = true; continue; }
+          try { if (el.closest(composerSel)) continue; } catch (_) { /* ignore */ }
+          relevant = true;
+          var m = el.closest(cfg.messageSelector);
+          while (m) {
+            cache.delete(m);
+            m = m.parentElement ? m.parentElement.closest(cfg.messageSelector) : null;
+          }
+        }
+      }
+      if (!relevant) return;
+      statusDirty = true;
+      schedule();
+    }
+
     function onPopState() { schedule(0); }
     function onPageHide() { stop('pagehide'); }
     function onPageShow(e) { if (e && e.persisted) start(); } // 从 bfcache 恢复时重新开始观察
@@ -778,16 +1391,9 @@
         { url: state.url.slice(0, 2048), title: String(doc.title || '').slice(0, 512) },
         loadId + '|' + state.startSequence);
 
-      var root = doc.documentElement || doc.body;
-      if (root && typeof win.MutationObserver === 'function') {
-        observer = new win.MutationObserver(function (records) {
-          stats.mutations += records.length;
-          schedule();
-        });
-        observer.observe(root, {
-          subtree: true, childList: true, characterData: true, attributes: true,
-          attributeFilter: ['data-message-id', 'data-message-author-role', 'data-testid', 'class']
-        });
+      if (typeof win.MutationObserver === 'function') {
+        observer = new win.MutationObserver(onMutations);
+        observeRoot();
       }
 
       addListener(win, 'popstate', onPopState);
@@ -830,11 +1436,18 @@
     win.addEventListener('pageshow', onPageShow);
 
     /** 运行时切换 DOM 配置：重置消息状态并立即重新扫描（同一条消息的 message.added event_id 不变，后端会去重） */
-    function setConfig(next) {
+    function setConfig(next, nextBase) {
+      if (nextBase && typeof nextBase === 'object') base = nextBase;
       cfg = resolveConfig(next, doc, base);
+      if (site && !str(next && next.site, 40)) cfg.site = str(base && base.site, 40) || site;
       state.messages = Object.create(null);
+      state.maxIndex = null;
       state.lastStatusCheckAt = 0;
       state.lastAssistantChangeAt = 0;
+      statusDirty = true;
+      composerSel = composerSelector();
+      resetCache();
+      if (observer) { observer.disconnect(); observeRoot(); }
       if (state.started) scan(true);
       return cfg.warnings;
     }
@@ -849,7 +1462,24 @@
       /** 页面当前是否在生成（供快速回复 / 重新回答判断忙碌） */
       isGenerating: function () { return state.generating || !!(cfg.generating && doc.querySelector(cfg.generating)); },
       getConversationId: function () { return convId(win.location.href); },
+      setSendBlocked: function (v) { state.sendBlocked = !!v; statusDirty = true; checkStatus(true); },
       scanNow: function () { scan(true); },
+      /** 后端重置数据库后：重新上报 page.opened（新 event_id）并把当前页面的全部消息重新上报一遍 */
+      resync: function () {
+        if (!state.started) return api;
+        state.startSequence++;
+        state.messages = Object.create(null);
+        state.maxIndex = null;
+        state.statusKey = null;
+        state.lastStatusCheckAt = 0;
+        statusDirty = true;
+        resetCache();
+        send('page.opened', state.conversationId,
+          { url: state.url.slice(0, 2048), title: String(doc.title || '').slice(0, 512) },
+          loadId + '|' + state.startSequence + '|resync');
+        scan(true);
+        return api;
+      },
       state: state,
       stats: stats
     };
@@ -863,12 +1493,16 @@
     conversationIdFromUrl: conversationIdFromUrl,
     conversationIdFor: conversationIdFor,
     extractText: extractText,
+    extractHtml: extractHtml,
     siteForHost: siteForHost,
+    findSite: findSite,
+    siteHosts: siteHosts,
+    SEED_SITES: SEED_SITES,
     SITE_PROFILES: SITE_PROFILES,
     resolveConfig: resolveConfig,
     detectStatus: detectStatus,
+    detectComposerCaps: detectComposerCaps,
     sourceFromUrl: sourceFromUrl,
-    DEFAULT_CONFIG: DEFAULT_CONFIG,
-    SELECTORS: SELECTORS
+    DEFAULT_CONFIG: DEFAULT_CONFIG
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

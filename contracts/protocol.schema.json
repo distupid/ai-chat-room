@@ -156,7 +156,8 @@
                   "message.updated",
                   "generation.started",
                   "generation.finished",
-                  "conversation.status"
+                  "conversation.status",
+                  "tabs.snapshot"
                 ]
               }
             }
@@ -211,7 +212,8 @@
             "message.updated",
             "generation.started",
             "generation.finished",
-            "conversation.status"
+            "conversation.status",
+            "tabs.snapshot"
           ]
         },
         "occurred_at": {
@@ -302,7 +304,8 @@
                       "pagehide",
                       "tab_removed",
                       "navigated",
-                      "manual"
+                      "manual",
+                      "reconciled"
                     ]
                   }
                 }
@@ -400,6 +403,10 @@
                   },
                   "truncated": {
                     "type": "boolean"
+                  },
+                  "html": {
+                    "type": "string",
+                    "maxLength": 200000
                   }
                 }
               }
@@ -459,6 +466,10 @@
                   },
                   "truncated": {
                     "type": "boolean"
+                  },
+                  "html": {
+                    "type": "string",
+                    "maxLength": 200000
                   }
                 }
               }
@@ -574,7 +585,8 @@
                     "enum": [
                       "ok",
                       "limit_reached",
-                      "error"
+                      "error",
+                      "deleted"
                     ]
                   },
                   "detail": {
@@ -590,6 +602,171 @@
                       "null"
                     ],
                     "maxLength": 100
+                  },
+                  "composer": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [],
+                    "properties": {
+                      "attach": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [],
+                        "properties": {
+                          "label": {
+                            "type": "string",
+                            "maxLength": 100
+                          },
+                          "accept": {
+                            "type": "string",
+                            "maxLength": 500
+                          },
+                          "multiple": {
+                            "type": "boolean"
+                          },
+                          "icon": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "shapes"
+                            ],
+                            "properties": {
+                              "view_box": {
+                                "type": "string",
+                                "maxLength": 64,
+                                "pattern": "^[0-9.\\s-]+$"
+                              },
+                              "fill": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke_width": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke_linecap": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke_linejoin": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "shapes": {
+                                "type": "array",
+                                "maxItems": 30,
+                                "items": {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "tag",
+                                    "attrs"
+                                  ],
+                                  "properties": {
+                                    "tag": {
+                                      "type": "string",
+                                      "enum": [
+                                        "path",
+                                        "circle",
+                                        "rect",
+                                        "line",
+                                        "polyline",
+                                        "polygon",
+                                        "ellipse"
+                                      ]
+                                    },
+                                    "attrs": {
+                                      "type": "object",
+                                      "maxProperties": 16,
+                                      "additionalProperties": {
+                                        "type": "string",
+                                        "maxLength": 4000,
+                                        "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "tabs.snapshot"
+              }
+            },
+            "required": [
+              "event_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "tabs"
+                ],
+                "properties": {
+                  "tabs": {
+                    "type": "array",
+                    "maxItems": 500,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "tab_id",
+                        "host",
+                        "conversation_id"
+                      ],
+                      "properties": {
+                        "tab_id": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "host": {
+                          "type": "string",
+                          "maxLength": 255
+                        },
+                        "conversation_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "maxLength": 128
+                        },
+                        "url": {
+                          "type": "string",
+                          "maxLength": 2048
+                        },
+                        "title": {
+                          "type": "string",
+                          "maxLength": 512
+                        },
+                        "active": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -773,7 +950,8 @@
             "message.updated",
             "generation.started",
             "generation.finished",
-            "conversation.status"
+            "conversation.status",
+            "tabs.snapshot"
           ]
         },
         "occurred_at": {
@@ -864,7 +1042,8 @@
                       "pagehide",
                       "tab_removed",
                       "navigated",
-                      "manual"
+                      "manual",
+                      "reconciled"
                     ]
                   }
                 }
@@ -964,6 +1143,10 @@
                       },
                       "truncated": {
                         "type": "boolean"
+                      },
+                      "html": {
+                        "type": "string",
+                        "maxLength": 200000
                       }
                     }
                   },
@@ -1065,6 +1248,10 @@
                       },
                       "truncated": {
                         "type": "boolean"
+                      },
+                      "html": {
+                        "type": "string",
+                        "maxLength": 200000
                       }
                     }
                   },
@@ -1220,7 +1407,8 @@
                     "enum": [
                       "ok",
                       "limit_reached",
-                      "error"
+                      "error",
+                      "deleted"
                     ]
                   },
                   "detail": {
@@ -1236,6 +1424,171 @@
                       "null"
                     ],
                     "maxLength": 100
+                  },
+                  "composer": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [],
+                    "properties": {
+                      "attach": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [],
+                        "properties": {
+                          "label": {
+                            "type": "string",
+                            "maxLength": 100
+                          },
+                          "accept": {
+                            "type": "string",
+                            "maxLength": 500
+                          },
+                          "multiple": {
+                            "type": "boolean"
+                          },
+                          "icon": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "shapes"
+                            ],
+                            "properties": {
+                              "view_box": {
+                                "type": "string",
+                                "maxLength": 64,
+                                "pattern": "^[0-9.\\s-]+$"
+                              },
+                              "fill": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke_width": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke_linecap": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke_linejoin": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "shapes": {
+                                "type": "array",
+                                "maxItems": 30,
+                                "items": {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "tag",
+                                    "attrs"
+                                  ],
+                                  "properties": {
+                                    "tag": {
+                                      "type": "string",
+                                      "enum": [
+                                        "path",
+                                        "circle",
+                                        "rect",
+                                        "line",
+                                        "polyline",
+                                        "polygon",
+                                        "ellipse"
+                                      ]
+                                    },
+                                    "attrs": {
+                                      "type": "object",
+                                      "maxProperties": 16,
+                                      "additionalProperties": {
+                                        "type": "string",
+                                        "maxLength": 4000,
+                                        "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "tabs.snapshot"
+              }
+            },
+            "required": [
+              "event_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "tabs"
+                ],
+                "properties": {
+                  "tabs": {
+                    "type": "array",
+                    "maxItems": 500,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "tab_id",
+                        "host",
+                        "conversation_id"
+                      ],
+                      "properties": {
+                        "tab_id": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "host": {
+                          "type": "string",
+                          "maxLength": 255
+                        },
+                        "conversation_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "maxLength": 128
+                        },
+                        "url": {
+                          "type": "string",
+                          "maxLength": 2048
+                        },
+                        "title": {
+                          "type": "string",
+                          "maxLength": 512
+                        },
+                        "active": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -1483,7 +1836,13 @@
           "enum": [
             "reply",
             "regenerate",
-            "focus"
+            "focus",
+            "close",
+            "probe_site",
+            "sync_sites",
+            "open_sites",
+            "new_chat",
+            "resync"
           ]
         },
         "conversation_id": {
@@ -1496,9 +1855,68 @@
           "minLength": 1,
           "maxLength": 20000
         },
+        "attachments": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "type": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string",
+                "maxLength": 300
+              }
+            }
+          }
+        },
+        "answer_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "answer_total": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
         "tab_id": {
           "type": "integer",
           "minimum": 0
+        },
+        "tab_ids": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "url": {
+          "type": "string",
+          "maxLength": 2048
         },
         "requested_by": {
           "type": "string",

@@ -206,3 +206,17 @@ test('插件后台：focus 指令交给后台切换标签页（不经过内容�
   await sleep(10);
   page.close();
 });
+
+test('正文里的图片和下载链接：观察器转成 ![]() / [](url "download")，普通链接保持文字', () => {
+  const dom = new JSDOM(`<!doctype html><body><div id="m"><p>看图：</p><img src="https://files.example.com/a.png" alt="结果图"><img src="data:image/png;base64,xx" alt="内联">
+    <p>文件 <a href="https://files.example.com/out/report.pdf">report.pdf</a>，下载 <a href="https://x.example.com/get?id=1" download>数据</a>，参考 <a href="https://example.com/page">这里</a>。</p>
+    <button><img src="https://files.example.com/icon.png"></button></div></body>`, { url: 'https://chatgpt.com/c/abc12345', runScripts: 'outside-only' });
+  dom.window.eval(OBSERVER_SRC);
+  const O = dom.window.ChatGPTBridgeObserver;
+  const text = O.extractText(dom.window.document.getElementById('m'), 'button');
+  assert.match(text, /!\[结果图\]\(https:\/\/files\.example\.com\/a\.png\)/);
+  assert.doesNotMatch(text, /data:image|icon\.png/);
+  assert.match(text, /\[report\.pdf\]\(https:\/\/files\.example\.com\/out\/report\.pdf "download"\)/);
+  assert.match(text, /\[数据\]\(https:\/\/x\.example\.com\/get\?id=1 "download"\)/);
+  assert.match(text, /参考 这里。/);
+});

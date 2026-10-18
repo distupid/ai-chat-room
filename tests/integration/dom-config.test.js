@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { analyzeDom } from '../../src/backend/src/dom-analyzer.js';
 import { createBackground } from '../../src/frontend/lib/background-core.js';
-import { analyzeDomOnServer, getDomConfigFromServer, clearDomConfigOnServer, wsToHttp } from '../../src/frontend/lib/dom-config-client.js';
+import { wsToHttp } from '../../src/frontend/lib/dom-config-client.js';
 import { startServer, tmpDb, TOKENS, openChatGPTPage, chatHtml, waitFor, sleep, ROOT } from '../helpers.js';
 
 const CONV_URL = 'https://chatgpt.com/c/6720a1b2-0000-4111-8222-999988887777';
@@ -28,6 +28,18 @@ function newUiHtml(attr = 'data-chatgpt-search-unit-key', idsAttr = 'data-chatgp
     ${user(0, U1, '第一个问题')}${asst(0, A1, '第一个回答')}${user(1, U2, '第二个问题')}${asst(1, A2, '第二个回答')}
   </main><form data-chatgpt-composer="">${stopButton ? '<button aria-label="停止流式传输">x</button>' : '<button aria-label="开始语音">x</button>'}</form></body></html>`;
 }
+
+/** 调后端 /api/dom-config*（extension token），返回 JSON + status */
+async function domConfigApi(serverUrl, method, path, body) {
+  const res = await fetch(wsToHttp(serverUrl) + path, {
+    method, headers: { authorization: `Bearer ${TOKENS.extension}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  return { ...(await res.json()), status: res.status };
+}
+const analyzeOnServer = (serverUrl, page) => domConfigApi(serverUrl, 'POST', '/api/dom-config/analyze', page);
+const getDomConfig = (serverUrl) => domConfigApi(serverUrl, 'GET', '/api/dom-config');
+const clearDomConfig = (serverUrl) => domConfigApi(serverUrl, 'DELETE', '/api/dom-config');
 
 function offlineBackground() {
   class NoopWS { constructor() { this.readyState = 0; } send() {} close() {} }
@@ -97,27 +109,27 @@ test('HTTP 接口：认证、权限、Origin、保存、读取、清除、重启
   assert.equal((await post({ authorization: `Bearer ${TOKENS.extension}`, origin: 'https://evil.example' }, { html: newUiHtml() })).status, 403, '普通网页 Origin 被拒绝');
   assert.equal((await post({ authorization: `Bearer ${TOKENS.extension}` }, { nohtml: 1 })).status, 400);
 
-  const r = await analyzeDomOnServer({ serverUrl, token: TOKENS.extension, html: newUiHtml(), url: CONV_URL, title: 't' });
+  const r = await analyzeOnServer(serverUrl, { html: newUiHtml(), url: CONV_URL, title: 't' });
   assert.equal(r.ok, true);
   assert.equal(r.status, 200);
   assert.equal(r.config.page.url, CONV_URL);
   assert.ok(existsSync(domConfigPath));
   assert.equal(JSON.parse(readFileSync(domConfigPath, 'utf8')).strategy, 'search-unit-key-2026');
 
-  const bad = await analyzeDomOnServer({ serverUrl, token: TOKENS.extension, html: '<html><body>x</body></html>' });
+  const bad = await analyzeOnServer(serverUrl, { html: '<html><body>x</body></html>' });
   assert.equal(bad.status, 422);
-  assert.equal((await getDomConfigFromServer({ serverUrl, token: TOKENS.extension })).config.strategy, 'search-unit-key-2026', '分析失败不覆盖已有配置');
+  assert.equal((await getDomConfig(serverUrl)).config.strategy, 'search-unit-key-2026', '分析失败不覆盖已有配置');
 
   await server.stop();
   server = await startServer({ dbPath, domConfigPath, port: 0 });
   const serverUrl2 = `ws://127.0.0.1:${server.port}`;
-  assert.equal((await getDomConfigFromServer({ serverUrl: serverUrl2, token: TOKENS.extension })).config.strategy, 'search-unit-key-2026', '重启后仍在');
-  assert.equal((await clearDomConfigOnServer({ serverUrl: serverUrl2, token: TOKENS.extension })).config, null);
-  assert.equal((await getDomConfigFromServer({ serverUrl: serverUrl2, token: TOKENS.extension })).config, null);
+  assert.equal((await getDomConfig(serverUrl2)).config.strategy, 'search-unit-key-2026', '重启后仍在');
+  assert.equal((await clearDomConfig(serverUrl2)).config, null);
+  assert.equal((await getDomConfig(serverUrl2)).config, null);
   await server.stop();
 });
 
-test('端到端：内置配置识别不了的页面 → 抓取 DOM → 后端分析 → 写入 storage → 观察器立即按新配置监听', async () => {
+test('端到端：默认配置识别不了的页面 → 后端分析 → 网站列表里的配置更新 → 观察器立即按新配置监听', async () => {
   const server = await startServer({});
   const serverUrl = `ws://127.0.0.1:${server.port}`;
   const { bg, results } = offlineBackground();
@@ -125,15 +137,13 @@ test('端到端：内置配置识别不了的页面 → 抓取 DOM → 后端分
   const page = openChatGPTPage({ url: CONV_URL, tabId: 7, background: bg, html });
   await waitFor(() => results.some((x) => x.m.event.event_type === 'page.opened'), { label: 'opened' });
   await sleep(300);
-  assert.equal(results.filter((x) => x.m.event.event_type === 'message.added').length, 0, '内置配置识别不了这种结构');
+  assert.equal(results.filter((x) => x.m.event.event_type === 'message.added').length, 0, '默认配置识别不了这种结构');
 
-  // 弹窗按钮的流程（后台的 analyzeActiveTab 做的就是这几步）
-  const captured = await page.sendToContent({ kind: 'capture_dom' });
-  assert.equal(captured.ok, true);
-  assert.ok(!/<script|<svg/i.test(captured.page.html), '上传前去掉了 script/svg');
-  const r = await analyzeDomOnServer({ serverUrl, token: TOKENS.extension, ...captured.page });
+  // 分析结果写进网站列表（看板“网站配置”保存后插件同步到 siteList，就是这一步）
+  const r = await analyzeOnServer(serverUrl, { html, url: CONV_URL, title: 'ChatGPT' });
   assert.equal(r.ok, true);
-  await page.storage.set({ domConfig: r.config });
+  const seed = JSON.parse(JSON.stringify(page.win.ChatGPTBridgeObserver.SEED_SITES));
+  await page.storage.set({ siteList: seed.map((x) => (x.key === 'chatgpt' ? { ...x, config: { ...r.config, site: 'chatgpt' } } : x)) });
 
   await waitFor(() => results.filter((x) => x.m.event.event_type === 'message.added').length === 4, { label: 'added x4' });
   const added = results.filter((x) => x.m.event.event_type === 'message.added').map((x) => x.m.event.payload);
@@ -152,8 +162,8 @@ test('端到端：内置配置识别不了的页面 → 抓取 DOM → 后端分
   assert.equal(ups.at(-1).m.event.payload.text, '第二个回答' + '字'.repeat(20));
 
   // 恢复默认配置
-  await page.storage.remove('domConfig');
-  assert.equal((await page.sendToContent({ kind: 'get_observer_config' })).config.source, 'builtin');
+  await page.storage.remove('siteList');
+  await waitFor(async () => (await page.sendToContent({ kind: 'get_observer_config' })).config.source === 'default:chatgpt', { label: '回到默认种子' });
   assert.ok(results.every((x) => x.r.ok));
   page.close();
   await server.stop();

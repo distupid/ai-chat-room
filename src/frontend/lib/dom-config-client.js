@@ -1,5 +1,5 @@
 /**
- * 插件后台调用后端 DOM 配置接口的辅助函数（纯函数，便于在 Node 测试中注入 fetch）。
+ * 插件后台调用后端网站接口（网站列表、添加网站时上传页面）的辅助函数（纯函数，便于在 Node 测试中注入 fetch）。
  */
 
 /** ws://127.0.0.1:8787 → http://127.0.0.1:8787；wss → https */
@@ -26,15 +26,42 @@ async function call(fetchImpl, serverUrl, token, method, path, body) {
   return data;
 }
 
-/** 上传页面 DOM，返回 {ok, config, report, status} */
-export function analyzeDomOnServer({ fetchImpl = fetch, serverUrl, token, html, url, title }) {
-  return call(fetchImpl, serverUrl, token, 'POST', '/api/dom-config/analyze', { html, url, title });
+/** 已适配网站（内置 + 看板上添加的） */
+export function getSitesFromServer({ fetchImpl = fetch, serverUrl, token }) {
+  return call(fetchImpl, serverUrl, token, 'GET', '/api/sites');
 }
 
-export function getDomConfigFromServer({ fetchImpl = fetch, serverUrl, token }) {
-  return call(fetchImpl, serverUrl, token, 'GET', '/api/dom-config');
+/** 看板“添加网站”：上传插件打开该网址后抓到的页面 */
+export function submitProbeDom({ fetchImpl = fetch, serverUrl, token, probeId, html, url, title }) {
+  return call(fetchImpl, serverUrl, token, 'POST', `/api/sites/probe/${encodeURIComponent(probeId)}/dom`, { html, url, title });
 }
 
-export function clearDomConfigOnServer({ fetchImpl = fetch, serverUrl, token }) {
-  return call(fetchImpl, serverUrl, token, 'DELETE', '/api/dom-config');
+/** ArrayBuffer → base64（分段拼接，避免大文件时参数过多） */
+export function bufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+export const MAX_TAB_FILE_BYTES = 40 * 1024 * 1024;   // 一次交给页面的文件总量（扩展消息有大小上限）
+
+/**
+ * 快速回复带文件：用插件 token 从后端取回看板上传的文件，转成 base64 交给内容脚本。
+ * @returns {Promise<{ok:true, files:{name,type,data}[]} | {ok:false, code, detail}>}
+ */
+export async function fetchAttachments({ fetchImpl = fetch, serverUrl, token, attachments }) {
+  const files = [];
+  let total = 0;
+  for (const a of attachments || []) {
+    let res;
+    try { res = await fetchImpl(wsToHttp(serverUrl) + a.url, { headers: { authorization: `Bearer ${token}` } }); }
+    catch (e) { return { ok: false, code: 'attachment_fetch_failed', detail: `取文件失败：${a.name}（${e?.message || e}）` }; }
+    if (!res.ok) return { ok: false, code: res.status === 404 ? 'attachment_expired' : 'attachment_fetch_failed', detail: `取文件失败：${a.name}（HTTP ${res.status}）` };
+    const buf = await res.arrayBuffer();
+    total += buf.byteLength;
+    if (total > MAX_TAB_FILE_BYTES) return { ok: false, code: 'attachments_too_large', detail: `文件总大小超过 ${MAX_TAB_FILE_BYTES / 1048576} MB` };
+    files.push({ name: a.name, type: a.type || res.headers.get('content-type') || 'application/octet-stream', data: bufferToBase64(buf) });
+  }
+  return { ok: true, files };
 }

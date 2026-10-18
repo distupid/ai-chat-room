@@ -56,7 +56,8 @@ export const EventType = Object.freeze({
   MESSAGE_UPDATED: 'message.updated',
   GENERATION_STARTED: 'generation.started',
   GENERATION_FINISHED: 'generation.finished',
-  CONVERSATION_STATUS: 'conversation.status'   // 会话状态变化：正常 / 已到限额 / 出错，附带来源与模型
+  CONVERSATION_STATUS: 'conversation.status',  // 会话状态变化：正常 / 已到限额 / 出错 / 已删除，附带来源与模型
+  TABS_SNAPSHOT: 'tabs.snapshot'               // 插件 → 后端：浏览器里真实开着的标签页（含 PWA 窗口），后端据此补齐 page.opened / page.closed
 });
 
 /** conversation.status 的状态取值 */
@@ -99,14 +100,18 @@ export const NON_RETRYABLE_ERRORS = Object.freeze([
 /** 页面操作指令 */
 export const CommandAction = Object.freeze({
   REPLY: 'reply',             // 在会话输入框中填入 text 并发送
-  REGENERATE: 'regenerate',   // 点击最后一条回答的“重新生成”
-  FOCUS: 'focus'              // 切换到开着该会话的标签页（看板点卡片）
+  REGENERATE: 'regenerate',   // 点击某条回答（默认最后一条）的“重新生成”
+  FOCUS: 'focus',             // 切换到开着该会话的标签页（看板点卡片）
+  CLOSE: 'close'              // 关闭开着该会话的标签页（看板“关闭页面”）
 });
 
 export const Limits = Object.freeze({
   MAX_MESSAGE_BYTES: 256 * 1024,
   MAX_TEXT_CHARS: 60000,
+  MAX_HTML_CHARS: 200000,      // message.* 的可选 html（净化后的富文本）上限；超过时插件不带 html，只发 text
   MAX_COMMAND_TEXT: 20000,
+  MAX_ATTACHMENTS: 10,           // 快速回复一次最多带的文件数
+  MAX_ATTACHMENT_BYTES: 25 * 1024 * 1024,
   MAX_SUBSCRIPTIONS: 100
 });
 
@@ -121,6 +126,34 @@ const NULLABLE_STR = (max) => ({ type: ['string', 'null'], maxLength: max });
 const ROLE = { type: 'string', enum: ['user', 'assistant', 'system', 'tool', 'unknown'] };
 const URL_STR = { type: 'string', maxLength: 2048 };
 const EVENT_TYPES = Object.values(EventType);
+
+/** 源站输入框的上传按钮（插件从页面上读取，看板照着画）：图标只传图形数据，看板自己拼 SVG */
+const SVG_ATTR = { type: 'string', maxLength: 4000, pattern: '^[0-9A-Za-z.,#%()\\s+-]*$' };
+const composerCaps = obj({
+  attach: obj({
+    label: { type: 'string', maxLength: 100 },                 // 按钮的 aria-label / title，如“添加文件”
+    accept: { type: 'string', maxLength: 500 },                // 页面 <input type=file> 的 accept
+    multiple: { type: 'boolean' },
+    icon: obj({
+      view_box: { type: 'string', maxLength: 64, pattern: '^[0-9.\\s-]+$' },
+      fill: SVG_ATTR, stroke: SVG_ATTR, stroke_width: SVG_ATTR, stroke_linecap: SVG_ATTR, stroke_linejoin: SVG_ATTR,
+      shapes: {
+        type: 'array', maxItems: 30,
+        items: obj({
+          tag: { type: 'string', enum: ['path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'] },
+          attrs: { type: 'object', maxProperties: 16, additionalProperties: SVG_ATTR }
+        })
+      }
+    }, ['shapes'])
+  }, [])
+}, []);
+const ATTACHMENT = obj({
+  id: { type: 'string', minLength: 8, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' },
+  name: { type: 'string', minLength: 1, maxLength: 255 },
+  type: { type: 'string', maxLength: 128 },
+  size: { type: 'integer', minimum: 0 },
+  url: { type: 'string', maxLength: 300 }                     // 后端转发给插件时填写：/api/attachments/:id
+}, ['id', 'name']);
 
 function envelope(type, props, required) {
   return {
@@ -147,13 +180,16 @@ const messagePayload = obj({
   index: { type: 'integer', minimum: 0 },
   text: { type: 'string', maxLength: Limits.MAX_TEXT_CHARS },
   text_length: { type: 'integer', minimum: 0 },
-  truncated: { type: 'boolean' }            // 可选：text 是否因超过 MAX_TEXT_CHARS 被截断
+  truncated: { type: 'boolean' },           // 可选：text 是否因超过 MAX_TEXT_CHARS 被截断
+  // 可选：同一消息节点净化后的 HTML（保留段落 / 标题 / 列表 / 代码块 / 表格 / 图片 / 链接 / 文件），看板据此按原格式显示；
+  // 只允许白名单标签和属性（插件和看板各净化一次），超过上限时省略，看板退回 text
+  html: { type: 'string', maxLength: Limits.MAX_HTML_CHARS }
 }, ['message_id', 'role', 'index', 'text', 'text_length']);
 
 /** 每种业务事件的 payload schema */
 export const EVENT_PAYLOAD_SCHEMAS = Object.freeze({
   'page.opened': obj({ url: URL_STR, title: { type: 'string', maxLength: 512 } }),
-  'page.closed': obj({ url: URL_STR, reason: { type: 'string', enum: ['unload', 'pagehide', 'tab_removed', 'navigated', 'manual'] } }),
+  'page.closed': obj({ url: URL_STR, reason: { type: 'string', enum: ['unload', 'pagehide', 'tab_removed', 'navigated', 'manual', 'reconciled'] } }),
   'conversation.changed': obj({ url: URL_STR, previous_conversation_id: NULLABLE_STR(128) }),
   'message.added': messagePayload,
   'message.updated': messagePayload,
@@ -165,15 +201,29 @@ export const EVENT_PAYLOAD_SCHEMAS = Object.freeze({
     message_id: NULLABLE_STR(128),
     duration_ms: { type: ['integer', 'null'], minimum: 0 }
   }),
+  'tabs.snapshot': obj({
+    tabs: {
+      type: 'array', maxItems: 500,
+      items: obj({
+        tab_id: { type: 'integer', minimum: 0 },
+        host: { type: 'string', maxLength: 255 },
+        conversation_id: NULLABLE_STR(128),   // 内容脚本报告的当前会话；没有内容脚本 / 不在会话里为 null
+        url: URL_STR,
+        title: { type: 'string', maxLength: 512 },
+        active: { type: 'boolean' }            // 是否是所在窗口当前显示的标签页（看板高亮对应卡片）
+      }, ['tab_id', 'host', 'conversation_id'])
+    }
+  }),
   'conversation.status': obj({
     source: { type: 'string', minLength: 1, maxLength: 32, pattern: '^[a-z0-9_-]+$' },
-    status: { type: 'string', enum: ['ok', 'limit_reached', 'error'] },
+    status: { type: 'string', enum: ['ok', 'limit_reached', 'error', 'deleted'] },   // deleted：源站页面显示会话已删除 / 不存在 → 后端不再跟踪
     detail: NULLABLE_STR(500),
-    model: NULLABLE_STR(100)
+    model: NULLABLE_STR(100),
+    composer: composerCaps                    // 可选：输入框能力（上传按钮的样式 / accept）
   }, ['source', 'status', 'detail'])
 });
 
-/** 广播中被脱敏（无 read_content 权限）的消息 payload：没有 text 字段 */
+/** 广播中被脱敏（无 read_content 权限）的消息 payload：没有 text / html 字段 */
 const redactedMessagePayload = obj({
   message_id: { type: 'string', minLength: 1, maxLength: 128 },
   role: ROLE,
@@ -289,10 +339,15 @@ export const SCHEMA = {
 
     command: envelope('command', {
       command_id: ID,
-      action: { type: 'string', enum: ['reply', 'regenerate', 'focus'] },
+      action: { type: 'string', enum: ['reply', 'regenerate', 'focus', 'close', 'probe_site', 'sync_sites', 'open_sites', 'new_chat', 'resync'] },   // probe_site / sync_sites / open_sites：后端 → 插件（添加网站 / 一键启动）
       conversation_id: { type: 'string', minLength: 1, maxLength: 128 },
       text: { type: 'string', minLength: 1, maxLength: Limits.MAX_COMMAND_TEXT },
+      attachments: { type: 'array', maxItems: Limits.MAX_ATTACHMENTS, items: ATTACHMENT },   // reply：先上传到后端的文件
+      answer_index: { type: 'integer', minimum: 0, maximum: 100000 },   // regenerate：第几条回答（从 0 开始）；不填 = 最后一条
+      answer_total: { type: 'integer', minimum: 1, maximum: 100000 },   // regenerate：看板看到的回答总数，用于和页面核对
       tab_id: { type: 'integer', minimum: 0 },          // 后端转发给插件时填写
+      tab_ids: { type: 'array', maxItems: 50, items: { type: 'integer', minimum: 0 } },   // close：该插件里开着这个会话的所有标签页
+      url: { type: 'string', maxLength: 2048 },           // close：会话页面地址（插件再按地址找 PWA / 其他窗口里的标签页）
       requested_by: ID                                    // 后端转发给插件时填写
     }, ['command_id', 'action', 'conversation_id']),
 
@@ -371,7 +426,9 @@ function check(schema, value, path, errors) {
     for (const [k, v] of Object.entries(value)) {
       if (props[k]) check(props[k], v, `${path}.${k}`, errors);
       else if (schema.additionalProperties === false) errors.push(`${path}.${k}: is not allowed`);
+      else if (typeOf(schema.additionalProperties) === 'object') check(schema.additionalProperties, v, `${path}.${k}`, errors);
     }
+    if (schema.maxProperties != null && Object.keys(value).length > schema.maxProperties) errors.push(`${path}: more than ${schema.maxProperties} properties`);
   }
   if (schema.allOf) {
     for (const sub of schema.allOf) check(sub, value, path, errors);
