@@ -1642,7 +1642,8 @@
             "close",
             "probe_site",
             "sync_sites",
-            "open_sites"
+            "open_sites",
+            "new_chat"
           ]
         },
         "conversation_id": {

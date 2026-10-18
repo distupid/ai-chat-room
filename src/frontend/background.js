@@ -192,6 +192,12 @@ const ready = (async () => {
       if (command.action === 'probe_site') return probeSite(command);
       if (command.action === 'sync_sites') return syncSites();
       if (command.action === 'open_sites') return openSites(command.text);
+      if (command.action === 'new_chat') {
+        const url = String(command.text || '').trim();
+        if (!/^https:\/\/[^\s]+$/.test(url)) return { ok: false, code: 'bad_url', detail: '只支持 https 网址' };
+        await chrome.tabs.create({ url, active: false });
+        return { ok: true, detail: '已在后台新建会话' };
+      }
       if (command.action === 'close') return closeConversationTabs(tabId, command);
       if (command.action === 'focus') {
         try {

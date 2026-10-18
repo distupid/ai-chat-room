@@ -308,7 +308,7 @@ export const SCHEMA = {
 
     command: envelope('command', {
       command_id: ID,
-      action: { type: 'string', enum: ['reply', 'regenerate', 'focus', 'close', 'probe_site', 'sync_sites', 'open_sites'] },   // probe_site / sync_sites / open_sites：后端 → 插件（添加网站 / 一键启动）
+      action: { type: 'string', enum: ['reply', 'regenerate', 'focus', 'close', 'probe_site', 'sync_sites', 'open_sites', 'new_chat'] },   // probe_site / sync_sites / open_sites：后端 → 插件（添加网站 / 一键启动）
       conversation_id: { type: 'string', minLength: 1, maxLength: 128 },
       text: { type: 'string', minLength: 1, maxLength: Limits.MAX_COMMAND_TEXT },
       answer_index: { type: 'integer', minimum: 0, maximum: 100000 },   // regenerate：第几条回答（从 0 开始）；不填 = 最后一条

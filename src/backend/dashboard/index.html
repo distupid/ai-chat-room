@@ -209,7 +209,6 @@
     .scrim.open { display: flex; }
     .dialog { background: var(--surface-container-high); border-radius: 28px; box-shadow: var(--elev-3); width: min(860px, 100%); max-height: min(88vh, 100%); display: flex; flex-direction: column; overflow: hidden; }
     .dialog.narrow { width: min(560px, 100%); }
-    #alertScrim { z-index: 35; }
     .dialog .dh { display: flex; align-items: center; gap: 8px; padding: 20px 16px 12px 24px; }
     .dialog .dh h2 { font-size: 22px; line-height: 28px; font-weight: 400; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .dialog .dsub { padding: 0 24px 12px; color: var(--on-surface-variant); font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -371,17 +370,6 @@
     </div>
   </div>
 
-  <!-- 置顶会话回答完成：页面内弹窗 -->
-  <div id="alertScrim" class="scrim" role="alertdialog" aria-modal="true" aria-labelledby="alertTitle">
-    <div class="dialog narrow">
-      <div class="dh"><h2 id="alertTitle">置顶会话回答完成</h2></div>
-      <div id="alertBody" class="db"></div>
-      <div class="df">
-        <button id="alertClose" class="btn text">知道了</button>
-        <button id="alertOpen" class="btn filled">查看</button>
-      </div>
-    </div>
-  </div>
 
   <!-- 添加网站：插件打开网址 → 抓取 DOM → 分析 → 确认添加 -->
   <div id="siteScrim" class="scrim" role="dialog" aria-modal="true" aria-labelledby="siteTitle">
@@ -458,18 +446,18 @@
             <button class="switch" role="switch" data-notify="sound"></button>
           </div>
           <div class="switch-row">
-            <div><div class="t">置顶会话回答完成：弹窗</div><div class="d">看板在前台时页面内弹窗，在后台时用系统通知（需启用下方系统通知），同时播放提示音</div></div>
+            <div><div class="t">置顶会话回答完成：弹出详情</div><div class="d">直接打开这条回答所在会话的详情并定位到回答；看板在后台时另发系统通知（需启用下方系统通知），同时播放提示音</div></div>
             <button class="switch" role="switch" data-notify="pinned_popup"></button>
           </div>
           <div class="switch-row">
-            <div><div class="t">所有会话回答完成：弹窗</div><div class="d">不只置顶会话，任何会话回答完成都在看板里弹出对话框（音效按上面的设置）</div></div>
+            <div><div class="t">所有会话回答完成：弹出详情</div><div class="d">不只置顶会话，任何会话回答完成都直接打开详情；正在看别的会话时排队，关掉当前详情后依次打开（音效按上面的设置）</div></div>
             <button class="switch" role="switch" data-notify="all_popup"></button>
           </div>
           <div class="switch-row">
             <div><div class="t">启用系统通知</div><div class="d" id="notifyPerm"></div></div>
             <button id="notifyEnabled" class="switch" role="switch" aria-checked="false"></button>
           </div>
-          <div class="row2"><button id="soundTest" class="btn text">试听音效</button><button id="popupTest" class="btn text">测试弹窗</button><button id="notifyTest" class="btn text">发送测试通知</button></div>
+          <div class="row2"><button id="soundTest" class="btn text">试听音效</button><button id="notifyTest" class="btn text">发送测试通知</button></div>
         </section>
         <section class="sec">
           <h3>常见回答</h3>

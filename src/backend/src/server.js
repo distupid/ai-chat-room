@@ -295,6 +295,19 @@ export function createBridgeServer(opts = {}) {
         log.info(`[sites] launch ${urls.length} sites via ${target.clientId}`);
         return json(res, 202, { ok: true, count: urls.length });
       }
+      const nc = path.match(/^\/api\/sites\/([^/]+)\/new-chat$/);
+      if (nc && req.method === 'POST') {
+        // 卡片“新建”：让插件在后台打开这个网站的新空白会话（不切换到该标签页）
+        const site = customSites.find((x) => x.key === decodeURIComponent(nc[1]));
+        if (!site) return json(res, 404, { ok: false, error: '网站列表里没有这个网站' });
+        const url = typeof site.config?.new_chat_url === 'string' && /^https:\/\//.test(site.config.new_chat_url) ? site.config.new_chat_url : site.url;
+        if (!/^https:\/\//.test(url || '')) return json(res, 400, { ok: false, error: '这个网站没有可用的网址' });
+        const target = onlineExtensions()[0];
+        if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件' });
+        sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: randomId('newchat').slice(0, 40), action: 'new_chat', conversation_id: 'sites', text: url.slice(0, 2048) }));
+        log.info(`[sites] new chat ${site.key} via ${target.clientId}`);
+        return json(res, 202, { ok: true, url });
+      }
       if (path === '/api/sites/probe' && req.method === 'POST') {
         const b = await body();
         let u;
@@ -547,7 +560,7 @@ export function createBridgeServer(opts = {}) {
       return sendError(conn, msg.id, ErrorCode.FORBIDDEN, 'token lacks control scope', false);
     }
     counters.commands_received++;
-    if (['probe_site', 'sync_sites', 'open_sites'].includes(msg.action)) return reply(conn, commandResult(msg.command_id, false, 'forbidden_action', '该指令只能由后端发出'));
+    if (['probe_site', 'sync_sites', 'open_sites', 'new_chat'].includes(msg.action)) return reply(conn, commandResult(msg.command_id, false, 'forbidden_action', '该指令只能由后端发出'));
     if (msg.action === 'reply' && !msg.text?.trim()) return reply(conn, commandResult(msg.command_id, false, 'text_required', '回复内容不能为空'));
     if (pendingCommands.has(msg.command_id)) return reply(conn, commandResult(msg.command_id, false, 'duplicate_command', null));
 

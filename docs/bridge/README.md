@@ -171,6 +171,8 @@ test/                         单元测试 + 多客户端 E2E 验收测试
 - **点卡片**：有标签页开着这个会话就切换过去，否则新开页面
 - 卡片按钮：置顶、关闭页面（插件关掉开着该会话的标签页）、回复（向下弹出快速回复栏，Enter 发送、Shift+Enter 换行，发送后自动收起；点击常见回答直接发送）
 - 顶栏：已连接 · N 个页面、搜索、网站（全部可编辑 / 配置 / 停用 / 删除，无“内置”，见“网站列表”）、收藏、设置、一键启动（插件在后台打开所有启用的网站）
+- **回答完成**：置顶会话（或开启“所有会话”时任何会话）回答完成直接打开详情并定位到这条回答，不再有提示小弹窗；一次生成只弹一次（会话 + 回答 ID + 生成序号去重），正在看别的会话时排队、关掉当前详情后依次打开；看板在后台时另发系统通知（含回答内容）。
+- **卡片“新建”**：取代原来的“复制”，在后台新建该卡片来源网站的空白会话。
 - **详情**弹窗：完整对话，实时流式更新；消息有 `html` 时按原页面格式显示（标题、列表、表格、引用、粗体等），看板用 `DOMParser` 解析成惰性文档后按白名单逐个节点重建（不复制事件属性 / style，链接只允许 http(s) / data / blob，图片只允许 http(s) / data:image），从不把正文直接写进 `innerHTML`；没有 `html` 时按 `text` 的轻量 Markdown 显示
   - 代码块：语言标签 +“复制”（复制代码文字）+“下载”（按语言取扩展名，如 `.py` / `.js`，未知为 `.txt`）
   - 图片：内联显示（最大宽度 100%），点击打开原图，“下载”按钮（跨域图片浏览器可能改为打开）
@@ -203,7 +205,7 @@ test/                         单元测试 + 多客户端 E2E 验收测试
 `看板 --command--> 后端 --command(tab_id)--> 插件后台 --> 内容脚本执行 --> command_result 原路返回`
 
 - 需要 `control` 权限。旧的 config.json 里，能读全部会话（subscribe_all + read_content）的 observer token 会自动获得 control；不想要可给该 client 加 `"no_control": true`
-- 指令：`reply` 快速回复、`regenerate` 重新回答、`focus` 切换到该标签页、`close` 关闭该会话的所有标签页（含 PWA 窗口，按 `tab_ids` + 会话 `url` 查找）（插件后台执行，不经过页面）；后端 → 插件：`probe_site` / `sync_sites` / `open_sites`（看板不能直接发）
+- 指令：`reply` 快速回复、`regenerate` 重新回答、`focus` 切换到该标签页、`close` 关闭该会话的所有标签页（含 PWA 窗口，按 `tab_ids` + 会话 `url` 查找）（插件后台执行，不经过页面）；后端 → 插件：`probe_site` / `sync_sites` / `open_sites` / `new_chat`（看板不能直接发；`new_chat` 由卡片“新建”经 `POST /api/sites/:key/new-chat` 触发，插件在后台打开该网站的 `config.new_chat_url` 或网站网址）
 - 后端只把指令发给“最近一次页面事件显示正开着这个会话”的那个插件标签页；页面正在回答时返回 `busy`；20 秒没有结果返回 `timeout`
 - 插件端选择器可在 DomConfig 的 `actions` 中覆盖（composer / send_button / regenerate_button / regenerate_menu_item / regenerate_menu_text）
 

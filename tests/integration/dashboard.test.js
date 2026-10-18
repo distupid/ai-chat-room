@@ -672,7 +672,8 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 1 }));
   await sendAndAck(ext, ev('generation.finished', { message_id: 'a1', duration_ms: 1200 }));
   await waitFor(() => sounds.length === 2, { label: 'sound' });
-  assert.ok(!d.getElementById('alertScrim').classList.contains('open'));
+  assert.ok(!d.getElementById('detailScrim').classList.contains('open'), '普通会话不弹详情');
+  assert.ok(!d.getElementById('alertScrim'), '已删除页面内提示弹窗');
 
   // 置顶：卡片排到前面，回答完成直接弹窗
   const btn = (label) => [...d.querySelectorAll(`${cardSel} .actions button`)].find((b) => b.textContent === label);
@@ -683,9 +684,10 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.equal(pinBtn.getAttribute('aria-pressed'), 'true');
   assert.ok(pinBtn.classList.contains('filled'), '置顶按钮用强调色背景');
   assert.ok(!d.querySelector('#settingsScrim [data-theme-opt]'), '设置里没有“外观”');
-  // 复制：复制最后一个回答
-  btn('复制').click();
-  await waitFor(() => copied.at(-1) === longText, { label: 'copy last answer' });
+  // 新建：插件在后台打开该来源网站的新空白会话
+  assert.ok(!btn('复制'), '卡片上不再有“复制”');
+  btn('新建').click();
+  await waitFor(() => ext.of('command').some((x) => x.action === 'new_chat' && /^https:\/\/chatgpt\.com/.test(x.text)), { label: 'new chat command' });
   assert.ok(!d.querySelector('[data-notify="limit_reached"]') && !d.querySelector('[data-notify="error"]') && !d.querySelector('[data-notify="background_only"]'), '设置里没有限额 / 出错系统通知');
   assert.match(d.getElementById('chips').textContent, /置顶1/);
   // 看板在前台：回答完成直接打开详情
@@ -694,19 +696,18 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 2 }));
   await sendAndAck(ext, ev('generation.finished', { message_id: 'a1', duration_ms: 2300 }));
   await waitFor(() => d.getElementById('detailScrim').classList.contains('open'), { label: 'front → detail' });
-  assert.ok(!d.getElementById('alertScrim').classList.contains('open'), '前台不弹小弹窗');
   assert.equal(sounds.length, 5, '置顶回答完成也播放（更强的）提示音');
   d.getElementById('detailClose').click();
-  // 看板在后台：页面内弹窗（回来时看到）
+  // 同一次回答完成重复送达：不再弹出（一个回答一次）
+  await sendAndAck(ext, ev('generation.finished', { message_id: 'a1', duration_ms: 2300 }));
+  await sleep(300);
+  assert.ok(!d.getElementById('detailScrim').classList.contains('open'), '重复的完成事件不再弹出');
+  // 看板在后台：同样直接打开详情（回来就能看到），没有提示小弹窗
   d.hasFocus = () => false;
   await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 3 }));
   await sendAndAck(ext, ev('generation.finished', { message_id: 'a1', duration_ms: 2300 }));
-  await waitFor(() => d.getElementById('alertScrim').classList.contains('open'), { label: 'popup' });
+  await waitFor(() => d.getElementById('detailScrim').classList.contains('open'), { label: 'background → detail' });
   d.hasFocus = () => true;
-  assert.match(d.getElementById('alertBody').textContent, /界面测试/);
-  d.getElementById('alertOpen').click();
-  assert.ok(!d.getElementById('alertScrim').classList.contains('open'));
-  assert.ok(d.getElementById('detailScrim').classList.contains('open'), '弹窗“查看”打开详情');
   d.getElementById('detailClose').click();
 
   // 已删除限额判断：旧插件上报 limit_reached 也不显示“已到限额”
@@ -715,7 +716,7 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.notEqual(d.querySelector(`${cardSel} .badge`)?.textContent, '已到限额');
   assert.ok(!d.querySelector(`${cardSel} .notice`), '卡片不再显示限额提示文字');
   assert.ok(![...d.querySelectorAll(`${cardSel} .tag`)].some((t) => /标签页/.test(t.textContent)), '卡片不显示标签页数量');
-  assert.deepEqual([...d.querySelectorAll(`${cardSel} .actions > button`)].map((b) => b.textContent), ['已置顶', '复制', '关闭', '回复']);
+  assert.deepEqual([...d.querySelectorAll(`${cardSel} .actions > button`)].map((b) => b.textContent), ['已置顶', '新建', '关闭', '回复']);
 
   // 双向绑定：插件报告浏览器窗口正显示这个会话 → 卡片高亮
   await sendAndAck(ext, makeEnvelope('event', { event_id: `t:snap:${Date.now().toString(36)}:${++evSeq}`, event_type: 'tabs.snapshot', occurred_at: Date.now(), conversation_id: null, tab_id: null,

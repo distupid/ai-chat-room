@@ -21,6 +21,7 @@ const STATUS_FILTERS = [
 const DEFAULT_QUICK_REPLIES = ['继续', '请详细解释一下', '给出完整代码', '总结一下要点', '换一种思路再试试', '用中文回答', '谢谢，没问题了'];
 
 const SVG = {
+  add: '<svg class="i s18" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>',
   closeTab: '<svg class="i s18" viewBox="0 0 24 24"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm-3.59 12L14 16.41 12 14.41l-2 2L8.59 15l2-2-2-2L10 9.59l2 2 2-2L15.41 11l-2 2 2 2z"/></svg>',
   reply: '<svg class="i s18" viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>',
   pin: '<svg class="i s18" viewBox="0 0 24 24"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>',
@@ -237,16 +238,6 @@ function playSound(strong = false) {
 
 const pageInFront = () => document.visibilityState === 'visible' && (document.hasFocus ? document.hasFocus() : true);
 
-/** 页面内弹窗（置顶会话回答完成） */
-function showPopup(conversationId, title, body) {
-  state.alertConv = conversationId || null;
-  $('alertTitle').textContent = title;
-  $('alertBody').replaceChildren(...String(body || '').split('\n').filter(Boolean).map((line) => el('p', { style: 'margin:0 0 6px' }, line)));
-  $('alertOpen').hidden = !conversationId;
-  $('alertScrim').classList.add('open');
-}
-function closePopup() { $('alertScrim').classList.remove('open'); state.alertConv = null; }
-
 /** 最后一个回答的文字（系统通知里展示），取不到时用卡片上的摘要 */
 async function latestAnswerText(c, conversationId) {
   try {
@@ -258,20 +249,59 @@ async function latestAnswerText(c, conversationId) {
   return c?.last_message?.role === 'assistant' ? c.last_message.text || '' : '';
 }
 
-async function systemNotify(c, conversationId, title, secs) {
+/**
+ * 回答完成 → 直接打开该会话的详情并定位到这条回答。一条回答只弹一次（会话 + 回答 ID 去重），
+ * 正在看另一个会话的详情时排队，关掉当前详情后依次打开，一个回答对应一次弹出。
+ */
+const answerQueue = [];
+const genSeq = new Map();
+const answerSeen = new Set();
+const answerKey = (conv, mid) => `${conv}|${mid || ''}`;
+function enqueueAnswer(conv, mid) {
+  if (state.selected === conv) { focusAnswer(conv, mid); return 'detail'; }
+  if (state.selected) {
+    if (!answerQueue.some((x) => x.conv === conv)) answerQueue.push({ conv, mid });
+    else answerQueue.find((x) => x.conv === conv).mid = mid;   // 同一会话又答完一条：排队项指向最新回答
+    return 'queued';
+  }
+  openAnswer(conv, mid);
+  return 'detail';
+}
+async function openAnswer(conv, mid) {
+  await openDetail(conv);
+  focusAnswer(conv, mid);
+}
+function focusAnswer(conv, mid) {
+  if (state.selected !== conv || !mid) return;
+  const node = [...$('detailMsgs').querySelectorAll('.msg')].find((n) => n.dataset.mid === mid);
+  if (!node) return;
+  node.scrollIntoView?.({ block: 'nearest' });
+  node.classList.add('flash');
+  setTimeout(() => node.classList.remove('flash'), 1700);
+}
+function nextQueuedAnswer() {
+  const next = answerQueue.shift();
+  if (next) openAnswer(next.conv, next.mid);
+}
+
+async function systemNotify(c, conversationId, mid, title, secs) {
   const answer = (await latestAnswerText(c, conversationId)).replace(/\s+/g, ' ').trim();
   const body = [secs, answer.length > 300 ? answer.slice(0, 300) + '…' : answer].filter(Boolean).join('\n');
   try {
-    const note = new Notification(title, { body, tag: `answer:${conversationId}`, renotify: true, requireInteraction: !!c?.pinned });
-    note.onclick = () => { window.focus(); closePopup(); openDetail(conversationId); note.close(); };
-  } catch { /* 系统通知失败时只保留页面内弹窗 */ }
+    const note = new Notification(title, { body, tag: `answer:${answerKey(conversationId, mid)}`, renotify: true, requireInteraction: !!c?.pinned });
+    note.onclick = () => {
+      window.focus();
+      note.close();
+      const k = answerQueue.findIndex((x) => x.conv === conversationId);
+      if (k >= 0) answerQueue.splice(k, 1);
+      if (state.selected && state.selected !== conversationId) closeDetail(false);
+      openAnswer(conversationId, mid);
+    };
+  } catch { /* 系统通知失败时仍会直接打开详情 */ }
 }
 
-/**
- * 回答完成：普通会话 → 音效（打开“所有会话弹窗”时同置顶）；置顶会话 → 弹窗 + 提示音。
- * 看板在前台：直接打开该会话的详情；在后台：系统通知（含回答内容），回来时看到页面内弹窗。
- */
-function onAnswerFinished(c, conversationId, name, secs) {
+/** 回答完成：普通会话 → 音效（打开“所有会话弹出”时同置顶）；置顶会话 → 打开详情 + 提示音；在后台时另发系统通知（含回答内容） */
+function onAnswerFinished(c, conversationId, name, secs, mid, seq) {
   const n = settings.notify;
   const pinned = !!c?.pinned;
   if (pinned && !n.pinned_popup) return 'none';
@@ -279,17 +309,16 @@ function onAnswerFinished(c, conversationId, name, secs) {
     if (n.sound) { playSound(false); return 'sound'; }
     return 'none';
   }
+  // 一次回答完成（会话 + 回答 + 第几次生成）只弹一次：同一事件重复送达不再弹；重新回答是新的一次
+  const key = `${answerKey(conversationId, mid)}|${seq ?? ''}`;
+  const keyed = mid || seq != null;
+  if (keyed && answerSeen.has(key)) return 'dup';
+  if (keyed) { answerSeen.add(key); if (answerSeen.size > 500) answerSeen.delete(answerSeen.values().next().value); }
   if (pinned || n.sound) playSound(pinned);
-  const title = `${pinned ? '置顶会话回答完成' : '回答完成'}：${name}`;
-  if (pageInFront()) {
-    // 正在另一个会话的详情里输入时不打断，改用小弹窗
-    const typing = state.selected && state.selected !== conversationId && $('quickText').value.trim();
-    if (!typing) { closePopup(); openDetail(conversationId); return 'detail'; }
-  } else if (n.enabled && notificationsSupported() && Notification.permission === 'granted') {
-    systemNotify(c, conversationId, title, secs);
+  if (!pageInFront() && n.enabled && notificationsSupported() && Notification.permission === 'granted') {
+    systemNotify(c, conversationId, mid, `${pinned ? '置顶会话回答完成' : '回答完成'}：${name}`, secs);
   }
-  showPopup(conversationId, pinned ? '置顶会话回答完成' : '回答完成', `${name}${secs ? '\n' + secs : ''}`);
-  return 'popup';
+  return enqueueAnswer(conversationId, mid);
 }
 
 async function toggleNotifications() {
@@ -382,11 +411,12 @@ function scrollToFavorite() {
   setTimeout(() => target.classList.remove('flash'), 1700);
 }
 
-function closeDetail() {
+function closeDetail(showNext = true) {
   if (state.selected) state.drafts.set(state.selected, $('quickText').value);
   closeCands();
   state.selected = null;
   $('detailScrim').classList.remove('open');
+  if (showNext) setTimeout(nextQueuedAnswer, 0);   // 排队的回答完成依次打开
 }
 
 // ------------------------------------------------------------------ 操作
@@ -417,13 +447,13 @@ async function toggleFavorite(conversationId, messageId) {
 }
 
 /** 卡片“复制”：读取会话消息，复制最后一个回答 */
-async function copyLastAnswer(c) {
+/** 卡片“新建”：插件在后台打开该卡片来源网站的新空白会话 */
+async function newChat(c) {
   try {
-    const data = await api(`/api/conversations/${encodeURIComponent(c.conversation_id)}/messages`);
-    const last = [...(data.messages || [])].filter((m) => m.role === 'assistant').sort((a, b) => a.msg_index - b.msg_index).pop();
-    if (!last || !last.text) return snackbar('这个会话还没有回答', 'err');
-    await copyText(last.text);
-  } catch (e) { snackbar(`复制失败：${e.message}`, 'err'); }
+    await api(`/api/sites/${encodeURIComponent(c.source)}/new-chat`, { method: 'POST', body: '{}' });
+    snackbar(`已在后台新建 ${sourceInfo(c.source).label} 会话`, 'ok');
+    scheduleRefresh(1500);
+  } catch (e) { snackbar(`新建失败：${e.message}`, 'err'); }
 }
 
 async function copyText(text, what = '回答') {
@@ -611,9 +641,11 @@ function onBroadcast(b) {
       snackbar(`${label}：${name}${b.payload.detail ? ' — ' + b.payload.detail : ''}`, 'err');
     }
   }
+  // 第几次生成：finished 不带序号，取同一会话最近一次 started 的（一次生成对应一次弹出）
+  if (b.event_type === 'generation.started') genSeq.set(conv, b.payload.generation_sequence ?? `${b.event_id}`);
   if (b.event_type === 'generation.finished') {
     const secs = b.payload.duration_ms != null ? `用时 ${duration(b.payload.duration_ms)}` : '';
-    onAnswerFinished(c, conv, name, secs);
+    onAnswerFinished(c, conv, name, secs, b.payload.message_id || null, genSeq.get(conv));
   }
   scheduleRefresh(b.event_type === 'message.updated' ? 1500 : 300);
 }
@@ -713,9 +745,9 @@ function card(c) {
       el('button', { class: `btn ${c.pinned ? 'filled' : 'outlined'} s`, 'data-act': 'pin', 'aria-pressed': String(!!c.pinned), title: c.pinned ? '已置顶，点击取消' : '置顶', onclick: stop(() => togglePin(c)) },
         el('span', { html: SVG.pin, style: 'display:inline-flex' }), c.pinned ? '已置顶' : '置顶'),
       el('button', {
-        class: 'btn outlined s', 'data-act': 'copy', title: c.assistant_count ? '复制最后一个回答' : '还没有回答',
-        disabled: !c.assistant_count, onclick: stop(() => copyLastAnswer(c))
-      }, el('span', { html: SVG.copy, style: 'display:inline-flex' }), '复制'),
+        class: 'btn outlined s', 'data-act': 'new', title: `在后台新建一个 ${src.label} 空白会话`,
+        disabled: !SOURCES[c.source] || state.wsState !== 'open', onclick: stop(() => newChat(c))
+      }, el('span', { html: SVG.add, style: 'display:inline-flex' }), '新建'),
       el('button', {
         class: 'btn outlined s', 'data-act': 'close', title: c.open_tabs ? '关闭开着这个会话的标签页' : offlineTip,
         disabled: !online || busy, onclick: stop(() => closePage(c))
@@ -1669,11 +1701,7 @@ qt.addEventListener('keydown', (e) => {
     closeCands();
   }
 });
-$('alertClose').onclick = closePopup;
-$('alertOpen').onclick = () => { const id = state.alertConv; closePopup(); if (id) openDetail(id); };
-$('alertScrim').addEventListener('click', (e) => { if (e.target === $('alertScrim')) closePopup(); });
 $('soundTest').onclick = () => { if (!playSound(false)) snackbar('当前浏览器不支持音效', 'err'); };
-$('popupTest').onclick = () => { playSound(true); showPopup(null, '置顶会话回答完成', '这是一个测试弹窗'); };
 $('qrAdd').onclick = addQuickReply;
 $('qrNew').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addQuickReply(); } });
 $('qrReset').onclick = () => { settings.quickReplies = [...DEFAULT_QUICK_REPLIES]; saveQuickReplies(); renderQuickReplySettings(); };
@@ -1681,8 +1709,7 @@ $('qrReset').onclick = () => { settings.quickReplies = [...DEFAULT_QUICK_REPLIES
 document.addEventListener('pointerdown', unlockAudio, { once: true });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  if ($('alertScrim').classList.contains('open')) closePopup();
-  else if ($('siteCfgScrim').classList.contains('open')) closeSiteConfig();
+  if ($('siteCfgScrim').classList.contains('open')) closeSiteConfig();
   else if ($('settingsScrim').classList.contains('open')) closeSettings();
   else if (state.selected) closeDetail();
 });
