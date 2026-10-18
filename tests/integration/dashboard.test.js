@@ -688,10 +688,21 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   await waitFor(() => copied.at(-1) === longText, { label: 'copy last answer' });
   assert.ok(!d.querySelector('[data-notify="limit_reached"]') && !d.querySelector('[data-notify="error"]') && !d.querySelector('[data-notify="background_only"]'), '设置里没有限额 / 出错系统通知');
   assert.match(d.getElementById('chips').textContent, /置顶1/);
+  // 看板在前台：回答完成直接打开详情
+  Object.defineProperty(d, 'visibilityState', { configurable: true, get: () => 'visible' });
+  d.hasFocus = () => true;
   await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 2 }));
   await sendAndAck(ext, ev('generation.finished', { message_id: 'a1', duration_ms: 2300 }));
-  await waitFor(() => d.getElementById('alertScrim').classList.contains('open'), { label: 'popup' });
+  await waitFor(() => d.getElementById('detailScrim').classList.contains('open'), { label: 'front → detail' });
+  assert.ok(!d.getElementById('alertScrim').classList.contains('open'), '前台不弹小弹窗');
   assert.equal(sounds.length, 5, '置顶回答完成也播放（更强的）提示音');
+  d.getElementById('detailClose').click();
+  // 看板在后台：页面内弹窗（回来时看到）
+  d.hasFocus = () => false;
+  await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 3 }));
+  await sendAndAck(ext, ev('generation.finished', { message_id: 'a1', duration_ms: 2300 }));
+  await waitFor(() => d.getElementById('alertScrim').classList.contains('open'), { label: 'popup' });
+  d.hasFocus = () => true;
   assert.match(d.getElementById('alertBody').textContent, /界面测试/);
   d.getElementById('alertOpen').click();
   assert.ok(!d.getElementById('alertScrim').classList.contains('open'));

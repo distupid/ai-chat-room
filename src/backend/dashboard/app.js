@@ -230,29 +230,49 @@ function showPopup(conversationId, title, body) {
 }
 function closePopup() { $('alertScrim').classList.remove('open'); state.alertConv = null; }
 
-/** 回答完成：普通会话 → 音效；置顶会话 → 弹窗（前台页面内弹窗，后台系统通知）+ 音效 */
+/** 最后一个回答的文字（系统通知里展示），取不到时用卡片上的摘要 */
+async function latestAnswerText(c, conversationId) {
+  try {
+    const data = await api(`/api/conversations/${encodeURIComponent(conversationId)}/messages`);
+    const list = (data.messages || []).filter((m) => m.role === 'assistant');
+    const t = list.at(-1)?.text;
+    if (t) return t;
+  } catch { /* 退回卡片摘要 */ }
+  return c?.last_message?.role === 'assistant' ? c.last_message.text || '' : '';
+}
+
+async function systemNotify(c, conversationId, title, secs) {
+  const answer = (await latestAnswerText(c, conversationId)).replace(/\s+/g, ' ').trim();
+  const body = [secs, answer.length > 300 ? answer.slice(0, 300) + '…' : answer].filter(Boolean).join('\n');
+  try {
+    const note = new Notification(title, { body, tag: `answer:${conversationId}`, renotify: true, requireInteraction: !!c?.pinned });
+    note.onclick = () => { window.focus(); closePopup(); openDetail(conversationId); note.close(); };
+  } catch { /* 系统通知失败时只保留页面内弹窗 */ }
+}
+
+/**
+ * 回答完成：普通会话 → 音效（打开“所有会话弹窗”时同置顶）；置顶会话 → 弹窗 + 提示音。
+ * 看板在前台：直接打开该会话的详情；在后台：系统通知（含回答内容），回来时看到页面内弹窗。
+ */
 function onAnswerFinished(c, conversationId, name, secs) {
   const n = settings.notify;
-  if (c?.pinned) {
-    if (!n.pinned_popup) return 'none';
-    playSound(true);
-    const sysOk = n.enabled && notificationsSupported() && Notification.permission === 'granted';
-    if (!pageInFront() && sysOk) {
-      try {
-        const note = new Notification(`置顶会话回答完成：${name}`, { body: secs, tag: `pinned:${conversationId}`, renotify: true, requireInteraction: true });
-        note.onclick = () => { window.focus(); openDetail(conversationId); note.close(); };
-      } catch { /* 系统通知失败时退回页面内弹窗 */ }
-    }
-    showPopup(conversationId, '置顶会话回答完成', `${name}${secs ? '\n' + secs : ''}`);
-    return 'popup';
+  const pinned = !!c?.pinned;
+  if (pinned && !n.pinned_popup) return 'none';
+  if (!pinned && !n.all_popup) {
+    if (n.sound) { playSound(false); return 'sound'; }
+    return 'none';
   }
-  if (n.all_popup) {
-    if (n.sound) playSound(false);
-    showPopup(conversationId, '回答完成', `${name}${secs ? '\n' + secs : ''}`);
-    return 'popup';
+  if (pinned || n.sound) playSound(pinned);
+  const title = `${pinned ? '置顶会话回答完成' : '回答完成'}：${name}`;
+  if (pageInFront()) {
+    // 正在另一个会话的详情里输入时不打断，改用小弹窗
+    const typing = state.selected && state.selected !== conversationId && $('quickText').value.trim();
+    if (!typing) { closePopup(); openDetail(conversationId); return 'detail'; }
+  } else if (n.enabled && notificationsSupported() && Notification.permission === 'granted') {
+    systemNotify(c, conversationId, title, secs);
   }
-  if (n.sound) { playSound(false); return 'sound'; }
-  return 'none';
+  showPopup(conversationId, pinned ? '置顶会话回答完成' : '回答完成', `${name}${secs ? '\n' + secs : ''}`);
+  return 'popup';
 }
 
 async function toggleNotifications() {
@@ -706,7 +726,8 @@ function toggleCardReply(id) {
 function cardReplyPanel(c, online, busy) {
   const id = c.conversation_id;
   const ta = el('textarea', { class: 'field', placeholder: '发到这个会话，Enter 发送，Shift+Enter 换行', 'aria-label': '快速回复' });
-  ta.value = '';
+  // 展开时已清空草稿；之后看板刷新（会话有更新时整张卡片重建）要保留正在输入的内容
+  ta.value = state.drafts.get(id) || '';
   const send = (preset) => {
     const text = (typeof preset === 'string' ? preset : ta.value).trim();
     if (!text) return snackbar('回复内容不能为空', 'err');
@@ -716,6 +737,12 @@ function cardReplyPanel(c, online, busy) {
     if (state.cardReply === id) { state.cardReply = null; render(); }
   };
   ta.addEventListener('input', () => state.drafts.set(id, ta.value));
+  // 焦点离开回复栏自动收起（看板刷新重建卡片引起的失焦不算）
+  ta.addEventListener('blur', () => setTimeout(() => {
+    if (state.rendering || state.cardReply !== id) return;
+    if (document.activeElement?.closest?.('.creply')) return;
+    toggleCardReply(id);
+  }, 150));
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); send(); }
     else if (e.key === 'Escape') { e.preventDefault(); toggleCardReply(id); }
@@ -746,7 +773,8 @@ function render() {
   } else if (!list.length) {
     grid.replaceChildren(el('div', { class: 'empty' }, { favorite: '还没有收藏的会话', closed: '没有已关闭的页面' }[state.filter] || '没有符合条件的会话'));
   } else {
-    grid.replaceChildren(...list.map(card));
+    state.rendering = true;
+    try { grid.replaceChildren(...list.map(card)); } finally { setTimeout(() => { state.rendering = false; }, 0); }
   }
   if (replyFocus) {
     const ta = grid.querySelector('.creply textarea');

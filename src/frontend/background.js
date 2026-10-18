@@ -3,7 +3,6 @@ import { createBackground, DEFAULT_SETTINGS } from './lib/background-core.js';
 import { randomId } from './shared/protocol.js';
 import { analyzeDomOnServer, clearDomConfigOnServer, getSitesFromServer, submitProbeDom } from './lib/dom-config-client.js';
 
-const SUPPORTED_URL = /^https:\/\/(chatgpt\.com|chat\.openai\.com|duck\.ai|(?:www\.)?hark\.com)\//;
 function siteOf(url) {
   const host = new URL(url).hostname;
   if (/(^|\.)duck\.ai$/.test(host)) return 'duckai';
@@ -14,11 +13,11 @@ function siteOf(url) {
 /** 弹窗按钮：抓取当前标签页 DOM → 后端分析 → 保存配置（内容脚本监听 storage 变化后立即生效） */
 async function analyzeActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab || !SUPPORTED_URL.test(tab.url || '')) return { ok: false, error: '请先切换到 chatgpt.com / duck.ai / hark.com 的对话页面再点分析' };
+  if (!tab) return { ok: false, error: '没有找到当前标签页' };
   const site = siteOf(tab.url);
   let captured;
   try { captured = await chrome.tabs.sendMessage(tab.id, { kind: 'capture_dom' }); }
-  catch { return { ok: false, error: '页面上没有运行内容脚本：重新加载插件后，请按 F5 刷新 ChatGPT 页面' }; }
+  catch { return { ok: false, error: '页面上没有运行内容脚本：重新加载插件后，请按 F5 刷新当前页面' }; }
   if (!captured?.ok) return { ok: false, error: captured?.error || '抓取 DOM 失败' };
   const { serverUrl, token } = await loadSettings();
   if (!token) return { ok: false, error: '请先填写并保存 extension token' };
