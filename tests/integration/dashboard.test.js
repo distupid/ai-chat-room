@@ -710,6 +710,21 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   d.hasFocus = () => true;
   d.getElementById('detailClose').click();
 
+  // 正在输入：等输入停下来（约 4 秒没打字）再弹出详情，不打断
+  const typing = d.createElement('textarea');
+  d.body.appendChild(typing);
+  typing.focus();
+  typing.value = '打字中';
+  typing.dispatchEvent(new d.defaultView.Event('input', { bubbles: true }));
+  await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 4 }));
+  await sendAndAck(ext, ev('generation.finished', { message_id: 'a1', duration_ms: 2300 }));
+  await sleep(1500);
+  assert.ok(!d.getElementById('detailScrim').classList.contains('open'), '输入中不弹出');
+  await waitFor(() => d.getElementById('detailScrim').classList.contains('open'), { label: 'after typing idle', timeout: 6000 });
+  typing.remove();
+  d.getElementById('detailClose').click();
+  assert.ok(!d.getElementById('quickCancel'), '详情里没有“收起”按钮');
+
   // 已删除限额判断：旧插件上报 limit_reached 也不显示“已到限额”
   await sendAndAck(ext, ev('conversation.status', { source: 'chatgpt', status: 'limit_reached', detail: '已达到使用上限', model: null }));
   await sleep(300);

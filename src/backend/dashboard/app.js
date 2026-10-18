@@ -257,15 +257,36 @@ const answerQueue = [];
 const genSeq = new Map();
 const answerSeen = new Set();
 const answerKey = (conv, mid) => `${conv}|${mid || ''}`;
-function enqueueAnswer(conv, mid) {
-  if (state.selected === conv) { focusAnswer(conv, mid); return 'detail'; }
+// 正在输入（焦点在输入框里且最近 4 秒内打过字）时不弹出，等输入停下来再弹，防止打断
+let lastInputAt = 0;
+document.addEventListener('input', (e) => { if (isEditable(e.target)) lastInputAt = Date.now(); }, true);
+function isEditable(n) {
+  return !!n && (n.tagName === 'TEXTAREA' || (n.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'range', 'color'].includes(n.type)) || n.isContentEditable);
+}
+const TYPING_IDLE_MS = 4000;
+function userTyping() { return isEditable(document.activeElement) && Date.now() - lastInputAt < TYPING_IDLE_MS; }
+let deliverTimer = null;
+function deliverAnswers() {
+  clearTimeout(deliverTimer);
+  deliverTimer = null;
+  if (!answerQueue.length) return;
+  if (userTyping()) { deliverTimer = setTimeout(deliverAnswers, 1000); return; }
   if (state.selected) {
-    if (!answerQueue.some((x) => x.conv === conv)) answerQueue.push({ conv, mid });
-    else answerQueue.find((x) => x.conv === conv).mid = mid;   // 同一会话又答完一条：排队项指向最新回答
-    return 'queued';
+    // 正在看的会话：直接定位到它的回答；其他会话继续排队，关掉当前详情后依次打开
+    const k = answerQueue.findIndex((x) => x.conv === state.selected);
+    if (k >= 0) { const [x] = answerQueue.splice(k, 1); focusAnswer(x.conv, x.mid); }
+    return;
   }
-  openAnswer(conv, mid);
-  return 'detail';
+  const next = answerQueue.shift();
+  openAnswer(next.conv, next.mid);
+}
+function enqueueAnswer(conv, mid) {
+  const same = answerQueue.find((x) => x.conv === conv);
+  if (same) same.mid = mid;   // 同一会话又答完一条：排队项指向最新回答
+  else answerQueue.push({ conv, mid });
+  const waiting = userTyping() || (state.selected && state.selected !== conv);
+  deliverAnswers();
+  return waiting ? 'queued' : 'detail';
 }
 async function openAnswer(conv, mid) {
   await openDetail(conv);
@@ -278,10 +299,6 @@ function focusAnswer(conv, mid) {
   node.scrollIntoView?.({ block: 'nearest' });
   node.classList.add('flash');
   setTimeout(() => node.classList.remove('flash'), 1700);
-}
-function nextQueuedAnswer() {
-  const next = answerQueue.shift();
-  if (next) openAnswer(next.conv, next.mid);
 }
 
 async function systemNotify(c, conversationId, mid, title, secs) {
@@ -416,7 +433,7 @@ function closeDetail(showNext = true) {
   closeCands();
   state.selected = null;
   $('detailScrim').classList.remove('open');
-  if (showNext) setTimeout(nextQueuedAnswer, 0);   // 排队的回答完成依次打开
+  if (showNext) setTimeout(deliverAnswers, 0);   // 排队的回答完成依次打开
 }
 
 // ------------------------------------------------------------------ 操作
@@ -1675,7 +1692,6 @@ $('detailClose').onclick = closeDetail;
 $('detailScrim').addEventListener('click', (e) => { if (e.target === $('detailScrim')) closeDetail(); });
 $('detailJump').onclick = () => { const c = convById(state.selected); if (c) jumpTo(c); };
 $('detailPin').onclick = () => { const c = convById(state.selected); if (c) togglePin(c); };
-$('quickCancel').onclick = () => toggleComposer(false);
 $('quickSend').onclick = sendQuick;
 const qt = $('quickText');
 qt.addEventListener('input', () => { state.drafts.set(state.selected, qt.value); state.candIndex = -1; openCands(); });
