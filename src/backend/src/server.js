@@ -704,13 +704,13 @@ export function createBridgeServer(opts = {}) {
     return conversationId != null && rec.subscriptions.has(conversationId);
   }
 
-  /** 构造广播消息；无 read_content 权限时去掉消息正文 */
+  /** 构造广播消息；无 read_content 权限时去掉消息正文（text 和 html） */
   function toBroadcast(stored, rec, replay) {
     const canRead = rec.scopes.has(Scope.READ_CONTENT);
     let payload = stored.payload;
     let redacted = false;
-    if (!canRead && typeof payload.text === 'string') {
-      const { text, ...rest } = payload;
+    if (!canRead && (typeof payload.text === 'string' || typeof payload.html === 'string')) {
+      const { text, html, ...rest } = payload;
       payload = rest;
       redacted = true;
     }

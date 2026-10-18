@@ -74,6 +74,9 @@ export function openDatabase(dbPath = ':memory:') {
   addCol('pinned', 'INTEGER NOT NULL DEFAULT 0');
   addCol('pinned_at', 'INTEGER');
   if (!hadArchived) db.exec('UPDATE conversation_marks SET archived = done, archived_at = done_at WHERE done = 1');
+  // 幂等迁移：messages 增加 html（净化后的富文本，可为空）
+  const msgCols = new Set(db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name));
+  if (!msgCols.has('html')) db.exec('ALTER TABLE messages ADD COLUMN html TEXT');
 
   const insertEvent = db.prepare(`
     INSERT INTO events (event_id, client_id, event_type, conversation_id, tab_id, occurred_at, received_at, payload_json)
@@ -81,10 +84,10 @@ export function openDatabase(dbPath = ':memory:') {
     ON CONFLICT(event_id) DO NOTHING`);
   const findSeq = db.prepare('SELECT seq FROM events WHERE event_id = ?');
   const upsertMessage = db.prepare(`
-    INSERT INTO messages (conversation_id, message_id, role, msg_index, text, updated_seq, updated_at)
-    VALUES (@conversation_id, @message_id, @role, @msg_index, @text, @seq, @now)
+    INSERT INTO messages (conversation_id, message_id, role, msg_index, text, html, updated_seq, updated_at)
+    VALUES (@conversation_id, @message_id, @role, @msg_index, @text, @html, @seq, @now)
     ON CONFLICT(conversation_id, message_id) DO UPDATE SET
-      role = excluded.role, text = excluded.text,   -- 序号以第一次记录为准，不被之后的更新覆盖（长对话里页面只渲染一部分，序号会变）
+      role = excluded.role, text = excluded.text, html = excluded.html,   -- 序号以第一次记录为准，不被之后的更新覆盖（长对话里页面只渲染一部分，序号会变）
       updated_seq = excluded.updated_seq, updated_at = excluded.updated_at
     WHERE excluded.updated_seq > messages.updated_seq`);
   const upsertConversation = db.prepare(`
@@ -117,6 +120,7 @@ export function openDatabase(dbPath = ':memory:') {
           role: ev.payload.role,
           msg_index: ev.payload.index,
           text: ev.payload.text,
+          html: typeof ev.payload.html === 'string' ? ev.payload.html : null,
           seq, now
         });
       }
@@ -185,7 +189,7 @@ export function openDatabase(dbPath = ':memory:') {
           WHERE tab_id IS NOT NULL AND event_type IN ('page.opened', 'page.closed', 'conversation.changed')
           GROUP BY client_id, tab_id) x ON e.seq = x.s`);
   const listMessagesStmt = db.prepare(`
-    SELECT message_id, role, msg_index, text, updated_seq, updated_at FROM messages
+    SELECT message_id, role, msg_index, text, html, updated_seq, updated_at FROM messages
     WHERE conversation_id = ? ORDER BY msg_index, updated_seq`);
   const recentEventsStmt = db.prepare('SELECT * FROM events WHERE conversation_id = ? ORDER BY seq DESC LIMIT ?');
 
@@ -291,8 +295,8 @@ function rowToEvent(row) {
 }
 
 function stripText(ev) {
-  if (typeof ev.payload?.text !== 'string') return ev;
-  const { text, ...rest } = ev.payload;
+  if (typeof ev.payload?.text !== 'string' && typeof ev.payload?.html !== 'string') return ev;
+  const { text, html, ...rest } = ev.payload;
   return { ...ev, payload: rest };
 }
 

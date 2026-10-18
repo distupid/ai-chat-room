@@ -78,6 +78,8 @@ test/                         单元测试 + 多客户端 E2E 验收测试
 
 业务事件类型：`page.opened`、`page.closed`、`conversation.changed`、`message.added`、`message.updated`、`generation.started`、`generation.finished`，每种都有独立的 payload Schema。
 
+**消息富文本（`html`，可选）**：`message.added` / `message.updated` 的 payload 除 `text` 外可带 `html`（≤ `Limits.MAX_HTML_CHARS` = 200000 字符）：观察器从与 `text` 相同的正文节点、按相同的 `text.exclude` 生成净化后的 HTML，只输出白名单 `p br h1-h6 ul ol li blockquote pre code(class=language-*) table thead tbody tfoot tr th td strong em b i del s sup sub hr a[href http(s)/data/blob] img[src http(s)/data:image]`，span / div 只保留内容（只有行内内容的 div 变成 `<p>`），script / style / iframe / form / button / svg 等整段丢掉，不复制任何事件属性 / style / class。文件链接（`download` 属性或文件扩展名）带 `data-file="文件名"`；没有网址的文件卡片（按钮文字就是文件名，如 Hark 的文件气泡）输出 `<span data-file="文件名">`。只有 p / br 时与 text 等价，不发送；text + html 估算超过 200KB 时也不发送（整条 WebSocket 消息上限 256KB），看板退回 text。后端存进 `messages.html`（旧库自动加列），`GET /api/conversations/:id/messages` 返回；无 `read_content` 的客户端广播里 `text` 和 `html` 都去掉。
+
 **event_id 稳定性**：`message.added` = hash(类型, 会话, message_id)；`message.updated` = hash(类型, 会话, message_id, 内容哈希)。同一内容被反复观察、页面刷新、插件重连重发，都得到同一 event_id。
 
 错误码：`INVALID_JSON`、`SCHEMA_VIOLATION`、`UNSUPPORTED_VERSION`、`NOT_HELLO`、`UNAUTHORIZED`、`FORBIDDEN`、`RATE_LIMITED`、`MESSAGE_TOO_LARGE`、`INTERNAL`。其中 SCHEMA_VIOLATION / UNSUPPORTED_VERSION / FORBIDDEN / MESSAGE_TOO_LARGE 为不可重试，插件会从队列移除对应事件；UNAUTHORIZED 会让插件停止重连直到修改设置。
@@ -169,7 +171,12 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 - **点卡片**：有标签页开着这个会话就切换过去，否则新开页面
 - 卡片按钮：置顶、关闭页面（插件关掉开着该会话的标签页）、回复（向下弹出快速回复栏，Enter 发送、Shift+Enter 换行，发送后自动收起；点击常见回答直接发送）
 - 顶栏：已连接 · N 个页面、搜索、网站（全部可编辑 / 配置 / 停用 / 删除，无“内置”，见“网站列表”）、收藏、设置、一键启动（插件在后台打开所有启用的网站）
-- **详情**弹窗：完整对话，实时流式更新，代码块和行内代码有格式；右上角可复制最后一条回答、跳转到页面
+- **详情**弹窗：完整对话，实时流式更新；消息有 `html` 时按原页面格式显示（标题、列表、表格、引用、粗体等），看板用 `DOMParser` 解析成惰性文档后按白名单逐个节点重建（不复制事件属性 / style，链接只允许 http(s) / data / blob，图片只允许 http(s) / data:image），从不把正文直接写进 `innerHTML`；没有 `html` 时按 `text` 的轻量 Markdown 显示
+  - 代码块：语言标签 +“复制”（复制代码文字）+“下载”（按语言取扩展名，如 `.py` / `.js`，未知为 `.txt`）
+  - 图片：内联显示（最大宽度 100%），点击打开原图，“下载”按钮（跨域图片浏览器可能改为打开）
+  - 文件：文件卡片显示文件名，有网址时可下载 / 打开，没有网址只显示名称
+  - 长消息首尾折叠、复制回答（复制 `text`）、收藏、搜索（按 `text`）照常
+  - 右上角可复制最后一条回答、跳转到页面
 - **设置**：连接（token、连接 / 断开）、外观、系统通知（已到限额 / 回答完成 / 出错，可设为只在看板不在前台时通知，含测试通知）、后台状态（运行时间、在线客户端、事件和指令计数）
 
 ### 会话实体字段（`GET /api/conversations`）

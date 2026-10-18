@@ -19,7 +19,7 @@ HTTP + WebSocket 服务：hello 握手与 token 鉴权、Origin 检查、限流�
 - seq 分配顺序 = 广播顺序。
 - 单客户端发送失败不影响其他客户端（每个 send 独立 try/catch）。
 - 默认只绑定 127.0.0.1；拒绝 `http(s)://` Origin 的升级与 API 请求。
-- 无 `read_content` scope 的客户端只收到去掉 `text` 的广播（`redacted: true`）。
+- 无 `read_content` scope 的客户端只收到去掉 `text` 和 `html` 的广播（`redacted: true`）；`messages.html` 存消息的净化富文本（可为空）。
 - 指令只发给最近一次页面事件显示正开着该会话的插件标签页；20 秒超时；回答中返回 `busy`。
 - 日志和 `/stats` 不含正文。
 

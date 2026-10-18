@@ -108,6 +108,7 @@ export const CommandAction = Object.freeze({
 export const Limits = Object.freeze({
   MAX_MESSAGE_BYTES: 256 * 1024,
   MAX_TEXT_CHARS: 60000,
+  MAX_HTML_CHARS: 200000,      // message.* 的可选 html（净化后的富文本）上限；超过时插件不带 html，只发 text
   MAX_COMMAND_TEXT: 20000,
   MAX_SUBSCRIPTIONS: 100
 });
@@ -149,7 +150,10 @@ const messagePayload = obj({
   index: { type: 'integer', minimum: 0 },
   text: { type: 'string', maxLength: Limits.MAX_TEXT_CHARS },
   text_length: { type: 'integer', minimum: 0 },
-  truncated: { type: 'boolean' }            // 可选：text 是否因超过 MAX_TEXT_CHARS 被截断
+  truncated: { type: 'boolean' },           // 可选：text 是否因超过 MAX_TEXT_CHARS 被截断
+  // 可选：同一消息节点净化后的 HTML（保留段落 / 标题 / 列表 / 代码块 / 表格 / 图片 / 链接 / 文件），看板据此按原格式显示；
+  // 只允许白名单标签和属性（插件和看板各净化一次），超过上限时省略，看板退回 text
+  html: { type: 'string', maxLength: Limits.MAX_HTML_CHARS }
 }, ['message_id', 'role', 'index', 'text', 'text_length']);
 
 /** 每种业务事件的 payload schema */
@@ -188,7 +192,7 @@ export const EVENT_PAYLOAD_SCHEMAS = Object.freeze({
   }, ['source', 'status', 'detail'])
 });
 
-/** 广播中被脱敏（无 read_content 权限）的消息 payload：没有 text 字段 */
+/** 广播中被脱敏（无 read_content 权限）的消息 payload：没有 text / html 字段 */
 const redactedMessagePayload = obj({
   message_id: { type: 'string', minLength: 1, maxLength: 128 },
   role: ROLE,

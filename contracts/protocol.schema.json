@@ -403,6 +403,10 @@
                   },
                   "truncated": {
                     "type": "boolean"
+                  },
+                  "html": {
+                    "type": "string",
+                    "maxLength": 200000
                   }
                 }
               }
@@ -462,6 +466,10 @@
                   },
                   "truncated": {
                     "type": "boolean"
+                  },
+                  "html": {
+                    "type": "string",
+                    "maxLength": 200000
                   }
                 }
               }
@@ -1036,6 +1044,10 @@
                       },
                       "truncated": {
                         "type": "boolean"
+                      },
+                      "html": {
+                        "type": "string",
+                        "maxLength": 200000
                       }
                     }
                   },
@@ -1137,6 +1149,10 @@
                       },
                       "truncated": {
                         "type": "boolean"
+                      },
+                      "html": {
+                        "type": "string",
+                        "maxLength": 200000
                       }
                     }
                   },

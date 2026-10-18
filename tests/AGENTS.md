@@ -7,6 +7,7 @@
 | `observer.test.js` | ChatGPT DOM 观察：新消息、流式、生成开始/结束、去重 |
 | `sites.test.js` | Duck.ai、Hark、ChatGPT 多站点适配、页面操作、focus |
 | `dom-config.test.js` | DOM 分析 API 与配置应用 |
+| `rich-content.test.js` | 富文本：观察器净化 html、协议上限、后端存储 / 脱敏 / 迁移、看板代码块 / 图片 / 文件卡片 / 再净化 / 长消息折叠 |
 | `sites-config.test.js` | 网站全部可配置：默认种子、按域名选配置、编辑 / 停用 / 恢复默认、旧 sites.json 迁移、看板网站配置弹窗 |
 | `broadcast.e2e.test.js` | 真实后端 + 真实 ws：持久化、多客户端顺序、回显、防循环、断线、重启补发、回放 |
 | `dashboard.test.js` | 会话 API、看板渲染与指令 |

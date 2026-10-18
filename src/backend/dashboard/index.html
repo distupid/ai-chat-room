@@ -160,6 +160,40 @@
     .msg .body a.dl { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; margin: 4px 0; border-radius: 8px; border: 1px solid var(--outline-variant); color: var(--primary); text-decoration: none; font-size: 13px; }
     .msg .body a.dl:hover { background: var(--secondary-container); }
     .msg .body a.dl svg { width: 18px; height: 18px; fill: currentColor; }
+    /* 富文本（原页面格式）：代码块、图片、文件、表格、标题、列表 */
+    .msg .body.rich p { white-space: normal; }
+    .msg .body.rich h1, .msg .body.rich h2, .msg .body.rich h3, .msg .body.rich h4, .msg .body.rich h5, .msg .body.rich h6 { margin: 12px 0 6px; line-height: 1.35; font-weight: 600; }
+    .msg .body.rich h1 { font-size: 20px; } .msg .body.rich h2 { font-size: 18px; } .msg .body.rich h3 { font-size: 16px; }
+    .msg .body.rich h4, .msg .body.rich h5, .msg .body.rich h6 { font-size: 14px; }
+    .msg .body.rich ul, .msg .body.rich ol { margin: 4px 0 8px; padding-left: 22px; }
+    .msg .body.rich li { margin: 2px 0; }
+    .msg .body.rich li > p { margin: 0; }
+    .msg .body.rich blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid var(--outline-variant); color: var(--on-surface-variant); }
+    .msg .body.rich hr { border: 0; border-top: 1px solid var(--outline-variant); margin: 12px 0; }
+    .msg .body.rich a:not(.filechip):not(.imgdl) { color: var(--primary); }
+    .msg .body .tablewrap { overflow-x: auto; margin: 8px 0; }
+    .msg .body table { border-collapse: collapse; font-size: 13px; }
+    .msg .body th, .msg .body td { border: 1px solid var(--outline-variant); padding: 4px 8px; text-align: left; vertical-align: top; }
+    .msg .body th { background: var(--surface-container-highest); font-weight: 600; }
+    .msg .body .codeblock { margin: 8px 0; border-radius: 8px; overflow: hidden; background: var(--surface-container-highest); }
+    .msg .body .codeblock pre { margin: 0; border-radius: 0; }
+    .msg .body .codeblock .cbh { display: flex; align-items: center; gap: 4px; padding: 2px 6px 2px 12px; font-size: 12px; color: var(--on-surface-variant); border-bottom: 1px solid var(--outline-variant); }
+    .msg .body .codeblock .lang { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Consolas, monospace; }
+    .msg .body .codeblock .cbtn { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px; border: 0; border-radius: 14px; background: transparent; color: var(--primary); cursor: pointer; font-size: 12px; }
+    .msg .body .codeblock .cbtn:hover { background: color-mix(in srgb, var(--primary) 10%, transparent); }
+    .msg .body .codeblock .cbtn .ic, .msg .body .filechip .ic, .msg .body a.imgdl .ic { display: inline-flex; }
+    .msg .body .codeblock .cbtn svg { width: 16px; height: 16px; fill: currentColor; }
+    .msg .body .imgblock { display: inline-flex; flex-direction: column; align-items: flex-start; max-width: 100%; margin: 4px 0; vertical-align: top; }
+    .msg .body .imgblock img.rich { margin: 4px 0; }
+    .msg .body a.imgdl { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 10px; border-radius: 13px; border: 1px solid var(--outline-variant); color: var(--primary); text-decoration: none; font-size: 12px; }
+    .msg .body a.imgdl:hover { background: var(--secondary-container); }
+    .msg .body a.imgdl svg { width: 16px; height: 16px; fill: currentColor; }
+    .msg .body .filechip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; height: 34px; padding: 0 10px; margin: 4px 4px 4px 0; border-radius: 8px; border: 1px solid var(--outline-variant); background: var(--surface-container-low); color: var(--on-surface); text-decoration: none; font-size: 13px; vertical-align: middle; }
+    .msg .body a.filechip { color: var(--primary); }
+    .msg .body a.filechip:hover { background: var(--secondary-container); }
+    .msg .body .filechip .fn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .msg .body .filechip svg { width: 18px; height: 18px; fill: currentColor; flex: none; }
+    .msg .body .filechip.nolink { color: var(--on-surface-variant); cursor: default; }
 
     /* 详情：快速回复 */
     .composer { display: none; flex-direction: column; gap: 8px; padding: 12px 24px 20px; border-top: 1px solid var(--outline-variant); position: relative; }

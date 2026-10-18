@@ -16,7 +16,8 @@
 
 ## 约定
 - 零构建、零依赖、无框架；新增文件要加进 `server.js` 的 `DASHBOARD_FILES` 白名单。
-- 所有页面内容用 `textContent` 或经转义后插入，禁止把对话正文当 HTML。
+- 所有页面内容用 `textContent` 或经转义后插入，禁止把对话正文写进 `innerHTML`。消息的 `html` 只能经 `renderRich()`：`DOMParser` 解析成惰性文档 → 按 `RICH_TAGS` 白名单逐个节点用 `createElement` 重建（不复制事件属性 / style，链接 / 图片网址校验协议）。
+- 详情里代码块 / 图片的按钮用 `data-act` + `#detailMsgs` 上的事件委托（长消息折叠的尾部是 `cloneNode` 复制的，不带监听器）。
 - token 只存 `localStorage`，不得写进 URL。
 - 文案中文；状态名与 README 的状态表一致。
 - 新增 / 修改站点：只改后端网站列表（看板“添加网站”“网站配置”），不要在看板里 if-else 站点名（头像配色 `COLORED_SOURCES` 例外，只影响颜色）。

@@ -335,7 +335,7 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
   try {
     const data = await api(`/api/conversations/${encodeURIComponent(conversationId)}/messages`);
     if (state.selected !== conversationId) return;
-    for (const m of data.messages) state.messages.set(m.message_id, { role: m.role, index: m.msg_index, text: m.text, favorite: !!m.favorite });
+    for (const m of data.messages) state.messages.set(m.message_id, { role: m.role, index: m.msg_index, text: m.text, html: m.html || null, favorite: !!m.favorite });
     renderDetail(true, true);
     if (toFavorite) { state.stickBottom = false; scrollToFavorite(); } else scrollDetailBottom();
     if (state.selected === conversationId && state.composerOpen && document.activeElement !== $('quickText')) $('quickText').focus();
@@ -398,10 +398,10 @@ async function copyLastAnswer(c) {
   } catch (e) { snackbar(`复制失败：${e.message}`, 'err'); }
 }
 
-async function copyText(text) {
+async function copyText(text, what = '回答') {
   try {
     await navigator.clipboard.writeText(text);
-    snackbar(`已复制回答（${text.length} 字）`, 'ok');
+    snackbar(`已复制${what}（${text.length} 字）`, 'ok');
   } catch (e) { snackbar(`复制失败：${e.message}`, 'err'); }
 }
 
@@ -555,7 +555,7 @@ function onBroadcast(b) {
     if (b.event_type === 'message.added' || b.event_type === 'message.updated') {
       const p = b.payload;
       if (typeof p.text === 'string') {
-        state.messages.set(p.message_id, { role: p.role, index: p.index, text: p.text, favorite: !!state.messages.get(p.message_id)?.favorite });
+        state.messages.set(p.message_id, { role: p.role, index: p.index, text: p.text, html: typeof p.html === 'string' ? p.html : null, favorite: !!state.messages.get(p.message_id)?.favorite });
         if (b.event_type === 'message.updated' && p.role === 'assistant') state.streaming.add(p.message_id);
         renderDetail(true);
       }
@@ -1061,35 +1061,176 @@ function renderInline(p, para) {
     if (m[1]) { p.append(el('code', { class: 'inl' }, m[1].slice(1, -1))); continue; }
     if (m[3] != null) {
       const u = safeUrl(m[3]);
-      if (u) p.append(el('img', { class: 'rich', src: u, alt: m[2] || '图片', loading: 'lazy', referrerpolicy: 'no-referrer', onclick: () => window.open(u, '_blank', 'noopener') }));
+      if (u) p.append(imageBlock(u, m[2]));
       else p.append(m[0]);
       continue;
     }
     const u = safeUrl(m[5]);
-    if (u) p.append(el('a', { class: 'dl', href: u, target: '_blank', rel: 'noopener noreferrer', download: '' }, el('span', { html: DL_SVG, style: 'display:inline-flex' }), m[4]));
+    if (u) p.append(fileChip(m[4], u, true));
     else p.append(m[0]);
   }
   if (last < para.length) p.append(para.slice(last));
 }
 
-/** 轻量 Markdown：``` 代码块、空行分段、`行内代码`、图片、下载链接 */
+/** 轻量 Markdown：``` 代码块（带语言）、空行分段、`行内代码`、图片、下载链接 */
 function renderText(text) {
   const frag = document.createDocumentFragment();
-  const parts = String(text || '').split(/^```[^\n]*\n?/m);
-  parts.forEach((part, i) => {
-    if (i % 2 === 1) {
-      frag.append(el('pre', {}, el('code', {}, part.replace(/\n$/, ''))));
-      return;
-    }
-    for (const para of part.split(/\n{2,}/)) {
+  const parts = String(text || '').split(/^```([^\n`]*)\n?/m);
+  // split 带捕获组（每个 ``` 行都捕获一次）：[正文, 开始行语言, 代码, 结束行, 正文, 开始行语言, 代码, 结束行, ...]
+  for (let i = 0; i < parts.length; i += 4) {
+    for (const para of parts[i].split(/\n{2,}/)) {
       if (!para.trim()) continue;
       const p = el('p');
       renderInline(p, para);
       frag.append(p);
     }
-  });
+    if (i + 2 < parts.length) frag.append(codeBlock(parts[i + 2].replace(/\n$/, ''), parts[i + 1].trim()));
+  }
   return frag;
 }
+
+// ---------------------------------------------------------------- 富文本（html）：再净化一次后按原格式显示
+
+const IMG_SVG = '<svg viewBox="0 0 24 24"><path d="M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2zM8.5 13.5l2.5 3 3.5-4.5 4.5 6H5l3.5-4.5z"/></svg>';
+const FILE_SVG = '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>';
+// 允许的标签 → 允许的属性；其余元素只保留内容，RICH_DROP 里的整个丢掉
+const RICH_TAGS = {
+  p: [], br: [], h1: [], h2: [], h3: [], h4: [], h5: [], h6: [], ul: [], ol: ['start'], li: [], blockquote: [],
+  pre: [], code: ['class'], table: [], thead: [], tbody: [], tfoot: [], tr: [], th: ['colspan', 'rowspan'], td: ['colspan', 'rowspan'],
+  strong: [], em: [], b: [], i: [], del: [], s: [], sup: [], sub: [], hr: [], a: ['href', 'download', 'data-file'], img: ['src', 'alt'], span: ['data-file']
+};
+const RICH_DROP = new Set(['script', 'style', 'noscript', 'template', 'iframe', 'frame', 'object', 'embed', 'form', 'input', 'textarea', 'select',
+  'option', 'button', 'svg', 'math', 'canvas', 'video', 'audio', 'source', 'link', 'meta', 'base', 'dialog', 'head', 'title']);
+const linkUrl = (u) => (/^(https?:|blob:)/i.test(u) || /^data:/i.test(u) ? u : null);
+const imgUrl = (u) => (/^https?:\/\//i.test(u) || /^data:image\/(png|jpe?g|gif|webp|bmp|avif);base64,/i.test(u) ? u : null);
+const LANG_EXT = {
+  python: 'py', py: 'py', javascript: 'js', js: 'js', mjs: 'js', node: 'js', typescript: 'ts', ts: 'ts', jsx: 'jsx', tsx: 'tsx',
+  json: 'json', html: 'html', xml: 'xml', css: 'css', scss: 'scss', bash: 'sh', sh: 'sh', shell: 'sh', zsh: 'sh', powershell: 'ps1', ps1: 'ps1',
+  java: 'java', c: 'c', cpp: 'cpp', 'c++': 'cpp', csharp: 'cs', cs: 'cs', go: 'go', golang: 'go', rust: 'rs', rs: 'rs', ruby: 'rb', rb: 'rb',
+  php: 'php', sql: 'sql', yaml: 'yml', yml: 'yml', toml: 'toml', ini: 'ini', markdown: 'md', md: 'md', kotlin: 'kt', kt: 'kt', swift: 'swift',
+  r: 'r', lua: 'lua', perl: 'pl', dart: 'dart', scala: 'scala', vue: 'vue', dockerfile: 'dockerfile', makefile: 'mk', diff: 'diff', csv: 'csv'
+};
+const extOfLang = (lang) => LANG_EXT[String(lang || '').toLowerCase()] || 'txt';
+
+/** 代码块：语言标签 + 复制 + 下载（按钮用 data-act，由 #detailMsgs 统一处理，超长折叠复制出的节点也能用） */
+function codeBlock(code, lang) {
+  const l = /^[A-Za-z0-9+#._-]{1,30}$/.test(lang || '') ? lang.toLowerCase() : '';
+  return el('div', { class: 'codeblock', 'data-lang': l },
+    el('div', { class: 'cbh' },
+      el('span', { class: 'lang' }, l || '代码'),
+      el('button', { class: 'cbtn', type: 'button', 'data-act': 'code-copy', title: '复制代码' }, el('span', { html: SVG.copy, class: 'ic' }), '复制'),
+      el('button', { class: 'cbtn', type: 'button', 'data-act': 'code-download', title: `下载为 .${extOfLang(l)} 文件` }, el('span', { html: DL_SVG, class: 'ic' }), '下载')),
+    el('pre', {}, el('code', l ? { class: `language-${l}` } : {}, code)));
+}
+
+/** 图片：原图内联（最大宽度 100%），点击打开原图；下载按钮（跨域图片浏览器可能改为打开） */
+function imageBlock(src, alt) {
+  const name = (() => { try { const seg = decodeURIComponent(new URL(src).pathname.split('/').pop() || ''); return /\.[A-Za-z0-9]{2,5}$/.test(seg) ? seg : ''; } catch { return ''; } })() || 'image.png';
+  return el('span', { class: 'imgblock' },
+    el('img', { class: 'rich', src, alt: alt || '图片', loading: 'lazy', referrerpolicy: 'no-referrer', 'data-act': 'img-open', title: '点击打开原图' }),
+    el('a', { class: 'imgdl', href: src, download: name, target: '_blank', rel: 'noopener noreferrer', title: '下载图片' }, el('span', { html: DL_SVG, class: 'ic' }), '下载'));
+}
+
+/** 文件卡片：有网址 → 可下载 / 打开；没有网址 → 只显示文件名 */
+function fileChip(name, href, download = true) {
+  const label = String(name || '').trim() || '文件';
+  if (!href) return el('span', { class: 'filechip nolink', title: '原页面没有提供下载地址' }, el('span', { html: FILE_SVG, class: 'ic' }), el('span', { class: 'fn' }, label));
+  return el('a', { class: 'filechip dl', href, target: '_blank', rel: 'noopener noreferrer', ...(download ? { download: label } : {}), title: `下载 / 打开 ${label}` },
+    el('span', { html: FILE_SVG, class: 'ic' }), el('span', { class: 'fn' }, label), el('span', { html: DL_SVG, class: 'ic' }));
+}
+
+/**
+ * 把消息的 html 解析成惰性文档（DOMParser：不执行脚本、不加载图片），按白名单逐个节点重建到看板页面：
+ * 不复制任何事件属性 / style / class（code 只保留 language-*），链接只允许 http(s) / data / blob，图片只允许 http(s) / data:image。
+ * 从不把 html 直接写进页面。
+ */
+function renderRich(html) {
+  const frag = document.createDocumentFragment();
+  let src;
+  try { src = new DOMParser().parseFromString(`<!doctype html><body>${String(html || '')}</body>`, 'text/html').body; } catch { return renderText(''); }
+  const build = (node, parent) => {
+    for (let n = node.firstChild; n; n = n.nextSibling) {
+      if (n.nodeType === 3) { parent.append(n.nodeValue); continue; }
+      if (n.nodeType !== 1) continue;
+      const tag = n.tagName.toLowerCase();
+      if (RICH_DROP.has(tag)) continue;
+      if (tag === 'pre') {
+        const codeEl = n.querySelector('code');
+        const lang = /(?:^|\s)language-([A-Za-z0-9+#._-]{1,30})/.exec(codeEl?.getAttribute('class') || '')?.[1] || '';
+        parent.append(codeBlock((codeEl || n).textContent.replace(/\n$/, ''), lang));
+        continue;
+      }
+      if (tag === 'img') {
+        const u = imgUrl(String(n.getAttribute('src') || '').trim());
+        if (u) parent.append(imageBlock(u, n.getAttribute('alt') || ''));
+        continue;
+      }
+      if (tag === 'a') {
+        const u = linkUrl(String(n.getAttribute('href') || '').trim());
+        const fileName = n.getAttribute('data-file');
+        if (u && (fileName != null || n.hasAttribute('download'))) { parent.append(fileChip(fileName || n.getAttribute('download') || n.textContent, u, true)); continue; }
+        if (!u) { build(n, parent); continue; }
+        const a = el('a', { href: u, target: '_blank', rel: 'noopener noreferrer' });
+        build(n, a);
+        parent.append(a);
+        continue;
+      }
+      if (tag === 'span' && n.getAttribute('data-file') != null) { parent.append(fileChip(n.getAttribute('data-file') || n.textContent, null)); continue; }
+      const allowed = RICH_TAGS[tag];
+      if (!allowed || tag === 'span') { build(n, parent); continue; }
+      const out = document.createElement(tag);
+      for (const name of allowed) {
+        const v = n.getAttribute(name);
+        if (v == null) continue;
+        if (name === 'class') { const lang = /(?:^|\s)(language-[A-Za-z0-9+#._-]{1,30})/.exec(v)?.[1]; if (lang) out.className = lang; }
+        else if (/^\d{1,3}$/.test(v)) out.setAttribute(name, v);
+      }
+      if (tag === 'code') out.classList.add('inl');
+      build(n, out);
+      parent.append(tag === 'table' ? el('div', { class: 'tablewrap' }, out) : out);
+    }
+  };
+  build(src, frag);
+  return frag;
+}
+
+/** 消息正文：有 html 用富文本，否则轻量 Markdown */
+function renderBody(m) {
+  if (m.html) {
+    const frag = renderRich(m.html);
+    if (frag.childNodes.length) return frag;
+  }
+  return renderText(m.text);
+}
+
+/** 下载文字为文件（Blob；不支持时用 data: 网址） */
+function downloadText(text, filename) {
+  let href;
+  let revoke = null;
+  try {
+    href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+    revoke = () => URL.revokeObjectURL(href);
+  } catch { href = `data:text/plain;charset=utf-8,${encodeURIComponent(text)}`; }
+  const a = el('a', { href, download: filename, style: 'display:none' });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  if (revoke) setTimeout(revoke, 10000);
+}
+
+// 详情里代码块 / 图片的按钮统一在这里处理（超长消息折叠时尾部是复制出来的节点，不能依赖各自的监听器）
+$('detailMsgs').addEventListener('click', (e) => {
+  const t = e.target.closest?.('[data-act="code-copy"], [data-act="code-download"], [data-act="img-open"]');
+  if (!t || !$('detailMsgs').contains(t)) return;
+  e.stopPropagation();
+  if (t.dataset.act === 'img-open') { window.open(t.getAttribute('src'), '_blank', 'noopener'); return; }
+  const block = t.closest('.codeblock');
+  const code = block?.querySelector('pre code')?.textContent ?? '';
+  if (t.dataset.act === 'code-copy') { copyText(code, '代码'); return; }
+  const blocks = [...$('detailMsgs').querySelectorAll('.codeblock')];
+  const n = blocks.indexOf(block) + 1;
+  downloadText(code, `code${n > 1 ? '-' + n : ''}.${extOfLang(block?.dataset.lang)}`);
+});
 
 function renderDetailHead() {
   const c = convById(state.selected);
@@ -1160,7 +1301,7 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
         el('span', {}, m.role === 'user' ? '我' : isAnswer ? src.label : m.role),
         el('span', {}, `${m.text.length} 字`),
         m.favorite ? el('span', {}, '已收藏') : null),
-      el('div', { class: 'body' }, renderText(m.text)),
+      el('div', { class: `body ${m.html ? 'rich' : ''}` }, renderBody(m)),
       el('div', { class: 'fold' }, m.text.split('\n').find((l) => l.trim()) || ''),
       isAnswer ? el('div', { class: 'mact' },
         iconBtn(SVG.copy, '复制回答', () => copyText(m.text), { act: 'copy' }),

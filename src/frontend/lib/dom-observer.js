@@ -538,6 +538,189 @@
     return FILE_EXT_RE.test(path) || /\/(download|files?)\//i.test(path);
   }
 
+  /*
+   * 富文本：把消息正文转成净化后的 HTML（与 text 同一个节点、同样的 exclude 规则）。
+   * 逐个节点重建字符串，不复制页面上的任何属性 / 事件，只输出白名单：
+   *   p br h1-h6 ul ol li blockquote pre code(language-*) table thead tbody tfoot tr th td
+   *   strong em b i del s sup sub a[href http(s)/data/blob] img[src http(s)/data:image] hr
+   * span / div 等其他元素只保留内容（div 只有行内内容时变成 <p>）；script / style / iframe / form / button / svg 等整个丢掉。
+   * 文件：带 download 或文件扩展名的链接输出 <a data-file="文件名">；没有网址的文件卡片（按钮 / 元素文字就是文件名）输出 <span data-file="文件名">。
+   */
+  var MAX_HTML = 200000;
+  var HTML_KEEP = {
+    P: 'p', BR: 'br', H1: 'h1', H2: 'h2', H3: 'h3', H4: 'h4', H5: 'h5', H6: 'h6', UL: 'ul', OL: 'ol', LI: 'li',
+    BLOCKQUOTE: 'blockquote', TABLE: 'table', THEAD: 'thead', TBODY: 'tbody', TFOOT: 'tfoot', TR: 'tr', TH: 'th', TD: 'td',
+    STRONG: 'strong', EM: 'em', B: 'b', I: 'i', DEL: 'del', S: 's', SUP: 'sup', SUB: 'sub', HR: 'hr', CODE: 'code'
+  };
+  var HTML_VOID = { br: 1, hr: 1 };
+  var HTML_DROP = {
+    SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1, SVG: 1, svg: 1, IFRAME: 1, FRAME: 1, OBJECT: 1, EMBED: 1, FORM: 1,
+    INPUT: 1, TEXTAREA: 1, SELECT: 1, OPTION: 1, CANVAS: 1, VIDEO: 1, AUDIO: 1, SOURCE: 1, LINK: 1, META: 1, MATH: 1, math: 1, DIALOG: 1
+  };
+  var FILE_NAME_RE = /^[^\s\\/:*?"<>|]{1,120}\.[A-Za-z0-9]{1,8}$/;
+  var BLOCK_CHILD_SEL = 'p, div, ul, ol, li, pre, table, blockquote, h1, h2, h3, h4, h5, h6, hr, section, article, figure';
+
+  function escHtml(v) {
+    return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function safeHref(u) {
+    u = String(u || '').trim();
+    return /^(https?:|blob:)/i.test(u) || /^data:/i.test(u) ? u.slice(0, 8000) : null;
+  }
+  function safeImgSrc(u) {
+    u = String(u || '').trim();
+    if (/^https?:\/\//i.test(u)) return u.slice(0, 8000);
+    if (/^data:image\/(png|jpe?g|gif|webp|bmp|avif);base64,[A-Za-z0-9+/=\s]+$/i.test(u)) return u.replace(/\s+/g, '');
+    return null;
+  }
+  function langOf(code, root) {
+    var cls = String(code && code.getAttribute && code.getAttribute('class') || '');
+    var m = /(?:^|\s)(?:language|lang)-([A-Za-z0-9+#._-]{1,30})/.exec(cls);
+    if (m) return m[1].toLowerCase();
+    var holder = code && code.closest ? code.closest('[data-language]') : null;
+    if (holder && root && root.contains(holder)) {
+      var dl = String(holder.getAttribute('data-language') || '').trim();
+      if (/^[A-Za-z0-9+#._-]{1,30}$/.test(dl)) return dl.toLowerCase();
+    }
+    return '';
+  }
+  function fileNameOfUrl(href) {
+    try {
+      var seg = decodeURIComponent(new URL(href).pathname.split('/').pop() || '');
+      return FILE_NAME_RE.test(seg) ? seg : '';
+    } catch (_) { return ''; }
+  }
+  function isFileLink(a, href) {
+    if (a.hasAttribute('download')) return true;
+    if (/^(data|blob):/i.test(href)) return true;
+    var path = '';
+    try { path = new URL(href).pathname; } catch (_) { return false; }
+    return FILE_EXT_RE.test(path) || /\/(download|files?)\//i.test(path);
+  }
+
+  /** 代码块文字：跳过 exclude（代码块工具栏），高亮器“每行一个 span、没有换行符”时按行补换行 */
+  function codeText(node, exclude, root) {
+    var out = [];
+    (function walk(n) {
+      if (n.nodeType === 3) { out.push(n.nodeValue); return; }
+      if (n.nodeType !== 1 || HTML_DROP[n.tagName] || SKIP_TEXT_TAGS[n.tagName]) return;
+      if (n !== root && exclude && n.matches && n.matches(exclude)) return;
+      if (n.tagName === 'BR') { out.push('\n'); return; }
+      var lineSpans = n.tagName === 'CODE' && (n.textContent || '').indexOf('\n') < 0 && n.children.length > 1;
+      for (var ch = n.firstChild; ch; ch = ch.nextSibling) {
+        walk(ch);
+        if (lineSpans && ch.nodeType === 1) out.push('\n');
+      }
+    })(node);
+    return out.join('').replace(/\u00a0/g, ' ').replace(/\n+$/, '');
+  }
+
+  function extractHtml(root, exclude) {
+    var out = [];
+    function skip(n) { return n !== root && exclude && n.matches && n.matches(exclude); }
+    function hasBlockChild(n) {
+      for (var ch = n.firstElementChild; ch; ch = ch.nextElementSibling) {
+        if (HTML_DROP[ch.tagName] || skip(ch)) continue;
+        if (ch.matches && ch.matches(BLOCK_CHILD_SEL)) return true;
+        if (hasBlockChild(ch)) return true;
+      }
+      return false;
+    }
+    function children(n) { for (var ch = n.firstChild; ch; ch = ch.nextSibling) walk(ch); }
+    function walk(n) {
+      if (n.nodeType === 3) {
+        var t = n.nodeValue.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ');
+        if (t) out.push(escHtml(t));
+        return;
+      }
+      if (n.nodeType !== 1) return;
+      var tag = n.tagName;
+      if (HTML_DROP[tag] || SKIP_TEXT_TAGS[tag] || skip(n)) return;
+      // 代码块：整块取文字，带语言
+      if (tag === 'PRE' || (tag === 'CODE' && n.parentElement && n.parentElement.tagName === 'PRE')) {
+        var code = tag === 'PRE' ? (n.querySelector('code') || n) : n;
+        var lang = langOf(code, root);
+        out.push('<pre><code' + (lang ? ' class="language-' + escHtml(lang) + '"' : '') + '>' + escHtml(codeText(n, exclude, n)) + '</code></pre>');
+        return;
+      }
+      if (tag === 'IMG') {
+        var src = safeImgSrc(n.currentSrc || n.getAttribute('src') || n.src || '');
+        if (src && !(n.width && n.width < 32 && n.height && n.height < 32)) {
+          out.push('<img src="' + escHtml(src) + '" alt="' + escHtml(String(n.getAttribute('alt') || '').slice(0, 300)) + '">');
+        }
+        return;
+      }
+      if (tag === 'A') {
+        var href = safeHref(n.getAttribute('href') ? (n.href || n.getAttribute('href')) : '');
+        if (!href) { children(n); return; }
+        var label = (n.textContent || '').replace(/\s+/g, ' ').trim();
+        if (isFileLink(n, href)) {
+          var dl = String(n.getAttribute('download') || '').trim();
+          var name = (FILE_NAME_RE.test(dl) ? dl : '') || fileNameOfUrl(href) || (FILE_NAME_RE.test(label) ? label : '') || label.slice(0, 120) || '下载文件';
+          out.push('<a href="' + escHtml(href) + '" data-file="' + escHtml(name) + '"' + (n.hasAttribute('download') ? ' download="' + escHtml(FILE_NAME_RE.test(dl) ? dl : name) + '"' : '') + '>');
+          children(n);
+          out.push('</a>');
+          return;
+        }
+        out.push('<a href="' + escHtml(href) + '">');
+        children(n);
+        out.push('</a>');
+        return;
+      }
+      // 没有网址的文件卡片：按钮（或 role=button）的文字就是文件名
+      if (tag === 'BUTTON' || (n.getAttribute && n.getAttribute('role') === 'button')) {
+        var bt = (n.textContent || '').replace(/\s+/g, ' ').trim();
+        if (FILE_NAME_RE.test(bt)) out.push('<span data-file="' + escHtml(bt) + '">' + escHtml(bt) + '</span>');
+        return;
+      }
+      var keep = HTML_KEEP[tag];
+      if (keep) {
+        if (HTML_VOID[keep]) { out.push('<' + keep + '>'); return; }
+        out.push('<' + keep + '>');
+        children(n);
+        out.push('</' + keep + '>');
+        return;
+      }
+      // div 等块：只有行内内容时变成段落，否则只保留内容
+      if (BLOCK_TAGS[tag] && n !== root && !hasBlockChild(n) && (n.textContent || '').trim()) {
+        out.push('<p>');
+        children(n);
+        out.push('</p>');
+        return;
+      }
+      children(n);
+    }
+    walk(root);
+    return out.join('').replace(/<p>\s*<\/p>/g, '').trim();
+  }
+
+  /** 估算 JSON 编码后的 UTF-8 字节数（引号 / 反斜杠按转义后 2 字节算） */
+  function jsonBytes(s) {
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c === 34 || c === 92) n += 2;
+      else if (c < 0x80) n += 1;
+      else if (c < 0x800) n += 2;
+      else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }
+      else n += 3;
+    }
+    return n;
+  }
+  // text + html 合计不超过这个字节数（整条 WebSocket 消息上限 256KB，留出信封和转义余量）
+  var MAX_RICH_BYTES = 200 * 1024;
+
+  /** 消息的富文本：只有 p / br 时与纯文本等价，不发送；超过上限时不发送（看板退回 text） */
+  function getNodeHtml(el, role, c, text) {
+    var sel = role === 'user' ? c.userText : role === 'assistant' ? c.assistantText : null;
+    var body = sel && el.querySelector ? el.querySelector(sel) : null;
+    var html;
+    try { html = extractHtml(body || el, c.textExclude); } catch (_) { return null; }
+    if (!html || !/<(?!\/?(?:p|br)>)[a-z]/i.test(html)) return null;
+    if (html.length > MAX_HTML || jsonBytes(html) + jsonBytes(text || '') > MAX_RICH_BYTES) return null;
+    return html;
+  }
+
   // 只取正文，避免把“复制/编辑”等按钮区域算进去；找不到正文节点时退回整个消息节点
   function getNodeText(el, role, c) {
     var sel = role === 'user' ? c.userText : role === 'assistant' ? c.assistantText : null;
@@ -766,7 +949,7 @@
         var key = getMessageKey(el, role, i);
         // 同一条消息拆成多行（文字气泡 + 卡片共用一个 message-id）时分开记录，避免互相覆盖
         if (seen[key]) key = (key + '#' + (++seen[key])).slice(0, 128); else seen[key] = 1;
-        items.push({ id: key, role: role, text: text });
+        items.push({ id: key, role: role, text: text, html: getNodeHtml(el, role, cfg, text.slice(0, MAX_TEXT)) });
       }
       assignIndexes(items);
 
@@ -777,7 +960,8 @@
         var text = it.text;
         if (role === 'assistant') lastAssistantId = id;
 
-        var hash = fnv1a64(text);
+        // 内容哈希含富文本：只有图片 / 格式变化（文字不变）也会上报 message.updated
+        var hash = it.html ? fnv1a64(text + '\u0000' + it.html) : fnv1a64(text);
         var known = state.messages[id];
         var payload = {
           message_id: id,
@@ -787,6 +971,7 @@
           text_length: text.length,
           truncated: text.length > MAX_TEXT
         };
+        if (it.html) payload.html = it.html;
 
         if (!known) {
           state.messages[id] = { hash: hash, lastEmit: now(), role: role, index: it.index };
@@ -1012,6 +1197,7 @@
     conversationIdFromUrl: conversationIdFromUrl,
     conversationIdFor: conversationIdFor,
     extractText: extractText,
+    extractHtml: extractHtml,
     siteForHost: siteForHost,
     findSite: findSite,
     siteHosts: siteHosts,
