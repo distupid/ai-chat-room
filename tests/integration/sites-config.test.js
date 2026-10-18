@@ -238,13 +238,12 @@ test('看板：网站配置弹窗（启用开关、域名、常用选择器与�
   await waitFor(() => d.querySelector('#siteCfgFields input[data-path="message.selector"]')?.value === '[data-entry-kind="message"][data-message-id]', { label: 'dialog refreshed' });
   d.getElementById('siteCfgCancel').click();
 
-  // 删除默认网站后菜单出现“恢复默认网站”
+  // 删除默认网站后菜单里没有“恢复默认网站”
   d.getElementById('sitesBtn').click();
   await waitFor(() => d.querySelector('#sitesMenu [data-site="duckai"] .del'), { label: 'menu' });
   d.querySelector('#sitesMenu [data-site="duckai"] .del').click();
-  await waitFor(() => d.querySelector('#sitesMenu [data-site="restore"]'), { label: 'restore item' });
-  d.querySelector('#sitesMenu [data-site="restore"]').click();
-  await waitFor(() => d.querySelector('#sitesMenu [data-site="duckai"]') && !d.querySelector('#sitesMenu [data-site="restore"]'), { label: 'restored' });
+  await waitFor(() => !d.querySelector('#sitesMenu [data-site="duckai"]'), { label: 'deleted' });
+  assert.ok(!d.querySelector('#sitesMenu [data-site="restore"], #sitesMenu .mi.restore'), '没有恢复默认');
 
   assert.equal(ui.win.__appError, undefined, String(ui.win.__appError?.stack));
   assert.deepEqual(ui.errors, []);

@@ -1113,21 +1113,9 @@ function renderSitesMenu() {
       onclick: (e) => { e.stopPropagation(); toggleSitesMenu(false); openSiteConfig(x); } }),
     el('span', { class: 'icon-btn del', title: '删除这个网站', role: 'button', 'data-act': 'delete', html: DEL_SVG,
       onclick: (e) => { e.stopPropagation(); removeSite(x); } })));
-  if (state.missingDefaults?.length) {
-    items.push(el('button', { class: 'mi restore', role: 'menuitem', 'data-site': 'restore', onclick: (e) => { e.stopPropagation(); restoreDefaultSites(); } },
-      el('span', { class: 'plus' }, '↺'), el('span', { class: 'nm' }, '恢复默认网站', el('small', {}, `加回删掉的默认网站（${state.missingDefaults.length} 个）`))));
-  }
   items.push(el('button', { class: 'mi add', role: 'menuitem', 'data-site': '+', onclick: () => { toggleSitesMenu(false); openAddSite(); } },
     el('span', { class: 'plus' }, '+'), el('span', { class: 'nm' }, '添加网站', el('small', {}, '打开网址，获取 DOM 并分析'))));
   $('sitesMenu').replaceChildren(...items);
-}
-
-async function restoreDefaultSites() {
-  try {
-    const r = await api('/api/sites/defaults', { method: 'POST', body: '{}' });
-    snackbar(r.added?.length ? `已恢复 ${r.added.length} 个默认网站` : '默认网站都在列表里', 'ok');
-    await loadSites();
-  } catch (e) { snackbar(`恢复失败：${e.message}`, 'err'); }
 }
 
 function siteEditRow(x) {
