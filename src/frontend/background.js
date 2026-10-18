@@ -152,17 +152,34 @@ async function closeConversationTabs(tabId, command) {
 }
 
 /** 一键启动：在后台（不抢焦点）打开网站列表里还没开着的网址（按域名判断，包含 PWA / app 窗口） */
+/**
+ * 一键启动：按网站列表里配置的网址（用户指定的，不是站点默认首页）在后台打开。
+ * 已打开的判断：同一主机（忽略 www.）且标签页路径落在配置网址的路径下；配置网址是首页时，该主机任意标签页都算已开。
+ * 正在加载的标签页看 pendingUrl；同一批里重复的网址只开一次。
+ */
+function siteUrlKey(u) {
+  try {
+    const x = new URL(u);
+    if (x.protocol !== 'https:' && x.protocol !== 'http:') return null;
+    return { host: x.hostname.replace(/^www\./, '').toLowerCase(), path: x.pathname.replace(/\/+$/, '') || '/' };
+  } catch { return null; }
+}
+function coversTab(site, tab) {
+  if (!tab || site.host !== tab.host) return false;
+  if (site.path === '/') return true;
+  return tab.path === site.path || tab.path.startsWith(site.path + '/');
+}
 async function openSites(text) {
-  const urls = String(text || '').split('\n').map((u) => u.trim()).filter((u) => /^https:\/\/[^\s]+$/.test(u)).slice(0, 50);
-  const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ''; } };
-  let openHosts = new Set();
-  try { openHosts = new Set((await chrome.tabs.query({})).map((t) => hostOf(t.url || t.pendingUrl || '')).filter(Boolean)); } catch { /* ignore */ }
+  const urls = [...new Set(String(text || '').split('\n').map((u) => u.trim()).filter((u) => /^https:\/\/[^\s]+$/.test(u)))].slice(0, 50);
+  let tabs = [];
+  try { tabs = (await chrome.tabs.query({})).map((t) => siteUrlKey(t.pendingUrl || t.url || '')).filter(Boolean); } catch { /* ignore */ }
   let n = 0;
   let skipped = 0;
   for (const url of urls) {
-    const h = hostOf(url);
-    if (openHosts.has(h)) { skipped++; continue; }
-    try { await chrome.tabs.create({ url, active: false }); n++; openHosts.add(h); } catch { /* 单个失败不影响其他 */ }
+    const key = siteUrlKey(url);
+    if (!key) continue;
+    if (tabs.some((t) => coversTab(key, t))) { skipped++; continue; }
+    try { await chrome.tabs.create({ url, active: false }); n++; tabs.push(key); } catch { /* 单个失败不影响其他 */ }
   }
   if (!n && !skipped) return { ok: false, code: 'tab_unreachable', detail: '没有可打开的网站' };
   return { ok: true, detail: skipped ? `已在后台打开 ${n} 个网站，${skipped} 个已开着` : `已在后台打开 ${n} 个网站` };
