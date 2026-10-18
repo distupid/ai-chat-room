@@ -78,6 +78,18 @@ export function openDatabase(dbPath = ':memory:') {
   const msgCols = new Set(db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name));
   if (!msgCols.has('html')) db.exec('ALTER TABLE messages ADD COLUMN html TEXT');
 
+  // 看板会话列表 / 指令路由的热路径索引（幂等）：
+  //   按会话 + 事件类型取最近一条（标题、状态、生成、用时），避免在长对话的大量 message.updated 里倒序扫描；
+  //   每个标签页最近一次页面级事件（部分索引，只含页面级事件）；消息按序号 / 角色查找
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_events_conv_type_seq ON events(conversation_id, event_type, seq);
+    CREATE INDEX IF NOT EXISTS idx_events_tab_page ON events(client_id, tab_id, seq)
+      WHERE tab_id IS NOT NULL AND event_type IN ('page.opened', 'page.closed', 'conversation.changed');
+    CREATE INDEX IF NOT EXISTS idx_messages_conv_index ON messages(conversation_id, msg_index);
+    CREATE INDEX IF NOT EXISTS idx_messages_conv_role ON messages(conversation_id, role, msg_index);
+    CREATE INDEX IF NOT EXISTS idx_conversations_last_seen ON conversations(last_seen_at);
+  `);
+
   const insertEvent = db.prepare(`
     INSERT INTO events (event_id, client_id, event_type, conversation_id, tab_id, occurred_at, received_at, payload_json)
     VALUES (@event_id, @client_id, @event_type, @conversation_id, @tab_id, @occurred_at, @received_at, @payload_json)
@@ -148,10 +160,9 @@ export function openDatabase(dbPath = ':memory:') {
          ORDER BY msg_index LIMIT 1) AS first_user_text,
       (SELECT role FROM messages m WHERE m.conversation_id = c.conversation_id ORDER BY msg_index DESC LIMIT 1) AS last_role,
       (SELECT substr(text, -160) FROM messages m WHERE m.conversation_id = c.conversation_id ORDER BY msg_index DESC LIMIT 1) AS last_text,
-      (SELECT event_type FROM events e WHERE e.conversation_id = c.conversation_id
-         AND event_type IN ('generation.started', 'generation.finished') ORDER BY seq DESC LIMIT 1) AS last_generation_event,
-      (SELECT event_type FROM events e WHERE e.conversation_id = c.conversation_id
-         AND event_type IN ('page.opened', 'page.closed', 'conversation.changed') ORDER BY seq DESC LIMIT 1) AS last_page_event,
+      -- 最近一次生成事件：先在 (会话, 类型, seq) 索引上取 MAX(seq) 再回表，不在长对话的大量 message.updated 里倒序扫描
+      (SELECT event_type FROM events WHERE seq = (SELECT MAX(seq) FROM events e WHERE e.conversation_id = c.conversation_id
+         AND event_type IN ('generation.started', 'generation.finished'))) AS last_generation_event,
       (SELECT json_extract(payload_json, '$.title') FROM events e WHERE e.conversation_id = c.conversation_id
          AND event_type = 'page.opened' ORDER BY seq DESC LIMIT 1) AS title,
       (SELECT payload_json FROM events e WHERE e.conversation_id = c.conversation_id
@@ -192,6 +203,21 @@ export function openDatabase(dbPath = ':memory:') {
     SELECT message_id, role, msg_index, text, html, updated_seq, updated_at FROM messages
     WHERE conversation_id = ? ORDER BY msg_index, updated_seq`);
   const recentEventsStmt = db.prepare('SELECT * FROM events WHERE conversation_id = ? ORDER BY seq DESC LIMIT ?');
+  const countEventsStmt = db.prepare('SELECT COUNT(*) AS n FROM events');
+  const maxSeqStmt = db.prepare('SELECT COALESCE(MAX(seq), 0) AS n FROM events');
+  const getEventStmt = db.prepare('SELECT * FROM events WHERE event_id = ?');
+  const getMessageStmt = db.prepare('SELECT * FROM messages WHERE conversation_id = ? AND message_id = ?');
+  const conversationUrlStmt = db.prepare('SELECT last_url FROM conversations WHERE conversation_id = ?');
+  // 回放指定会话：按会话个数缓存预编译语句（占位符个数不同）
+  const sinceConvStmts = new Map();
+  const sinceConvStmt = (n) => {
+    let st = sinceConvStmts.get(n);
+    if (!st) {
+      st = db.prepare(`SELECT * FROM events WHERE seq > ? AND conversation_id IN (${Array(n).fill('?').join(',')}) ORDER BY seq LIMIT ?`);
+      sinceConvStmts.set(n, st);
+    }
+    return st;
+  };
 
   let sourceResolver = sourceFromUrl;
   return {
@@ -204,13 +230,13 @@ export function openDatabase(dbPath = ':memory:') {
     /** 回放：只返回指定会话（或 "*"）中 seq > sinceSeq 的事件 */
     eventsSince(sinceSeq, conversations, limit) {
       if (conversations.includes('*')) return sinceAll.all(sinceSeq, limit).map(rowToEvent);
-      const placeholders = conversations.map(() => '?').join(',');
-      return db.prepare(
-        `SELECT * FROM events WHERE seq > ? AND conversation_id IN (${placeholders}) ORDER BY seq LIMIT ?`
-      ).all(sinceSeq, ...conversations, limit).map(rowToEvent);
+      if (!conversations.length) return [];
+      return sinceConvStmt(conversations.length).all(sinceSeq, ...conversations, limit).map(rowToEvent);
     },
-    countEvents() { return Number(db.prepare('SELECT COUNT(*) AS n FROM events').get().n); },
-    maxSeq() { return Number(db.prepare('SELECT COALESCE(MAX(seq), 0) AS n FROM events').get().n); },
+    countEvents() { return Number(countEventsStmt.get().n); },
+    maxSeq() { return Number(maxSeqStmt.get().n); },
+    /** 会话最近一次记录的页面地址（没有返回 null） */
+    conversationUrl(conversationId) { return conversationUrlStmt.get(conversationId)?.last_url ?? null; },
 
     /** 看板：会话列表（最近活动在前），附带消息数、首条用户消息、最后一条消息预览、生成状态、标签页状态 */
     listConversations(limit = 200, now = Date.now()) {
@@ -269,11 +295,11 @@ export function openDatabase(dbPath = ':memory:') {
       return recentEventsStmt.all(conversationId, limit).map(rowToEvent).reverse().map(stripText);
     },
     getEvent(eventId) {
-      const row = db.prepare('SELECT * FROM events WHERE event_id = ?').get(eventId);
+      const row = getEventStmt.get(eventId);
       return row ? rowToEvent(row) : null;
     },
     getMessage(conversationId, messageId) {
-      const row = db.prepare('SELECT * FROM messages WHERE conversation_id = ? AND message_id = ?').get(conversationId, messageId);
+      const row = getMessageStmt.get(conversationId, messageId);
       return row ? { ...row } : null;
     },
     close() { db.close(); }

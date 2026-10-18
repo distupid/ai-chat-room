@@ -18,7 +18,7 @@
 
   /*
    * DOM 配置（DomConfig v1）。与后端 POST /api/dom-config/analyze 返回的 config 同一格式，
-   * 插件把它存在 chrome.storage.local.domConfig，内容脚本加载后调用 observer.setConfig() 立即生效。
+   * 插件从网站列表（chrome.storage.local.siteList）按域名选出，列表变化时内容脚本调用 observer.setConfig() 立即生效。
    * 只包含选择器/属性名/正则字符串，不含任何可执行代码。
    */
   var DEFAULT_CONFIG = {
@@ -252,14 +252,6 @@
     var s = findSite(host, list);
     return s ? s.key : null;
   }
-
-  // 兼容旧导出
-  var SELECTORS = {
-    message: DEFAULT_CONFIG.message.selector,
-    userText: DEFAULT_CONFIG.text.user,
-    assistantText: DEFAULT_CONFIG.text.assistant,
-    generating: DEFAULT_CONFIG.generating.selector
-  };
 
   function str(v, max) { return typeof v === 'string' && v.length <= (max || 2000) ? v : null; }
 
@@ -529,13 +521,10 @@
   }
 
   var FILE_EXT_RE = /\.(pdf|zip|rar|7z|tar|gz|csv|xlsx?|docx?|pptx?|txt|json|md|png|jpe?g|gif|webp|svg|mp3|mp4|wav|mov|py|js|ts|html?)(?:[?#]|$)/i;
+  /** 纯文本里的下载链接：只认 http(s) 网址（规则同 isFileLink） */
   function isDownloadLink(a) {
     var href = a.href || '';
-    if (!/^https?:\/\//i.test(href)) return false;
-    if (a.hasAttribute('download')) return true;
-    var path = '';
-    try { path = new URL(href).pathname; } catch (_) { return false; }
-    return FILE_EXT_RE.test(path) || /\/(download|files?)\//i.test(path);
+    return /^https?:\/\//i.test(href) && isFileLink(a, href);
   }
 
   /*
@@ -825,7 +814,7 @@
     var tickMs = Math.max(10, Math.min(pollMs, streamPollMs));
     var idleTicks = 0;
     // 站点配置：options.baseConfig（插件从网站列表里按域名选出的配置）→ 默认种子（按 options.site 或域名）→ 通用默认
-    // options.config 是叠加在上面的覆盖配置（弹窗“分析当前页面”的结果），可省略
+    // options.config 是叠加在上面的覆盖配置（测试 / 调试用），可省略
     var seed = options.site ? seedByKey(options.site) : findSite(win.location && win.location.hostname);
     var base = options.baseConfig && typeof options.baseConfig === 'object' ? options.baseConfig : (seed ? seed.config : DEFAULT_CONFIG);
     var site = options.site || (base && base !== DEFAULT_CONFIG && base.site) || (seed && seed.key) || sourceFromUrl(win.location && win.location.href);
@@ -859,7 +848,7 @@
     var debounceTimer = null;
     var pollTimer = null;
     var listeners = [];
-    var stats = { mutations: 0, scans: 0, emitted: 0, errors: 0 };
+    var stats = { mutations: 0, scans: 0, extractions: 0, emitted: 0, errors: 0 };
 
     function safeEmit(event) {
       stats.emitted++;
@@ -884,14 +873,6 @@
     function addListener(target, type, handler) {
       target.addEventListener(type, handler);
       listeners.push(function () { target.removeEventListener(type, handler); });
-    }
-
-    function getMessageKey(el, role, index) {
-      var id = rawMessageIdOf(el, cfg);
-      if (id) return id.slice(0, 128);
-      // 缺少 message-id 时的回退键：角色 + 位置。
-      // 不能把文本哈希放进键里，否则流式输出时每次扫描都会变成一条“新消息”。
-      return 'fallback:' + role + ':' + index;
     }
 
     /**
@@ -930,39 +911,77 @@
       for (j = 0; j < n; j++) if (state.maxIndex == null || items[j].index > state.maxIndex) state.maxIndex = items[j].index;
     }
 
-    function scanMessages(conversationId, force) {
+    /*
+     * 消息节点 → 提取结果缓存 {role, rawId, text, html, hash}。
+     * 正文提取（extractText + extractHtml + 哈希）是扫描里最贵的部分：流式输出时每 100ms 扫描一次，
+     * 长对话里绝大多数消息没有变化。MutationObserver 记录到某个消息节点内部有变化时才删掉它的缓存；
+     * 没有 MutationObserver 时不缓存。兜底：每 FULL_REFRESH_MS 和强制刷新（生成结束、切换配置）时全部重新提取，
+     * 防止属性过滤之外的变化被漏掉。
+     */
+    var FULL_REFRESH_MS = 10000;
+    var cache = new WeakMap();
+    var lastFullAt = 0;
+    function resetCache() { cache = new WeakMap(); lastFullAt = now(); }
+
+    function extractItem(el) {
+      var c = cache.get(el);
+      if (c) return c;
+      stats.extractions++;
+      var role = normalizeRole(roleOf(el, cfg));
+      var text = getNodeText(el, role, cfg);
+      var html = getNodeHtml(el, role, cfg, text.slice(0, MAX_TEXT));
+      c = {
+        role: role,
+        rawId: rawMessageIdOf(el, cfg),
+        text: text,
+        html: html,
+        // 内容哈希含富文本：只有图片 / 格式变化（文字不变）也会上报 message.updated
+        hash: html ? fnv1a64(text + '\u0000' + html) : fnv1a64(text)
+      };
+      if (observer) cache.set(el, c);
+      return c;
+    }
+
+    function isNested(el, inResult) {
+      if (!inResult) return !!(el.parentElement && el.parentElement.closest && el.parentElement.closest(cfg.messageSelector));
+      for (var p = el.parentElement; p; p = p.parentElement) if (inResult.has(p)) return true;
+      return false;
+    }
+
+    function scanMessages(conversationId, force, fresh) {
+      if (fresh || !observer || now() - lastFullAt >= FULL_REFRESH_MS) resetCache();
       var nodes = doc.querySelectorAll(cfg.messageSelector); // querySelectorAll 结果本身不含重复节点
       var lastAssistantId = null;
 
       // 第一遍：收集当前渲染出来的消息（长对话里页面只渲染一部分，DOM 位置不能当作消息序号）
       var items = [];
       var seen = Object.create(null);
+      // 嵌套的消息节点（两种选择器同时命中父子）只处理最外层：沿父节点查是否在本次结果里（比逐个 closest(选择器) 快）
+      var inResult = typeof Set === 'function' ? new Set(nodes) : null;
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
-        // 嵌套的消息节点（两种选择器同时命中父子）只处理最外层
-        if (el.parentElement && el.parentElement.closest && el.parentElement.closest(cfg.messageSelector)) continue;
-        var role = normalizeRole(roleOf(el, cfg));
-        var rawId = rawMessageIdOf(el, cfg);
-        var text = getNodeText(el, role, cfg);
+        if (isNested(el, inResult)) continue;
+        var x = extractItem(el);
         // 空节点且没有 ID：多半是正在创建的占位节点
-        if (!rawId && !text) continue;
-        var key = getMessageKey(el, role, i);
+        if (!x.rawId && !x.text) continue;
+        // 键：消息 ID；缺少时回退为 角色 + 位置（不能用文本哈希，否则流式输出时每次扫描都会变成一条“新消息”）
+        var key = x.rawId ? x.rawId.slice(0, 128) : 'fallback:' + x.role + ':' + i;
         // 同一条消息拆成多行（文字气泡 + 卡片共用一个 message-id）时分开记录，避免互相覆盖
         if (seen[key]) key = (key + '#' + (++seen[key])).slice(0, 128); else seen[key] = 1;
-        items.push({ id: key, role: role, text: text, html: getNodeHtml(el, role, cfg, text.slice(0, MAX_TEXT)) });
+        items.push({ id: key, x: x });
       }
       assignIndexes(items);
 
       for (var k = 0; k < items.length; k++) {
         var it = items[k];
         var id = it.id;
-        var role = it.role;
-        var text = it.text;
+        var role = it.x.role;
+        var hash = it.x.hash;
         if (role === 'assistant') lastAssistantId = id;
-
-        // 内容哈希含富文本：只有图片 / 格式变化（文字不变）也会上报 message.updated
-        var hash = it.html ? fnv1a64(text + '\u0000' + it.html) : fnv1a64(text);
         var known = state.messages[id];
+        if (known && known.hash === hash) continue;
+
+        var text = it.x.text;
         var payload = {
           message_id: id,
           role: role,
@@ -971,7 +990,7 @@
           text_length: text.length,
           truncated: text.length > MAX_TEXT
         };
-        if (it.html) payload.html = it.html;
+        if (it.x.html) payload.html = it.x.html;
 
         if (!known) {
           state.messages[id] = { hash: hash, lastEmit: now(), role: role, index: it.index };
@@ -980,7 +999,6 @@
           continue;
         }
 
-        if (known.hash === hash) continue;
         if (role === 'assistant') state.lastAssistantChangeAt = now();
 
         var elapsed = now() - known.lastEmit;
@@ -1016,6 +1034,8 @@
       state.lastAssistantChangeAt = 0;
       state.statusKey = null;
       state.lastStatusCheckAt = 0;
+      statusDirty = true;
+      resetCache();
       state.routeSequence++;
 
       send('conversation.changed', nextId,
@@ -1024,10 +1044,16 @@
       return true;
     }
 
+    // 状态检测要遍历页面文字：上次检测后页面（输入框以外）没有任何变化时跳过，最多 FULL_REFRESH_MS 强制检测一次
+    var statusDirty = true;
+    var lastStatusFullAt = 0;
     function checkStatus(force) {
       var t = now();
       if (!force && state.lastStatusCheckAt && t - state.lastStatusCheckAt < cfg.statusIntervalMs) return;
+      if (!force && observer && !statusDirty && t - lastStatusFullAt < FULL_REFRESH_MS) return;
       state.lastStatusCheckAt = t;
+      lastStatusFullAt = t;
+      statusDirty = false;
       var s;
       try { s = detectStatus(doc, cfg); } catch (e) { stats.errors++; return; }
       var key = (state.conversationId || '') + '|' + s.status + '|' + (s.detail || '') + '|' + (s.model || '');
@@ -1063,7 +1089,7 @@
           loadId + '|' + state.generationSequence);
       } else if (!isGenerating && state.generating) {
         // 结束前强制扫描一次（绕过节流），补齐最后一段流式文本
-        var finalAssistantId = scanMessages(conversationId, true);
+        var finalAssistantId = scanMessages(conversationId, true, true);
         state.generating = false;
         send('generation.finished', conversationId,
           {
@@ -1094,6 +1120,62 @@
       }, Math.max(0, delay == null ? debounceMs : delay));
     }
 
+    // 属性变化只关心可能影响识别 / 正文的属性：固定几项 + 配置里选择器 / 属性名用到的
+    var BASE_ATTRS = ['data-message-id', 'data-message-author-role', 'data-testid', 'class', 'id', 'src', 'href', 'download', 'data-language', 'contenteditable'];
+    function attributeFilter() {
+      var out = BASE_ATTRS.slice();
+      function add(a) { if (a && /^[A-Za-z_][\w.:-]*$/.test(a) && out.indexOf(a) < 0 && out.length < 64) out.push(a); }
+      [cfg.messageSelector, cfg.userText, cfg.assistantText, cfg.textExclude, cfg.generating, cfg.modelSelector,
+        cfg.idInner && cfg.idInner.selector, cfg.convDom && cfg.convDom.selector]
+        .concat(cfg.roleRules.map(function (r) { return r.selector; }))
+        .forEach(function (sel) {
+          var re = /\[\s*([A-Za-z_][\w-]*)/g, m;
+          while (sel && (m = re.exec(sel))) add(m[1]);
+        });
+      cfg.idAttrs.forEach(add);
+      cfg.roleSources.forEach(function (r) { add(r.attr); });
+      if (cfg.idInner) add(cfg.idInner.attr);
+      if (cfg.convDom) add(cfg.convDom.attr);
+      return out;
+    }
+    function observeRoot() {
+      var root = doc.documentElement || doc.body;
+      if (!observer || !root) return;
+      observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: attributeFilter() });
+    }
+
+    // 输入框（看板快速回复写入 / 用户打字）里的变化与消息、状态无关，不触发扫描
+    function composerSelector() {
+      var sel = '[contenteditable="true"], [contenteditable=""]';
+      var a = cfg.actions && cfg.actions.composer;
+      return a && validSelector(doc, a) ? a + ', ' + sel : sel;
+    }
+    var composerSel = composerSelector();
+
+    /** 变化所在的消息节点（含嵌套的外层）删掉缓存；全是输入框里的变化时不扫描 */
+    function onMutations(records) {
+      stats.mutations += records.length;
+      var relevant = false;
+      if (records.length > 500) { cache = new WeakMap(); relevant = true; }
+      else {
+        for (var i = 0; i < records.length; i++) {
+          var t = records[i].target;
+          var el = t && t.nodeType === 1 ? t : t && t.parentElement;
+          if (!el || !el.closest) { relevant = true; continue; }
+          try { if (el.closest(composerSel)) continue; } catch (_) { /* ignore */ }
+          relevant = true;
+          var m = el.closest(cfg.messageSelector);
+          while (m) {
+            cache.delete(m);
+            m = m.parentElement ? m.parentElement.closest(cfg.messageSelector) : null;
+          }
+        }
+      }
+      if (!relevant) return;
+      statusDirty = true;
+      schedule();
+    }
+
     function onPopState() { schedule(0); }
     function onPageHide() { stop('pagehide'); }
     function onPageShow(e) { if (e && e.persisted) start(); } // 从 bfcache 恢复时重新开始观察
@@ -1109,16 +1191,9 @@
         { url: state.url.slice(0, 2048), title: String(doc.title || '').slice(0, 512) },
         loadId + '|' + state.startSequence);
 
-      var root = doc.documentElement || doc.body;
-      if (root && typeof win.MutationObserver === 'function') {
-        observer = new win.MutationObserver(function (records) {
-          stats.mutations += records.length;
-          schedule();
-        });
-        observer.observe(root, {
-          subtree: true, childList: true, characterData: true, attributes: true,
-          attributeFilter: ['data-message-id', 'data-message-author-role', 'data-testid', 'class']
-        });
+      if (typeof win.MutationObserver === 'function') {
+        observer = new win.MutationObserver(onMutations);
+        observeRoot();
       }
 
       addListener(win, 'popstate', onPopState);
@@ -1169,6 +1244,10 @@
       state.maxIndex = null;
       state.lastStatusCheckAt = 0;
       state.lastAssistantChangeAt = 0;
+      statusDirty = true;
+      composerSel = composerSelector();
+      resetCache();
+      if (observer) { observer.disconnect(); observeRoot(); }
       if (state.started) scan(true);
       return cfg.warnings;
     }
@@ -1206,7 +1285,6 @@
     resolveConfig: resolveConfig,
     detectStatus: detectStatus,
     sourceFromUrl: sourceFromUrl,
-    DEFAULT_CONFIG: DEFAULT_CONFIG,
-    SELECTORS: SELECTORS
+    DEFAULT_CONFIG: DEFAULT_CONFIG
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

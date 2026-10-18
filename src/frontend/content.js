@@ -2,8 +2,8 @@
  * - 站点配置：按域名从 chrome.storage.local.siteList（后台从后端同步的网站列表）里选；还没有列表时用默认种子。
  *   网站被停用 / 不在列表里时不观察。
  * - 页面事件只发送 kind: 'page_event'；内容脚本不接收任何后端消息，ack / error / broadcast 不会被当作页面事件重新上报。
- * - DOM 配置：启动时从 chrome.storage.local.domConfig 读取；配置变化（弹窗“分析当前页面”）时立即 setConfig 生效。
- * - 只响应本插件发来的 capture_dom 请求：返回去掉 script/style/svg 等的页面 HTML，供后端分析。 */
+ * - 网站配置在看板上修改后（siteList 变化）立即 setConfig 生效。
+ * - 只响应本插件发来的消息：page_info（后台对账）、get_observer_config、bridge_command（看板指令）。 */
 (function () {
   'use strict';
   if (window.__chatgptBridgeStarted) return;
@@ -11,13 +11,12 @@
 
   var observer = null;
 
-  function createObserver(config) {
+  function createObserver() {
     observer = ChatGPTBridgeObserver.createChatGPTObserver({
       document: document,
       window: window,
       site: SITE,
       baseConfig: SITE_ENTRY && SITE_ENTRY.config ? SITE_ENTRY.config : undefined,
-      config: config || undefined,
       emit: function (event) {
         try {
           var p = chrome.runtime.sendMessage({ kind: 'page_event', event: event });
@@ -50,28 +49,12 @@
     } catch (e) { console.warn('[chatgpt-bridge] diag failed', e); }
   }
 
-  function captureDom() {
-    var root = document.documentElement.cloneNode(true);
-    var drop = root.querySelectorAll('script, style, noscript, link, svg, iframe, template, img, video, canvas');
-    for (var i = 0; i < drop.length; i++) drop[i].remove();
-    return {
-      html: '<!DOCTYPE html>\n' + root.outerHTML,
-      url: location.href,
-      title: document.title
-    };
-  }
-
   chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     if (sender.id !== chrome.runtime.id || !msg) return;
-    if (msg.kind === 'capture_dom') {
-      try { sendResponse({ ok: true, page: captureDom() }); }
-      catch (e) { sendResponse({ ok: false, error: String(e && e.message || e) }); }
-    } else if (msg.kind === 'page_info') {
+    if (msg.kind === 'page_info') {
       // 后台对账用：这个标签页当前在哪个会话
       if (!observer) { sendResponse({ ok: false, code: 'not_observing' }); return; }
       sendResponse({ ok: true, conversation_id: observer.getConversationId(), url: location.href });
-    } else if (msg.kind === 'bridge_diag') {
-      logDiag('manual'); sendResponse({ ok: true });
     } else if (msg.kind === 'get_observer_config') {
       sendResponse({ ok: true, config: observer ? observer.getConfig() : null });
     } else if (msg.kind === 'bridge_command') {
@@ -95,7 +78,6 @@
   });
 
   // 站点：按域名在 siteList（后端网站列表）里找；没有列表时用默认种子
-  // 覆盖配置：domConfigs[site]（弹窗“分析当前页面”的结果）；ChatGPT 兼容旧的 domConfig
   var SITE = null;
   var SITE_ENTRY = null;
   function resolveSite(s) {
@@ -104,27 +86,20 @@
     SITE = SITE_ENTRY ? String(SITE_ENTRY.key) : null;
     return !!SITE_ENTRY && SITE_ENTRY.enabled !== false;
   }
-  function configFrom(s) {
-    s = s || {};
-    var map = s.domConfigs && typeof s.domConfigs === 'object' ? s.domConfigs : {};
-    if (SITE && map[SITE]) return map[SITE];
-    return SITE === 'chatgpt' ? (s.domConfig || null) : null;
-  }
-  var KEYS = ['siteList', 'domConfigs', 'domConfig'];
+  var KEYS = ['siteList'];
   function apply(s) {
     var enabled = resolveSite(s);
     if (!enabled) {
       if (observer) { observer.stop('manual'); observer = null; console.info('[chatgpt-bridge] site disabled or removed:', location.hostname); }
       return;
     }
-    var next = configFrom(s);
-    if (!observer) { createObserver(next); return; }
-    var warnings = observer.setConfig(next, SITE_ENTRY.config || null);
-    console.info('[chatgpt-bridge] dom config applied:', SITE, (next && next.source) || (SITE_ENTRY.config && SITE_ENTRY.config.source) || 'default', warnings);
+    if (!observer) { createObserver(); return; }
+    var warnings = observer.setConfig(null, SITE_ENTRY.config || null);
+    console.info('[chatgpt-bridge] dom config applied:', SITE, (SITE_ENTRY.config && SITE_ENTRY.config.source) || 'default', warnings);
   }
 
   chrome.storage.onChanged.addListener(function (changes, area) {
-    if (area !== 'local' || !(changes.siteList || changes.domConfigs || changes.domConfig)) return;
+    if (area !== 'local' || !changes.siteList) return;
     chrome.storage.local.get(KEYS).then(apply);
   });
 

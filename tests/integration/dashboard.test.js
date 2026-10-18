@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import WebSocket from 'ws';
 import { createBackground } from '../../src/frontend/lib/background-core.js';
 import { makeEnvelope } from '../../contracts/protocol.js';
-import { startServer, TestClient, TOKENS, waitFor, sleep, memoryStorage, openChatGPTPage } from '../helpers.js';
+import { startServer, TestClient, TOKENS, waitFor, sleep, memoryStorage, openChatGPTPage, openDashboard } from '../helpers.js';
 
 const CONV = '6720a1b2-0000-4111-8222-aaaabbbbcccc';
 const CONV_URL = `https://chatgpt.com/c/${CONV}`;
@@ -897,5 +897,33 @@ test('添加网站：看板发起 → 插件收到 probe_site → 上传 DOM →
   assert.equal((await api('/api/sites/hark', { method: 'DELETE' })).status, 200);
   assert.deepEqual((await (await api('/api/sites')).json()).sites.map((x) => x.key), ['chatgpt', 'duckai']);
   ext.close?.();
+  await server.stop();
+});
+
+test('看板性能：刷新时没变化的卡片复用原 DOM（回复栏输入、焦点不丢），有变化的卡片才重建', async () => {
+  const server = await startServer({});
+  const ext = await extClient(server, 'ext-dash-reuse');
+  const C2 = '6720a1b2-0000-4111-8222-ddddeeeeffff';
+  await sendAndAck(ext, ev('page.opened', { url: CONV_URL, title: '会话一' }));
+  await sendAndAck(ext, ev('page.opened', { url: `https://chatgpt.com/c/${C2}`, title: '会话二' }, { conv: C2, tab: 2 }));
+  const { win, d, close } = await openDashboard(server);
+  const cardOf = (id) => d.querySelector(`.card[data-conv="${id}"]`);
+  await waitFor(() => cardOf(CONV) && cardOf(C2), { label: 'two cards' });
+  const one = cardOf(CONV);
+  const two = cardOf(C2);
+  // 打开会话一的回复栏并输入
+  one.querySelector('[data-act="reply"]').click();
+  const ta = cardOf(CONV).querySelector('.creply textarea');
+  ta.value = '正在输入';
+  ta.dispatchEvent(new win.Event('input'));
+  const withReply = cardOf(CONV);
+  // 会话二有新消息 → 列表刷新：会话一的卡片和输入框是同一个节点，会话二的卡片重建
+  await sendAndAck(ext, ev('message.added', { message_id: 'u-9', role: 'user', index: 1, text: '新问题', text_length: 3 }, { conv: C2, tab: 2 }));
+  await waitFor(() => cardOf(C2) !== two && /新问题/.test(cardOf(C2).textContent), { label: 'card two rebuilt' });
+  assert.equal(cardOf(CONV), withReply, '没变化的卡片复用');
+  assert.equal(cardOf(CONV).querySelector('.creply textarea'), ta);
+  assert.equal(ta.value, '正在输入');
+  close();
+  ext.close();
   await server.stop();
 });

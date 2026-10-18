@@ -31,16 +31,16 @@
 
 ## 消息通道（内部）
 - 页面 → 后台：只有 `chrome.runtime.sendMessage({kind:'page_event', event})` 会被上报
-- 后台 → 页面：`capture_dom`、`page_info`、`get_observer_config`、`bridge_command`、`bridge_diag`
-- 弹窗 → 后台：`analyze_dom`、`clear_dom_config`、`save_settings` 等
+- 后台 → 页面：`page_info`、`get_observer_config`、`bridge_command`
+- 弹窗 → 后台：`get_diagnostics`、`save_settings`
 - 后端发来的 ack / error / broadcast 只在 `connection.js` 内部分流，**永远不能进入 page_event 通道**（防循环）
 
 ## 不变量
 - 事件收到 ack 前一直在有界队列（默认 500，存 `chrome.storage.session`），重连按原顺序重发。
 - `UNAUTHORIZED` 停止重连直到设置变更；不可重试错误从队列移除。
 - 插件只订阅自己打开标签页的会话，不订阅 `*`。
-- 每个站点的 DOM 配置单独存：`chrome.storage.local.domConfigs[site]`，ChatGPT 兼容旧 `domConfig`。
-- 看板“添加网站”（运行时添加，不改代码）：后端发 `probe_site` → `background.js` 后台打开网址、`chrome.scripting.executeScript` 抓 DOM、上传 `/api/sites/probe/:id/dom`；确认后后端发 `sync_sites` → `syncSites()` 把配置写入 `domConfigs[key]` + `customSiteHosts`，并用 `registerContentScripts`（id `site-<key>`）注册内容脚本；`content.js` 按 `customSiteHosts` 决定站点标识。
+- 每个站点的 DOM 配置只来自网站列表 `chrome.storage.local.siteList`（没有本地覆盖配置；旧版的 `domConfig` / `domConfigs` 在同步时清除）。
+- 看板“添加网站”（运行时添加，不改代码）：后端发 `probe_site` → `background.js` 后台打开网址、`chrome.scripting.executeScript` 抓 DOM、上传 `/api/sites/probe/:id/dom`；确认后后端发 `sync_sites` → `syncSites()` 把网站列表写入 `siteList`，并用 `registerContentScripts`（id `site-<key>`）注册内容脚本；`content.js` 按 `siteList` 的域名决定站点和配置。
 - 内置新增站点（写进代码）必须同时改：`manifest.json` 的 `host_permissions` 与 `content_scripts.matches`、`dom-observer.js` 的 `siteForHost` + `SITE_PROFILES`、`page-actions.js` 的站点动作、看板 `SOURCES`、README 站点表、`tests/sites.test.js`。
 
 ## 调试

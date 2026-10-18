@@ -13,7 +13,6 @@ const STATUS = {
 // 来源（网站）信息：全部来自后端网站列表（GET /api/sites），没有内置网站；
 // regenerate = 该网站的 DOM 配置里有“重新生成”按钮（与 page-actions.js 的判断一致）
 const SOURCES = {};
-// “全部”和各状态都不含已归档；已归档单独一个筛选
 // 状态筛选（再点一次已选中的取消 = 全部，“全部”不含页面已关）；“收藏”由顶栏星标按钮切换
 const STATUS_FILTERS = [
   ['all', '全部'], ['pinned', '置顶'], ['generating', '回答中'], ['error', '出错'],
@@ -75,8 +74,8 @@ const state = {
   messages: new Map(),
   streaming: new Set(),
   collapsed: new Set(),
-  stickBottom: true,
-  activeTabs: new Map(),  // 插件 client_id → 各窗口当前显示的会话     // 详情是否跟随到底部（最后一个回复）
+  stickBottom: true,      // 详情是否跟随到底部（最后一个回复）
+  activeTabs: new Map(),  // 插件 client_id → 各窗口当前显示的会话
   longOpen: new Set(),   // 超长消息：用户手动展开了全文的 message_id
   composerOpen: false,
   candIndex: -1,
@@ -84,7 +83,8 @@ const state = {
   cardReply: null,
   pendingCommands: new Map(),
   lastStatus: new Map(),
-  refreshTimer: null
+  refreshTimer: null,
+  refreshAt: 0
 };
 
 // ------------------------------------------------------------------ 工具
@@ -140,17 +140,26 @@ async function api(path, opts = {}) {
 }
 
 const escRe = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-/** 页面标题里的网站名（网站列表里的名称 / 标识）：标题去掉“ - 网站名”后缀；只剩网站名的标题不算标题 */
-function siteNamesRe() {
-  const names = [...new Set(Object.entries(SOURCES).flatMap(([k, v]) => [k, v.label]).filter(Boolean))].map(escRe);
-  return names.length ? names.join('|') : null;
+/**
+ * 页面标题里的网站名（网站列表里的名称 / 标识）：标题去掉“ - 网站名”后缀；只剩网站名的标题不算标题。
+ * 正则按网站名缓存（每次渲染每张卡片都要用，网站列表变了才重建）。
+ */
+let siteRes = { key: null, suffix: null, bare: null };
+function siteTitleRes() {
+  const names = [...new Set(Object.entries(SOURCES).flatMap(([k, v]) => [k, v.label]).filter(Boolean))].map(escRe).join('|');
+  if (siteRes.key !== names) {
+    siteRes = names
+      ? { key: names, suffix: new RegExp(`\\s*[-|·]\\s*(${names})\\s*$`, 'i'), bare: new RegExp(`^(?:(${names})$|(${names}) 是由)`, 'i') }
+      : { key: names, suffix: null, bare: null };
+  }
+  return siteRes;
 }
 function titleOf(c) {
   if (c.pending) return `新对话 · ${sourceInfo(c.source).label}`;
-  const names = siteNamesRe();
+  const re = siteTitleRes();
   let t = (c.title || '').trim();
-  if (names) t = t.replace(new RegExp(`\\s*[-|·]\\s*(${names})\\s*$`, 'i'), '').trim();
-  const bare = /^聊天$/.test(t) || (names && (new RegExp(`^(${names})$`, 'i').test(t) || new RegExp(`^(${names}) 是由`, 'i').test(t)));
+  if (re.suffix) t = t.replace(re.suffix, '').trim();
+  const bare = /^聊天$/.test(t) || (re.bare && re.bare.test(t));
   if (t && !bare) return t;
   if (c.first_user_text) return c.first_user_text.split('\n')[0].slice(0, 120);
   return c.conversation_id;
@@ -298,7 +307,19 @@ async function toggleNotifications() {
 
 // ------------------------------------------------------------------ 数据
 
-async function loadConversations() {
+/** 拉取会话列表；正在拉取时再次调用只记一次，结束后再拉一次（避免并发请求、旧结果覆盖新结果） */
+let loadingConversations = null;
+let reloadConversations = false;
+function loadConversations() {
+  if (loadingConversations) { reloadConversations = true; return loadingConversations; }
+  loadingConversations = fetchConversations().finally(() => {
+    loadingConversations = null;
+    if (reloadConversations) { reloadConversations = false; loadConversations(); }
+  });
+  return loadingConversations;
+}
+
+async function fetchConversations() {
   try {
     const data = await api('/api/conversations?limit=500');
     state.conversations = data.conversations;
@@ -312,8 +333,14 @@ async function loadConversations() {
   }
 }
 
+/** 合并刷新：已有待执行的刷新时不重复排队；新请求要求更早时提前（流式更新 1.5 秒一次，回答完成等 0.3 秒） */
 function scheduleRefresh(delay = 400) {
-  if (state.refreshTimer) return;
+  const at = Date.now() + delay;
+  if (state.refreshTimer) {
+    if (at >= state.refreshAt) return;
+    clearTimeout(state.refreshTimer);
+  }
+  state.refreshAt = at;
   state.refreshTimer = setTimeout(() => { state.refreshTimer = null; loadConversations(); }, delay);
 }
 
@@ -323,6 +350,7 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
   if (state.selected && state.selected !== conversationId) state.drafts.set(state.selected, $('quickText').value);
   state.selected = conversationId;
   state.messages = new Map();
+  msgCache.clear();
   state.streaming = new Set();
   state.longOpen = new Set();
   state.composerOpen = true;   // 点卡片打开详情时直接展开快速回复
@@ -545,7 +573,8 @@ function onBroadcast(b) {
   if (b.event_type === 'tabs.snapshot') {
     const set = new Set((b.payload.tabs || []).filter((t) => t.active && t.conversation_id).map((t) => t.conversation_id));
     state.activeTabs.set(b.origin_client_id || 'ext', set);
-    for (const n of document.querySelectorAll('.card[data-conv]')) n.classList.toggle('active-page', activeConvs().has(n.dataset.conv));
+    const active = activeConvs();
+    for (const n of document.querySelectorAll('.card[data-conv]')) n.classList.toggle('active-page', active.has(n.dataset.conv));
     return;
   }
   const conv = b.conversation_id;
@@ -624,7 +653,7 @@ function renderChips() {
     on ? el('span', { html: '<svg class="i s18" viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>' }) : null,
     label, n != null ? el('span', { class: 'n' }, n) : null);
   const pick = (key) => () => { state.filter = state.filter === key ? 'all' : key; save('filter', state.filter); render(); };
-  const group = (items, cls = '') => items.length ? el('div', { class: `cg ${cls}` }, ...items) : null;
+  const group = (items) => items.length ? el('div', { class: 'cg' }, ...items) : null;
   const statusChips = STATUS_FILTERS.filter(([k]) => !['all', 'favorite'].includes(k))
     .map(([key, label]) => chip(state.filter === key, label, counts[key] || 0, pick(key)));
   // 来源筛选上显示当前开着的标签页数量
@@ -649,14 +678,13 @@ function renderChips() {
 function card(c) {
   const id = c.conversation_id;
   const src = sourceInfo(c.source);
-  const busy = [...state.pendingCommands.values()].some((p) => p.conversation_id === id && p.action !== 'focus');
-  const online = c.open_tabs > 0 && state.wsState === 'open' && state.canControl;
+  const busy = convBusy(id);
+  const online = canControlConv(c);
   const stop = (fn) => (e) => { e.stopPropagation(); fn(e); };
   const offlineTip = c.open_tabs ? '' : '需要有标签页开着这个会话';
 
-
   const node = el('article', {
-    class: `card s-${c.status} src-${avatarClass(c.source)} ${c.pinned ? 'pinned' : ''} ${activeConvs().has(id) ? 'active-page' : ''}`,
+    class: `card s-${c.status} src-${avatarClass(c.source)} ${c.pinned ? 'pinned' : ''}`,
     'data-conv': id, tabindex: '0', role: 'button', title: c.status === 'closed' ? '页面已关：点击重新打开并跳转' : '点击查看详情',
     onclick: () => activateCard(c),
     onkeydown: (e) => { if (e.target === node && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); activateCard(c); } }
@@ -766,6 +794,51 @@ function cardReplyPanel(c, online, busy) {
       el('button', { class: 'btn filled s', type: 'button', 'data-act': 'send', disabled: !online || busy, onclick: send }, busy ? '发送中…' : '发送')));
 }
 
+/*
+ * 卡片按会话复用：卡片用到的数据（会话本身、标题、来源、是否在发送、能否操作、回复栏）都没变时沿用原来的 DOM
+ * （焦点、正在输入的回复、选区都不受影响），只更新相对时间和“窗口正显示”高亮；有变化的卡片才重建。
+ */
+const cardCache = new Map();   // conversation_id → { sig, node }
+
+/** 让 parent 的子节点依次为 nodes：只移动位置不对的节点，去掉多余的（没变的节点不动，焦点和滚动位置保留） */
+function placeChildren(parent, nodes) {
+  let ref = parent.firstChild;
+  for (const node of nodes) {
+    if (ref === node) { ref = ref.nextSibling; continue; }
+    parent.insertBefore(node, ref);
+  }
+  while (ref) { const next = ref.nextSibling; ref.remove(); ref = next; }
+}
+function cardSig(c) {
+  const id = c.conversation_id;
+  const reply = state.cardReply === id;
+  return JSON.stringify([c, titleOf(c), sourceInfo(c.source), convBusy(id), canControlConv(c), reply, reply ? settings.quickReplies : 0]);
+}
+function renderGrid(grid, list) {
+  const active = activeConvs();
+  const nodes = list.map((c) => {
+    const id = c.conversation_id;
+    const sig = cardSig(c);
+    let hit = cardCache.get(id);
+    if (!hit || hit.sig !== sig) {
+      hit = { sig, node: card(c) };
+      cardCache.set(id, hit);
+    } else {
+      const t = hit.node.querySelector('.time');
+      const text = ago(c.last_seen_at);
+      if (t && t.textContent !== text) t.textContent = text;
+    }
+    hit.node.classList.toggle('active-page', active.has(id));
+    return hit.node;
+  });
+  placeChildren(grid, nodes);
+  // 缓存只留还在列表里的会话（被筛选掉的也留着，切换筛选时直接复用）
+  if (cardCache.size > state.conversations.length) {
+    const ids = new Set(state.conversations.map((c) => c.conversation_id));
+    for (const id of cardCache.keys()) if (!ids.has(id)) cardCache.delete(id);
+  }
+}
+
 function render() {
   const grid = $('grid');
   if (state.wsState === 'open' && $('connText').textContent !== connLabel()) setConn('on', connLabel());
@@ -782,7 +855,7 @@ function render() {
     grid.replaceChildren(el('div', { class: 'empty' }, { favorite: '还没有收藏的会话', closed: '没有已关闭的页面' }[state.filter] || '没有符合条件的会话'));
   } else {
     state.rendering = true;
-    try { grid.replaceChildren(...list.map(card)); } finally { setTimeout(() => { state.rendering = false; }, 0); }
+    try { renderGrid(grid, list); } finally { setTimeout(() => { state.rendering = false; }, 0); }
   }
   if (replyFocus) {
     const ta = grid.querySelector('.creply textarea');
@@ -1091,7 +1164,6 @@ function renderText(text) {
 
 // ---------------------------------------------------------------- 富文本（html）：再净化一次后按原格式显示
 
-const IMG_SVG = '<svg viewBox="0 0 24 24"><path d="M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2zM8.5 13.5l2.5 3 3.5-4.5 4.5 6H5l3.5-4.5z"/></svg>';
 const FILE_SVG = '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>';
 // 允许的标签 → 允许的属性；其余元素只保留内容，RICH_DROP 里的整个丢掉
 const RICH_TAGS = {
@@ -1275,6 +1347,7 @@ function scrollDetailBottom() {
   $('composer').addEventListener('transitionend', keep);
 })();
 
+const msgCache = new Map();   // 详情：message_id → { sig, node }（打开另一个会话时清空）
 function renderDetail(scrollToEnd = false, forceBottom = false) {
   const body = $('detailBody');
   const nearBottom = forceBottom || state.composerOpen || body.scrollHeight - body.scrollTop - body.clientHeight < 120;
@@ -1287,14 +1360,16 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
     el('button', { class: `icon-btn ${on ? 'on' : ''}`, title, 'aria-label': title, 'data-act': act, disabled, html: svg,
       onclick: (e) => { e.stopPropagation(); onclick(); } });
 
-  $('detailMsgs').replaceChildren(...(msgs.length ? msgs.map(([id, m]) => {
+  const ctrl = canControlConv(c);
+  const dh = Math.round(dialogHeight());
+  const build = (id, m) => {
     const isAnswer = m.role === 'assistant';
     const collapsed = state.collapsed.has(id);
     const streaming = state.streaming.has(id);
     const ai = answers.indexOf(id);
     const isLast = ai === answers.length - 1;
     const regenTip = !src.regenerate ? '这个站点不支持重新回答'
-      : !canControlConv(c) ? '需要有标签页开着这个会话'
+      : !ctrl ? '需要有标签页开着这个会话'
         : !isLast ? '重新回答这条（页面上每条回答都有“重新生成”时可用）' : '重新回答';
     return el('div', { class: `msg ${m.role} ${streaming ? 'streaming' : ''} ${collapsed ? 'collapsed' : ''} ${m.favorite ? 'fav' : ''}`, 'data-mid': id },
       el('div', { class: 'meta' },
@@ -1312,7 +1387,22 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
           renderDetail();
         }, { act: 'fold' })
       ) : null);
-  }) : [el('div', { class: 'empty' }, '暂无消息')]));
+  };
+  if (!msgs.length) $('detailMsgs').replaceChildren(el('div', { class: 'empty' }, '暂无消息'));
+  else {
+    // 按消息复用：流式输出时只重建正在变化的那条（富文本解析、代码块渲染都不再每次全部重做）
+    const keep = new Set();
+    placeChildren($('detailMsgs'), msgs.map(([id, m]) => {
+      keep.add(id);
+      const ai = answers.indexOf(id);
+      const sig = JSON.stringify([m.role, m.text, m.html, !!m.favorite, state.collapsed.has(id), state.streaming.has(id), state.longOpen.has(id),
+        ai, answers.length, canRegen, ctrl, src.label, src.regenerate, dh]);
+      let hit = msgCache.get(id);
+      if (!hit || hit.sig !== sig) { hit = { sig, node: build(id, m) }; msgCache.set(id, hit); }
+      return hit.node;
+    }));
+    for (const id of msgCache.keys()) if (!keep.has(id)) msgCache.delete(id);
+  }
   applyLongFold();
   if ((scrollToEnd || state.composerOpen) && nearBottom) body.scrollTop = body.scrollHeight;
 }
@@ -1335,7 +1425,8 @@ function applyLongFold() {
   const dh = dialogHeight();
   if (!(dh > 0)) return;
   for (const msg of $('detailMsgs').querySelectorAll('.msg[data-mid]')) {
-    if (msg.classList.contains('collapsed')) continue;
+    // 已处理过的（复用的节点上已有“展开全文 / 收起”）不再重复处理
+    if (msg.classList.contains('collapsed') || msg.querySelector(':scope > .longbtn, :scope > .longfold')) continue;
     const id = msg.dataset.mid;
     const body = msg.querySelector(':scope > .body');
     if (!body) continue;

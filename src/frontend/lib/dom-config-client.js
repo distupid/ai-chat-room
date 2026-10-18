@@ -1,5 +1,5 @@
 /**
- * 插件后台调用后端 DOM 配置接口的辅助函数（纯函数，便于在 Node 测试中注入 fetch）。
+ * 插件后台调用后端网站接口（网站列表、添加网站时上传页面）的辅助函数（纯函数，便于在 Node 测试中注入 fetch）。
  */
 
 /** ws://127.0.0.1:8787 → http://127.0.0.1:8787；wss → https */
@@ -24,19 +24,6 @@ async function call(fetchImpl, serverUrl, token, method, path, body) {
   if (!res.ok && data.ok !== false) data.ok = false;
   data.status = res.status;
   return data;
-}
-
-/** 上传页面 DOM，返回 {ok, config, report, status} */
-export function analyzeDomOnServer({ fetchImpl = fetch, serverUrl, token, html, url, title }) {
-  return call(fetchImpl, serverUrl, token, 'POST', '/api/dom-config/analyze', { html, url, title });
-}
-
-export function getDomConfigFromServer({ fetchImpl = fetch, serverUrl, token }) {
-  return call(fetchImpl, serverUrl, token, 'GET', '/api/dom-config');
-}
-
-export function clearDomConfigOnServer({ fetchImpl = fetch, serverUrl, token }) {
-  return call(fetchImpl, serverUrl, token, 'DELETE', '/api/dom-config');
 }
 
 /** 已适配网站（内置 + 看板上添加的） */

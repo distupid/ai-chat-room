@@ -537,7 +537,7 @@ export function createBridgeServer(opts = {}) {
   /** close：把这个插件里开着该会话的所有标签页 + 会话地址一起发过去（PWA 窗口里的标签页也能关掉） */
   function closeExtras(conversationId, clientId) {
     const tabIds = [...new Set(db.openTabsFor(conversationId).filter((t) => t.client_id === clientId).map((t) => t.tab_id))].slice(0, 50);
-    const url = db.listConversations().find((c) => c.conversation_id === conversationId)?.url;
+    const url = db.conversationUrl(conversationId);
     return { tab_ids: tabIds, ...(typeof url === 'string' && /^https:\/\//.test(url) ? { url: url.slice(0, 2048) } : {}) };
   }
 

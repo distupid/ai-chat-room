@@ -119,12 +119,13 @@ test/                         单元测试 + 多客户端 E2E 验收测试
 
 ## DOM 配置：从真实页面分析选择器
 
-ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面 DOM 并应用」**（与「刷新诊断」同一行，右侧）：
+网站改版后选择器会失效。看板网站下拉里的“添加网站”（或“网站配置”里的完整 JSON）用同一个分析器生成配置：
 
-1. 内容脚本抓取当前页面 HTML（去掉 script / style / svg / img 等）
-2. 后台 POST 到 `http://127.0.0.1:8787/api/dom-config/analyze`（`Authorization: Bearer <extension token>`）
-3. 后端 `src/backend/src/dom-analyzer.js` 分析出统一配置（DomConfig v1），保存到 `src/backend/data/dom-config.json`
-4. 插件把配置存进 `chrome.storage.local.domConfig`，所有 ChatGPT 标签页的 dom-observer 立即 `setConfig()` 生效，刷新后依然使用
+1. 插件后台打开网址（已打开的标签页直接用），抓取页面 HTML（去掉 script / style / svg / img 等）
+2. 上传到后端，`src/backend/src/dom-analyzer.js` 分析出统一配置（DomConfig v1）
+3. 确认后写进网站列表；插件同步网站列表（`chrome.storage.local.siteList`）后，对应标签页的 dom-observer 立即 `setConfig()` 生效
+
+（插件弹窗里原来的“分析当前页面 DOM 并应用”已删除；后端 `/api/dom-config*` 接口保留。）
 
 分析顺序：已知结构（旧版 `data-message-author-role`、新版 `data-chatgpt-search-unit-key`）→ 通用发现（找取值以 `user`/`assistant` 结尾的属性）→ 消息 ID（各消息取值互不相同的 UUID 属性）→ 正文选择器（避开按钮文字）→ 生成状态（内置候选 + 抓取时页面上的停止按钮，外加“文本活动”检测）。
 
@@ -152,7 +153,6 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 - **恢复默认**：网站配置弹窗里的“恢复默认”把该网站的 DOM 配置和域名恢复为种子（`POST /api/sites/:key/reset`）；删掉的默认网站可以从网站下拉的“恢复默认网站”加回（`POST /api/sites/defaults`，`GET /api/sites` 的 `missing_defaults` 列出缺少的）。
 - **插件怎么用这份列表**：后端在列表变化时给在线插件发 `sync_sites`；插件拉 `GET /api/sites`，存进 `chrome.storage.local.siteList`，并为每个**启用**的网站动态注册内容脚本（`chrome.scripting.registerContentScripts`，匹配本域名、子域名和其他域名；manifest 不再写死内容脚本）。内容脚本按当前域名在 `siteList` 里找网站（最长域名匹配，`www.` 忽略）并用它的配置；网站停用 / 被删除时不观察。还没同步过列表（例如第一次离线启动）时，插件和内容脚本都用默认种子。
 - **配置变化立即生效**：内容脚本监听 `siteList` 变化并 `setConfig()`；停用的网站立即停止观察，重新启用后开始观察（已开着但没注入过内容脚本的页面需要刷新）。
-- **弹窗“分析当前页面”**：结果作为本地覆盖配置保存在 `chrome.storage.local.domConfigs[site]`，叠加在网站列表的配置之上；之后在看板上改了该网站的配置（`updated_at` 变化），同步时清掉本地覆盖，以看板为准。duck.ai / hark.com 的分析会用默认种子在上传的页面上试跑并返回识别报告。
 
 | 接口（网站） | 说明 |
 |---|---|

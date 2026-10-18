@@ -23,9 +23,9 @@
 - 契约清单（改任何一项都要在 PR 标题加 `[contract]`）：
   1. `contracts/protocol.js` 的类型、Schema、错误码、scope、指令
   2. 后端 HTTP 接口（路径、参数、返回）
-  3. 插件内部消息 `kind`（page_event / capture_dom / bridge_command / bridge_diag / analyze_dom…）
+  3. 插件内部消息 `kind`（page_event / page_info / get_observer_config / bridge_command / save_settings…）
   4. DomConfig v1 结构与 `SITE_PROFILES` 字段
-  5. `chrome.storage` 键名（`domConfigs`、设置、队列）
+  5. `chrome.storage` 键名（`siteList`、设置、队列）
   6. 会话实体字段（`GET /api/conversations`）
 
 ## 3. 热点文件，先拆再并行

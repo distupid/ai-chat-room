@@ -3,56 +3,14 @@ import { createBackground, DEFAULT_SETTINGS } from './lib/background-core.js';
 import { randomId } from './shared/protocol.js';
 // 观察器脚本（经典脚本，挂到 globalThis.ChatGPTBridgeObserver）：用它的默认种子和按域名找网站的规则，与内容脚本一致
 import './lib/dom-observer.js';
-import { analyzeDomOnServer, clearDomConfigOnServer, getSitesFromServer, submitProbeDom } from './lib/dom-config-client.js';
+import { getSitesFromServer, submitProbeDom } from './lib/dom-config-client.js';
 
 const Observer = globalThis.ChatGPTBridgeObserver;
-
-/** 按域名在网站列表（没有同步过时用默认种子）里找网站标识 */
-async function siteOf(url) {
-  const host = new URL(url).hostname;
-  const { siteList } = await chrome.storage.local.get(['siteList']);
-  return Observer.siteForHost(host, Array.isArray(siteList) ? siteList : null) || Observer.sourceFromUrl(url);
-}
-
-/** 弹窗按钮：抓取当前标签页 DOM → 后端分析 → 保存配置（内容脚本监听 storage 变化后立即生效） */
-async function analyzeActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab) return { ok: false, error: '没有找到当前标签页' };
-  const site = await siteOf(tab.url);
-  let captured;
-  try { captured = await chrome.tabs.sendMessage(tab.id, { kind: 'capture_dom' }); }
-  catch { return { ok: false, error: '页面上没有运行内容脚本：重新加载插件后，请按 F5 刷新当前页面' }; }
-  if (!captured?.ok) return { ok: false, error: captured?.error || '抓取 DOM 失败' };
-  const { serverUrl, token } = await loadSettings();
-  if (!token) return { ok: false, error: '请先填写并保存 extension token' };
-  let result;
-  try {
-    result = await analyzeDomOnServer({ serverUrl, token, ...captured.page });
-  } catch (e) {
-    return { ok: false, error: `无法访问后端分析接口：${e?.message || e}` };
-  }
-  if (result.ok && result.config) {
-    const { domConfigs = {}, domConfigReports = {} } = await chrome.storage.local.get(['domConfigs', 'domConfigReports']);
-    await chrome.storage.local.set({
-      domConfigs: { ...domConfigs, [site]: { ...result.config, site } },
-      domConfigReports: { ...domConfigReports, [site]: result.report },
-      ...(site === 'chatgpt' ? { domConfig: result.config, domConfigReport: result.report } : {})
-    });
-  }
-  return { ...result, html_bytes: captured.page.html.length };
-}
-
-async function clearDomConfig() {
-  await chrome.storage.local.remove(['domConfig', 'domConfigReport', 'domConfigs', 'domConfigReports']);
-  const { serverUrl, token } = await loadSettings();
-  if (token) { try { await clearDomConfigOnServer({ serverUrl, token }); } catch { /* 后端不可达时只清本地 */ } }
-  return { ok: true };
-}
 
 // ------------------------------------------------------------- 看板添加的网站
 const CONTENT_JS = ['lib/dom-observer.js', 'lib/page-actions.js', 'content.js'];
 
-/** 页面里执行：去掉脚本 / 样式等，返回 HTML（与 content.js 的 captureDom 相同） */
+/** 页面里执行：去掉脚本 / 样式等，返回 HTML（交给后端分析） */
 function capturePage() {
   const root = document.documentElement.cloneNode(true);
   root.querySelectorAll('script, style, noscript, link, svg, iframe, template, img, video, canvas').forEach((n) => n.remove());
@@ -150,7 +108,6 @@ async function ensureRegistered() {
 
 /**
  * 拉取网站列表（所有网站，含默认种子网站）：存进 siteList（内容脚本按域名选配置），并按列表注册内容脚本。
- * 某个网站的配置在看板上改过（updated_at 变了）时，清掉弹窗“分析当前页面”留下的本地覆盖配置，让看板的修改生效。
  */
 async function syncSites() {
   const { serverUrl, token } = await loadSettings();
@@ -162,13 +119,9 @@ async function syncSites() {
     key: x.key, name: x.name, url: x.url, host: x.host, hosts: Array.isArray(x.hosts) ? x.hosts : [],
     enabled: x.enabled !== false, config: x.config ? { ...x.config, site: x.key } : null, updated_at: x.updated_at || 0
   }));
-  const { siteList: old = [], domConfigs = {} } = await chrome.storage.local.get(['siteList', 'domConfigs']);
-  const before = new Map((Array.isArray(old) ? old : []).map((x) => [x.key, x.updated_at || 0]));
-  const overrides = { ...domConfigs };
-  for (const x of list) if (before.has(x.key) && before.get(x.key) !== x.updated_at) delete overrides[x.key];
-  for (const k of Object.keys(overrides)) if (!list.some((x) => x.key === k)) delete overrides[k];
-  await chrome.storage.local.set({ siteList: list, domConfigs: overrides });
-  await chrome.storage.local.remove(['customSiteHosts', 'customSiteKeys']);   // 旧版字段
+  await chrome.storage.local.set({ siteList: list });
+  // 旧版字段（弹窗“分析当前页面”留下的本地覆盖配置、旧的自定义域名）：不再使用
+  await chrome.storage.local.remove(['customSiteHosts', 'customSiteKeys', 'domConfig', 'domConfigReport', 'domConfigs', 'domConfigReports']);
   let n;
   try { n = await registerSites(list); } catch (e) { return { ok: false, code: 'register_failed', detail: String(e?.message || e) }; }
   return { ok: true, detail: `${list.length} 个网站，${n} 个已启用` };
@@ -304,8 +257,6 @@ function syncTabsNow(bg, force = false) {
 // 注意：监听器必须在顶层同步注册，SW 被唤醒时才能收到事件
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   ready.then(async (bg) => {
-    if (message?.kind === 'analyze_dom') return sendResponse(await analyzeActiveTab());
-    if (message?.kind === 'clear_dom_config') return sendResponse(await clearDomConfig());
     if (message?.kind === 'save_settings') {
       await chrome.storage.local.set({ serverUrl: message.serverUrl, token: message.token });
       if (bg.conn.stopped) { bg.conn.url = message.serverUrl; bg.conn.token = message.token; await bg.conn.start(); }
