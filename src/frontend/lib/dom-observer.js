@@ -103,7 +103,12 @@
       send_button: '[data-testid="send-button"], form[data-chatgpt-composer] button[aria-label*="发送"], button[aria-label*="Send"]',
       regenerate_button: 'button[aria-label="重新生成回复"], button[aria-label*="重新生成"], button[aria-label*="Regenerate"], [data-testid="regenerate-turn-action-button"]',
       regenerate_menu_item: '[role="menuitem"]',
-      regenerate_menu_text: '重试|再试一次|重新生成|Try again|Regenerate|Retry'
+      regenerate_menu_text: '重试|再试一次|重新生成|Try again|Regenerate|Retry',
+      // 输入框的上传按钮（看板照着它的图标 / 文字画按钮）和页面自己的文件选择框（看板选的文件交给它上传）
+      attach_button: '[data-testid="composer-plus-btn"], button[aria-label*="添加文件"], button[aria-label*="附件"], button[aria-label*="上传"], ' +
+        'button[aria-label*="Attach"], button[aria-label*="attach"], button[aria-label*="Upload"], button[aria-label*="upload"], ' +
+        'button[aria-label*="Add files"], button[aria-label*="Add photos"], [data-testid*="attach"], [data-testid*="upload"]',
+      file_input: 'input[type="file"]'
     }
   };
 
@@ -331,7 +336,7 @@
     }
     var actions = {};
     var ca = cfg.actions && typeof cfg.actions === 'object' ? cfg.actions : {};
-    ['composer', 'send_button', 'regenerate_button', 'regenerate_menu_item', 'regenerate_menu_text'].forEach(function (k) {
+    ['composer', 'send_button', 'regenerate_button', 'regenerate_menu_item', 'regenerate_menu_text', 'attach_button', 'file_input'].forEach(function (k) {
       var v = typeof ca[k] === 'string' ? ca[k] : (typeof da[k] === 'string' ? da[k] : D.actions[k]);
       actions[k] = String(v).slice(0, 2000);
     });
@@ -768,6 +773,81 @@
 
   var SKIP_STATUS_TAGS = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEXTAREA: 1, INPUT: 1, TEMPLATE: 1 };
 
+  // ---------------------------------------------------------------- 输入框上传按钮（给看板照着画）
+  var SVG_SHAPES = { path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, ellipse: 1 };
+  var SHAPE_ATTRS = ['d', 'cx', 'cy', 'r', 'rx', 'ry', 'x', 'y', 'width', 'height', 'x1', 'y1', 'x2', 'y2', 'points',
+    'fill', 'stroke', 'stroke-width', 'fill-rule', 'clip-rule', 'transform', 'opacity'];
+  var SAFE_SVG_VALUE = /^[0-9A-Za-z.,#%()\s+-]*$/;
+  function svgVal(v) {
+    v = v == null ? '' : String(v).trim();
+    if (!v || v.length > 4000 || !SAFE_SVG_VALUE.test(v) || /url\s*\(|javascript|expression/i.test(v)) return null;
+    return v;
+  }
+  /** 只取图形数据（标签名 + 白名单属性），看板自己拼 SVG；颜色是 currentColor 等关键字或纯色 */
+  function iconOf(svg, depth) {
+    if (!svg || (depth || 0) > 2) return null;
+    var shapes = [];
+    var nodes = svg.querySelectorAll('path, circle, rect, line, polyline, polygon, ellipse');
+    for (var i = 0; i < nodes.length && shapes.length < 30; i++) {
+      var tag = String(nodes[i].tagName).toLowerCase();
+      if (!SVG_SHAPES[tag]) continue;
+      var attrs = {};
+      var n = 0;
+      SHAPE_ATTRS.forEach(function (k) {
+        var v = svgVal(nodes[i].getAttribute(k));
+        if (v != null && n < 16) { attrs[k] = v; n++; }
+      });
+      shapes.push({ tag: tag, attrs: attrs });
+    }
+    // <use href="#sprite"> 一类图标：跟着引用找真正的图形
+    if (!shapes.length) {
+      var use = svg.querySelector('use');
+      var ref = use && (use.getAttribute('href') || use.getAttribute('xlink:href'));
+      var target = ref && ref.charAt(0) === '#' ? svg.ownerDocument.getElementById(ref.slice(1)) : null;
+      if (target && target !== svg && !target.contains(svg)) return iconOf(target, (depth || 0) + 1);   // <symbol> / <svg> 都有 viewBox 和图形子节点
+      return null;
+    }
+    var icon = { shapes: shapes };
+    var vb = svg.getAttribute('viewBox');
+    if (vb && /^[0-9.\s-]+$/.test(vb) && vb.length <= 64) icon.view_box = vb.trim();
+    [['fill', 'fill'], ['stroke', 'stroke'], ['stroke-width', 'stroke_width'], ['stroke-linecap', 'stroke_linecap'], ['stroke-linejoin', 'stroke_linejoin']].forEach(function (p) {
+      var v = svgVal(svg.getAttribute(p[0]));
+      if (v != null) icon[p[1]] = v;
+    });
+    return icon;
+  }
+  /** 读取源站输入框的上传按钮：文字、图标，以及页面文件选择框的 accept / multiple；页面没有上传功能时返回 null */
+  function detectComposerCaps(doc, actions) {
+    if (!actions) return null;
+    var btn = null, input = null;
+    try {
+      var composer = actions.composer ? doc.querySelectorAll(actions.composer) : [];
+      var comp = composer.length ? composer[composer.length - 1] : null;
+      var form = comp && comp.closest ? comp.closest('form') : null;
+      var pick = function (sel) {
+        if (!sel) return null;
+        var list = (form || doc).querySelectorAll(sel);
+        if (!list.length && form) list = doc.querySelectorAll(sel);
+        return list.length ? list[list.length - 1] : null;
+      };
+      btn = pick(actions.attach_button);
+      input = pick(actions.file_input);
+    } catch (_) { return null; }
+    if (!btn && !input) return null;
+    var attach = {};
+    var label = btn ? (btn.getAttribute('aria-label') || btn.getAttribute('title') || rawText(btn)) : '';
+    label = String(label || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+    if (label) attach.label = label;
+    if (input) {
+      var acc = String(input.getAttribute('accept') || '').trim();
+      if (acc) attach.accept = acc.slice(0, 500);
+      attach.multiple = input.hasAttribute('multiple');
+    }
+    var icon = btn ? iconOf(btn.querySelector('svg')) : null;
+    if (icon) attach.icon = icon;
+    return { attach: attach };
+  }
+
   /**
    * 在消息正文以外的文字中检测“已到限额 / 出错”，并读取当前模型。
    * 返回 { status, detail, model }。
@@ -1163,12 +1243,14 @@
       statusDirty = false;
       var s;
       try { s = detectStatus(doc, cfg); } catch (e) { stats.errors++; return; }
-      var key = (state.conversationId || '') + '|' + s.status + '|' + (s.detail || '') + '|' + (s.model || '');
+      var caps = null;
+      try { caps = detectComposerCaps(doc, cfg.actions); } catch (_) { caps = null; }
+      var key = (state.conversationId || '') + '|' + s.status + '|' + (s.detail || '') + '|' + (s.model || '') + '|' + (caps ? JSON.stringify(caps) : '');
       if (key === state.statusKey) return;
       state.statusKey = key;
       state.statusSequence++;
       send('conversation.status', state.conversationId,
-        { source: cfg.site || sourceFromUrl(win.location.href), status: s.status, detail: s.detail, model: s.model },
+        Object.assign({ source: cfg.site || sourceFromUrl(win.location.href), status: s.status, detail: s.detail, model: s.model }, caps ? { composer: caps } : {}),
         loadId + '|status|' + state.statusSequence);
     }
 
@@ -1407,6 +1489,7 @@
     SITE_PROFILES: SITE_PROFILES,
     resolveConfig: resolveConfig,
     detectStatus: detectStatus,
+    detectComposerCaps: detectComposerCaps,
     sourceFromUrl: sourceFromUrl,
     DEFAULT_CONFIG: DEFAULT_CONFIG
   };

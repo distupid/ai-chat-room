@@ -602,6 +602,105 @@
                       "null"
                     ],
                     "maxLength": 100
+                  },
+                  "composer": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [],
+                    "properties": {
+                      "attach": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [],
+                        "properties": {
+                          "label": {
+                            "type": "string",
+                            "maxLength": 100
+                          },
+                          "accept": {
+                            "type": "string",
+                            "maxLength": 500
+                          },
+                          "multiple": {
+                            "type": "boolean"
+                          },
+                          "icon": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "shapes"
+                            ],
+                            "properties": {
+                              "view_box": {
+                                "type": "string",
+                                "maxLength": 64,
+                                "pattern": "^[0-9.\\s-]+$"
+                              },
+                              "fill": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke_width": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke_linecap": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke_linejoin": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "shapes": {
+                                "type": "array",
+                                "maxItems": 30,
+                                "items": {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "tag",
+                                    "attrs"
+                                  ],
+                                  "properties": {
+                                    "tag": {
+                                      "type": "string",
+                                      "enum": [
+                                        "path",
+                                        "circle",
+                                        "rect",
+                                        "line",
+                                        "polyline",
+                                        "polygon",
+                                        "ellipse"
+                                      ]
+                                    },
+                                    "attrs": {
+                                      "type": "object",
+                                      "maxProperties": 16,
+                                      "additionalProperties": {
+                                        "type": "string",
+                                        "maxLength": 4000,
+                                        "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -1325,6 +1424,105 @@
                       "null"
                     ],
                     "maxLength": 100
+                  },
+                  "composer": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [],
+                    "properties": {
+                      "attach": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [],
+                        "properties": {
+                          "label": {
+                            "type": "string",
+                            "maxLength": 100
+                          },
+                          "accept": {
+                            "type": "string",
+                            "maxLength": 500
+                          },
+                          "multiple": {
+                            "type": "boolean"
+                          },
+                          "icon": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "shapes"
+                            ],
+                            "properties": {
+                              "view_box": {
+                                "type": "string",
+                                "maxLength": 64,
+                                "pattern": "^[0-9.\\s-]+$"
+                              },
+                              "fill": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke_width": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke_linecap": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "stroke_linejoin": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                              },
+                              "shapes": {
+                                "type": "array",
+                                "maxItems": 30,
+                                "items": {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "tag",
+                                    "attrs"
+                                  ],
+                                  "properties": {
+                                    "tag": {
+                                      "type": "string",
+                                      "enum": [
+                                        "path",
+                                        "circle",
+                                        "rect",
+                                        "line",
+                                        "polyline",
+                                        "polygon",
+                                        "ellipse"
+                                      ]
+                                    },
+                                    "attrs": {
+                                      "type": "object",
+                                      "maxProperties": 16,
+                                      "additionalProperties": {
+                                        "type": "string",
+                                        "maxLength": 4000,
+                                        "pattern": "^[0-9A-Za-z.,#%()\\s+-]*$"
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -1656,6 +1854,43 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 20000
+        },
+        "attachments": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "type": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string",
+                "maxLength": 300
+              }
+            }
+          }
         },
         "answer_index": {
           "type": "integer",

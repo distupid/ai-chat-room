@@ -1,6 +1,6 @@
 /*
  * 页面操作（经典脚本，内容脚本中运行）：执行看板下发的指令。
- *   reply      在输入框中填入文字并发送
+ *   reply      在输入框中填入文字（和看板选的文件）并发送；文件交给页面自己的文件选择框上传，和在网页上点上传按钮一样
  *   regenerate 点击某条回答的“重新生成”（answer_index 不填 = 最后一条）
  * 选择器可由 DomConfig.actions 覆盖；默认值按 2026-10 实测的 ChatGPT 页面编写，同时兼容旧版。
  */
@@ -13,8 +13,13 @@
     regenerate_button: 'button[aria-label="重新生成回复"], button[aria-label*="重新生成"], button[aria-label*="Regenerate"], [data-testid="regenerate-turn-action-button"]',
     // 点“重新生成”后若弹出菜单，点其中匹配的菜单项
     regenerate_menu_item: '[role="menuitem"]',
-    regenerate_menu_text: '重试|再试一次|重新生成|Try again|Regenerate|Retry'
+    regenerate_menu_text: '重试|再试一次|重新生成|Try again|Regenerate|Retry',
+    attach_button: '[data-testid="composer-plus-btn"], button[aria-label*="添加文件"], button[aria-label*="附件"], button[aria-label*="上传"], ' +
+      'button[aria-label*="Attach"], button[aria-label*="attach"], button[aria-label*="Upload"], button[aria-label*="upload"], ' +
+      'button[aria-label*="Add files"], button[aria-label*="Add photos"], [data-testid*="attach"], [data-testid*="upload"]',
+    file_input: 'input[type="file"]'
   };
+  var UPLOAD_WAIT_MS = 90000;   // 带文件时等页面上传完成（发送按钮可用）的最长时间
 
   function validSelector(doc, sel) {
     if (typeof sel !== 'string' || !sel || sel.length > 2000) return false;
@@ -86,6 +91,53 @@
     }
   }
 
+  function toFiles(win, files) {
+    return files.map(function (f) {
+      var bin = win.atob(String(f.data || ''));
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new win.File([bytes], String(f.name || 'file'), { type: String(f.type || 'application/octet-stream') });
+    });
+  }
+
+  /** 页面自己的文件选择框：优先输入框所在表单里的那个 */
+  function findFileInput(doc, sel, composer) {
+    var form = composer && composer.closest ? composer.closest('form') : null;
+    var list = form ? form.querySelectorAll(sel.file_input) : [];
+    if (!list.length) list = doc.querySelectorAll(sel.file_input);
+    return last(list);
+  }
+
+  /**
+   * 把文件交给页面：有文件选择框就直接设置 files 并触发 change（页面按自己的逻辑上传）；
+   * 没有时模拟把文件拖到输入框里。
+   */
+  function attachFiles(doc, win, sel, composer, files) {
+    if (typeof win.DataTransfer !== 'function' || typeof win.File !== 'function') {
+      return { ok: false, code: 'attach_unsupported', detail: '这个浏览器不支持把文件交给页面' };
+    }
+    var list = toFiles(win, files);
+    var dt = new win.DataTransfer();
+    list.forEach(function (f) { dt.items.add(f); });
+    var input = findFileInput(doc, sel, composer);
+    if (input) {
+      if (!input.multiple && list.length > 1) return { ok: false, code: 'attach_single_only', detail: '这个网站一次只能上传一个文件' };
+      input.files = dt.files;
+      input.dispatchEvent(new win.Event('input', { bubbles: true }));
+      input.dispatchEvent(new win.Event('change', { bubbles: true }));
+      return { ok: true, via: 'input' };
+    }
+    var target = composer || doc.body;
+    try {
+      ['dragenter', 'dragover', 'drop'].forEach(function (t) {
+        target.dispatchEvent(new win.DragEvent(t, { bubbles: true, cancelable: true, dataTransfer: dt }));
+      });
+      return { ok: true, via: 'drop' };
+    } catch (_) {
+      return { ok: false, code: 'file_input_not_found', detail: '页面上没找到上传文件的地方' };
+    }
+  }
+
   function pressEnter(win, el) {
     var init = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
     el.dispatchEvent(new win.KeyboardEvent('keydown', init));
@@ -108,17 +160,24 @@
 
     if (command.action === 'reply') {
       var text = String(command.text || '');
-      if (!text.trim()) return { ok: false, code: 'text_required' };
+      var files = Array.isArray(command.files) ? command.files : [];
+      if (!text.trim() && !files.length) return { ok: false, code: 'text_required' };
       var input = last(doc.querySelectorAll(sel.composer));
       if (!input) return { ok: false, code: 'composer_not_found', detail: '页面上没找到输入框' };
-      setComposerText(doc, win, input, text);
+      if (files.length) {
+        var att = attachFiles(doc, win, sel, input, files);
+        if (!att.ok) return att;
+        await sleep(win, 300);   // 让页面先把文件加进输入框（很多网站上传期间会禁用发送按钮）
+      }
+      if (text.trim()) setComposerText(doc, win, input, text);
       var btn = await waitUntil(win, function () {
         var b = last(doc.querySelectorAll(sel.send_button));
         return isEnabled(b) ? b : null;
-      }, 3000, 50);
+      }, files.length ? UPLOAD_WAIT_MS : 3000, files.length ? 200 : 50);
+      if (!btn && files.length) return { ok: false, code: 'upload_not_finished', detail: '文件已交给页面，但等不到上传完成（发送按钮一直不可用）' };
       if (btn) btn.click(); else pressEnter(win, input);
       var sent = await waitUntil(win, function () {
-        return ctx.isGenerating() || composerText(input).trim() === '';
+        return ctx.isGenerating() || (text.trim() ? composerText(input).trim() === '' : !isEnabled(last(doc.querySelectorAll(sel.send_button))));
       }, 5000, 100);
       // 等页面开始回答再返回，避免看板紧接着发第二条时页面还没进入“回答中”
       if (sent) await waitUntil(win, function () { return ctx.isGenerating(); }, 3000, 100);

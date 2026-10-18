@@ -382,6 +382,7 @@ function deriveConversation(r, openTabs, resolveSource = sourceFromUrl) {
     title: r.title || null,
     url: r.last_url,
     model: st?.model || null,
+    composer: st?.composer || null,   // 输入框能力（上传按钮样式 / accept），页面关掉后保留最后一次
     status,
     page_status: pageStatus,
     status_detail: st?.detail || null,

@@ -2,7 +2,7 @@ import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import {
-  ErrorCode, EventType, MessageType, PROTOCOL_VERSION, Scope, validateMessage, makeEnvelope, randomId
+  ErrorCode, EventType, MessageType, PROTOCOL_VERSION, Scope, validateMessage, makeEnvelope, randomId, Limits
 } from '../../../contracts/protocol.js';
 import { loadConfig } from './config.js';
 import { openDatabase } from './db.js';
@@ -82,6 +82,13 @@ export function createBridgeServer(opts = {}) {
       });
       return;
     }
+    if (path === '/api/attachments' || path.startsWith('/api/attachments/')) {
+      handleAttachments(req, res, path).catch((err) => {
+        log.error('[attachments]', err);
+        if (!res.headersSent) json(res, 500, { ok: false, error: 'internal error' });
+      });
+      return;
+    }
     if (path === '/api/dom-config' || path === '/api/dom-config/analyze') {
       handleDomConfig(req, res, path).catch((err) => {
         log.error('[dom-config]', err);
@@ -101,9 +108,64 @@ export function createBridgeServer(opts = {}) {
       'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
-      'content-security-policy': "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; frame-ancestors 'none'"
+      'content-security-policy': "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; frame-ancestors 'none'"
     });
     res.end(body);
+  }
+
+  // ------------------------------------------------------------- 快速回复附件
+  // 看板先把文件上传到这里（只在内存里保留一段时间），快速回复指令带上附件 ID；
+  // 插件收到指令后用自己的 token 取回文件，再交给源站页面自己的上传控件（和在网页上点上传按钮一样）。
+  const MAX_ATTACHMENT_BYTES = opts.maxAttachmentBytes ?? Limits.MAX_ATTACHMENT_BYTES;
+  const ATTACHMENT_TTL_MS = opts.attachmentTtlMs ?? 30 * 60 * 1000;
+  const MAX_ATTACHMENT_TOTAL = opts.maxAttachmentTotalBytes ?? 200 * 1024 * 1024;
+  const attachments = new Map();   // id → { buf, name, type, size, expires }
+  function pruneAttachments() {
+    const t = Date.now();
+    for (const [id, a] of attachments) if (a.expires <= t) attachments.delete(id);
+    let total = [...attachments.values()].reduce((n, a) => n + a.size, 0);
+    for (const [id, a] of attachments) {   // Map 按插入顺序：超过总量时先删最早的
+      if (total <= MAX_ATTACHMENT_TOTAL) break;
+      attachments.delete(id); total -= a.size;
+    }
+  }
+  /**
+   *   POST /api/attachments   （observer token，需要 control）body = 文件原始内容；
+   *        header x-file-name = encodeURIComponent(文件名)，content-type = 文件类型 → {ok, attachment:{id,name,type,size}}
+   *   GET  /api/attachments/:id（extension token，需要 publish）→ 文件内容
+   */
+  async function handleAttachments(req, res, path) {
+    if (!originAllowed(req.headers.origin, req.headers.host)) return json(res, 403, { ok: false, error: 'forbidden origin' });
+    const client = clientFromRequest(req);
+    if (!client) return json(res, 401, { ok: false, error: 'unauthorized' });
+    pruneAttachments();
+    if (path === '/api/attachments' && req.method === 'POST') {
+      if (!client.scopes.includes(Scope.CONTROL)) return json(res, 403, { ok: false, error: 'control scope required' });
+      let name = 'file';
+      try { name = decodeURIComponent(String(req.headers['x-file-name'] || 'file')); } catch { /* 保持默认 */ }
+      name = name.replace(/[\u0000-\u001f\u007f/\\]/g, '_').trim().slice(0, 255) || 'file';
+      const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      const type = /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(ct) && ct.length <= 128 ? ct : 'application/octet-stream';
+      let buf;
+      try { buf = await readBody(req, MAX_ATTACHMENT_BYTES, true); }
+      catch (e) { return json(res, e.code === 'TOO_LARGE' ? 413 : 400, { ok: false, error: e.code === 'TOO_LARGE' ? `文件超过 ${Math.round(MAX_ATTACHMENT_BYTES / 1048576)} MB` : 'read failed' }); }
+      const id = randomId('att').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+      attachments.set(id, { buf, name, type, size: buf.length, expires: Date.now() + ATTACHMENT_TTL_MS });
+      pruneAttachments();
+      return json(res, 201, { ok: true, attachment: { id, name, type, size: buf.length } });
+    }
+    const one = /^\/api\/attachments\/([A-Za-z0-9_-]{8,64})$/.exec(path);
+    if (one && req.method === 'GET') {
+      if (!client.scopes.includes(Scope.PUBLISH)) return json(res, 403, { ok: false, error: 'publish scope required' });
+      const a = attachments.get(one[1]);
+      if (!a) return json(res, 404, { ok: false, error: '附件不存在或已过期' });
+      res.writeHead(200, {
+        'content-type': a.type, 'content-length': a.size, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
+        'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(a.name)}`
+      });
+      return res.end(a.buf);
+    }
+    return json(res, 405, { ok: false, error: 'method not allowed' });
   }
 
   function clientFromRequest(req) {
@@ -563,6 +625,7 @@ export function createBridgeServer(opts = {}) {
   // command_id → { requester, target, timer }
   const pendingCommands = new Map();
   const COMMAND_TIMEOUT_MS = opts.commandTimeoutMs ?? 20000;
+  const ATTACH_COMMAND_TIMEOUT_MS = opts.attachCommandTimeoutMs ?? 120000;
 
   function sendTo(rec, msg) {
     if (!rec || rec.ws.readyState !== 1) return false;
@@ -589,7 +652,16 @@ export function createBridgeServer(opts = {}) {
     }
     counters.commands_received++;
     if (['probe_site', 'sync_sites', 'open_sites', 'new_chat', 'resync'].includes(msg.action)) return reply(conn, commandResult(msg.command_id, false, 'forbidden_action', '该指令只能由后端发出'));
-    if (msg.action === 'reply' && !msg.text?.trim()) return reply(conn, commandResult(msg.command_id, false, 'text_required', '回复内容不能为空'));
+    let files = [];
+    if (msg.action === 'reply' && Array.isArray(msg.attachments) && msg.attachments.length) {
+      pruneAttachments();
+      for (const x of msg.attachments) {
+        const a = attachments.get(x.id);
+        if (!a) return reply(conn, commandResult(msg.command_id, false, 'attachment_expired', `附件已过期，请重新选择：${x.name}`));
+        files.push({ id: x.id, name: a.name, type: a.type, size: a.size, url: `/api/attachments/${x.id}` });
+      }
+    }
+    if (msg.action === 'reply' && !msg.text?.trim() && !files.length) return reply(conn, commandResult(msg.command_id, false, 'text_required', '回复内容不能为空'));
     if (pendingCommands.has(msg.command_id)) return reply(conn, commandResult(msg.command_id, false, 'duplicate_command', null));
 
     let target = null;
@@ -606,14 +678,15 @@ export function createBridgeServer(opts = {}) {
       if (!pendingCommands.delete(msg.command_id)) return;
       counters.commands_failed++;
       sendTo(conn.rec, commandResult(msg.command_id, false, 'timeout', '插件没有在规定时间内返回结果'));
-    }, COMMAND_TIMEOUT_MS);
+    }, files.length ? ATTACH_COMMAND_TIMEOUT_MS : COMMAND_TIMEOUT_MS);   // 带文件时页面要先上传，给更长时间
     timer.unref?.();
     pendingCommands.set(msg.command_id, { requester: conn.rec, target: target.clientId, timer });
     sendTo(target, makeEnvelope(MessageType.COMMAND, {
       command_id: msg.command_id,
       action: msg.action,
       conversation_id: msg.conversation_id,
-      ...(msg.action === 'reply' ? { text: msg.text } : {}),
+      ...(msg.action === 'reply' && msg.text?.trim() ? { text: msg.text } : {}),
+      ...(files.length ? { attachments: files } : {}),
       ...(msg.action === 'regenerate' && msg.answer_index != null ? { answer_index: msg.answer_index, answer_total: msg.answer_total } : {}),
       ...(msg.action === 'close' ? closeExtras(msg.conversation_id, target.clientId) : {}),
       tab_id: tabId,
@@ -877,7 +950,7 @@ function isSameOriginDashboard(origin, host) {
   return h === '127.0.0.1' || h === 'localhost' || h === '::1';
 }
 
-function readBody(req, limit) {
+function readBody(req, limit, raw = false) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -887,7 +960,8 @@ function readBody(req, limit) {
     });
     req.on('end', () => {
       if (size > limit) { const err = new Error('too large'); err.code = 'TOO_LARGE'; return reject(err); }
-      resolve(Buffer.concat(chunks).toString('utf8'));
+      const buf = Buffer.concat(chunks);
+      resolve(raw ? buf : buf.toString('utf8'));
     });
     req.on('error', reject);
   });

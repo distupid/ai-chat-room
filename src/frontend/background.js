@@ -3,7 +3,7 @@ import { createBackground, DEFAULT_SETTINGS } from './lib/background-core.js';
 import { randomId } from './shared/protocol.js';
 // 观察器脚本（经典脚本，挂到 globalThis.ChatGPTBridgeObserver）：用它的默认种子和按域名找网站的规则，与内容脚本一致
 import './lib/dom-observer.js';
-import { getSitesFromServer, submitProbeDom } from './lib/dom-config-client.js';
+import { getSitesFromServer, submitProbeDom, fetchAttachments } from './lib/dom-config-client.js';
 
 const Observer = globalThis.ChatGPTBridgeObserver;
 
@@ -183,7 +183,7 @@ async function loadSettings() {
   return { serverUrl: s.serverUrl || DEFAULT_SETTINGS.serverUrl, token: s.token || DEFAULT_SETTINGS.token, clientId };
 }
 
-/** 看板指令（或右键菜单）→ 对应标签页执行 */
+/** 看板指令 → 对应标签页执行 */
 async function runCommand(tabId, command) {
   if (command.action === 'probe_site') return probeSite(command);
   if (command.action === 'sync_sites') return syncSites();
@@ -211,6 +211,13 @@ async function runCommand(tabId, command) {
     } catch (e) {
       return { ok: false, code: 'tab_unreachable', detail: String(e?.message || e) };
     }
+  }
+  if (command.action === 'reply' && Array.isArray(command.attachments) && command.attachments.length) {
+    // 快速回复带文件：先从后端取回文件，再交给页面自己的上传控件
+    const { serverUrl, token } = await loadSettings();
+    const got = await fetchAttachments({ serverUrl, token, attachments: command.attachments });
+    if (!got.ok) return got;
+    command = { ...command, files: got.files };
   }
   try {
     const r = await chrome.tabs.sendMessage(tabId, { kind: 'bridge_command', command });

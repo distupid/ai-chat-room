@@ -424,7 +424,8 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   const origin = `http://127.0.0.1:${server.port}`;
   const ext = await extClient(server, 'ext-ui-000001');
   await sendAndAck(ext, ev('page.opened', { url: CONV_URL, title: '界面测试：一个非常非常长的标题用来确认卡片标题只占一行不会换行 - ChatGPT' }));
-  await sendAndAck(ext, ev('conversation.status', { source: 'chatgpt', status: 'ok', detail: null, model: null }));
+  await sendAndAck(ext, ev('conversation.status', { source: 'chatgpt', status: 'ok', detail: null, model: null,
+    composer: { attach: { label: '添加文件等', accept: '.pdf,image/*', multiple: true, icon: { view_box: '0 0 20 20', shapes: [{ tag: 'path', attrs: { d: 'M10 3v14M3 10h14' } }] } } } }));
   await sendAndAck(ext, ev('message.added', { message_id: 'u1', role: 'user', index: 0, text: '问题一', text_length: 3 }));
   await sendAndAck(ext, ev('message.added', { message_id: 'a1', role: 'assistant', index: 1, text: '回答一', text_length: 3 }));
 
@@ -491,7 +492,8 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.ok(chipTexts().includes('空闲1'));
   assert.ok(!d.querySelector('#chips .cg.end'), '收藏 / 归档不在筛选栏');
   assert.ok(!chipTexts().some((t) => /已到限额|有收藏|已归档/.test(t)), `chips: ${chipTexts()}`);
-  assert.ok(chipTexts().includes('页面已关0'));
+  assert.ok(chipTexts().includes('页面已关'), '数量为 0 不显示数字');
+  assert.ok(!d.querySelector('#chips .chip.on svg'), '选中标签不再预留对号');
   assert.ok(!d.querySelector(`${cardSel} .actions`).textContent.includes('重新回答'), '卡片没有重新回答');
   const idleChip = () => [...d.querySelectorAll('#chips .chip')].find((b) => /^空闲/.test(b.textContent));
   idleChip().click();
@@ -604,6 +606,14 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   // 详情右上角：快速回复 + 常见回答候选
   // 点卡片打开详情时快速回复已经展开；右上角是置顶按钮
   assert.ok(d.getElementById('composer').classList.contains('open'));
+  // 上传按钮照源站：文字、图标、accept、多选
+  const attachBtn = d.getElementById('quickAttach');
+  assert.equal(attachBtn.hidden, false);
+  assert.equal(attachBtn.getAttribute('aria-label'), '添加文件等');
+  assert.equal(attachBtn.querySelector('svg').getAttribute('viewBox'), '0 0 20 20');
+  assert.equal(attachBtn.querySelector('svg path').getAttribute('d'), 'M10 3v14M3 10h14');
+  assert.equal(d.getElementById('quickFile').getAttribute('accept'), '.pdf,image/*');
+  assert.equal(d.getElementById('quickFile').multiple, true);
   assert.equal(d.getElementById('detailQuick'), null);
   assert.equal(d.getElementById('detailPin').getAttribute('aria-pressed'), 'false');
   d.getElementById('quickText').focus();
@@ -683,11 +693,18 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.ok(![...panel.querySelectorAll('button')].some((b) => b.textContent === '收起'), '没有收起按钮');
   const cardBefore = ext.of('command').filter((x) => x.action === 'reply').length;
   [...panel.querySelectorAll('.qr button')].find((b) => b.textContent === '帮我写单元测试').click();
-  // 点常见回答直接发送，发送成功后自动收起
+  // 点常见回答直接发送：和详情弹窗统一，立即收起，右下角按钮显示进度；点进度按钮打开这个会话的详情
   await waitFor(() => ext.of('command').filter((x) => x.action === 'reply').length > cardBefore, { label: 'card quick command', timeout: 6000 });
-  assert.ok(d.querySelector(`${cardSel} .creply`), '成功前不收起');
+  assert.ok(!d.querySelector(`${cardSel} .creply`), '发出后立即收起');
+  const cardFab = d.querySelector('#fabs .fab-item:last-child');
+  assert.equal(cardFab.dataset.state, 'pending');
+  assert.equal(cardFab.dataset.conv, CONV);
+  cardFab.querySelector('.fab').click();
+  await waitFor(() => d.getElementById('detailScrim').classList.contains('open'), { label: 'fab opens detail' });
+  assert.equal(d.getElementById('quickSend').textContent, '发送中…', '详情里的发送状态和右下角同步');
   ext.send(makeEnvelope('command_result', { command_id: ext.of('command').filter((x) => x.action === 'reply').at(-1).command_id, ok: true, detail: '已发送' }));
-  await waitFor(() => !d.querySelector(`${cardSel} .creply`), { label: 'card reply closed' });
+  await waitFor(() => cardFab.dataset.state === 'ok' && d.getElementById('quickSend').textContent === '发送', { label: 'synced ok' });
+  d.getElementById('detailClose').click();
   // 再展开：输入框为空；Enter 发送后收起
   replyBtn().click();
   const panel2 = await waitFor(() => d.querySelector(`${cardSel} .creply`), { label: 'card reply 2' });

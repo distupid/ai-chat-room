@@ -110,6 +110,8 @@ export const Limits = Object.freeze({
   MAX_TEXT_CHARS: 60000,
   MAX_HTML_CHARS: 200000,      // message.* 的可选 html（净化后的富文本）上限；超过时插件不带 html，只发 text
   MAX_COMMAND_TEXT: 20000,
+  MAX_ATTACHMENTS: 10,           // 快速回复一次最多带的文件数
+  MAX_ATTACHMENT_BYTES: 25 * 1024 * 1024,
   MAX_SUBSCRIPTIONS: 100
 });
 
@@ -124,6 +126,34 @@ const NULLABLE_STR = (max) => ({ type: ['string', 'null'], maxLength: max });
 const ROLE = { type: 'string', enum: ['user', 'assistant', 'system', 'tool', 'unknown'] };
 const URL_STR = { type: 'string', maxLength: 2048 };
 const EVENT_TYPES = Object.values(EventType);
+
+/** 源站输入框的上传按钮（插件从页面上读取，看板照着画）：图标只传图形数据，看板自己拼 SVG */
+const SVG_ATTR = { type: 'string', maxLength: 4000, pattern: '^[0-9A-Za-z.,#%()\\s+-]*$' };
+const composerCaps = obj({
+  attach: obj({
+    label: { type: 'string', maxLength: 100 },                 // 按钮的 aria-label / title，如“添加文件”
+    accept: { type: 'string', maxLength: 500 },                // 页面 <input type=file> 的 accept
+    multiple: { type: 'boolean' },
+    icon: obj({
+      view_box: { type: 'string', maxLength: 64, pattern: '^[0-9.\\s-]+$' },
+      fill: SVG_ATTR, stroke: SVG_ATTR, stroke_width: SVG_ATTR, stroke_linecap: SVG_ATTR, stroke_linejoin: SVG_ATTR,
+      shapes: {
+        type: 'array', maxItems: 30,
+        items: obj({
+          tag: { type: 'string', enum: ['path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'] },
+          attrs: { type: 'object', maxProperties: 16, additionalProperties: SVG_ATTR }
+        })
+      }
+    }, ['shapes'])
+  }, [])
+}, []);
+const ATTACHMENT = obj({
+  id: { type: 'string', minLength: 8, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' },
+  name: { type: 'string', minLength: 1, maxLength: 255 },
+  type: { type: 'string', maxLength: 128 },
+  size: { type: 'integer', minimum: 0 },
+  url: { type: 'string', maxLength: 300 }                     // 后端转发给插件时填写：/api/attachments/:id
+}, ['id', 'name']);
 
 function envelope(type, props, required) {
   return {
@@ -188,7 +218,8 @@ export const EVENT_PAYLOAD_SCHEMAS = Object.freeze({
     source: { type: 'string', minLength: 1, maxLength: 32, pattern: '^[a-z0-9_-]+$' },
     status: { type: 'string', enum: ['ok', 'limit_reached', 'error', 'deleted'] },   // deleted：源站页面显示会话已删除 / 不存在 → 后端不再跟踪
     detail: NULLABLE_STR(500),
-    model: NULLABLE_STR(100)
+    model: NULLABLE_STR(100),
+    composer: composerCaps                    // 可选：输入框能力（上传按钮的样式 / accept）
   }, ['source', 'status', 'detail'])
 });
 
@@ -311,6 +342,7 @@ export const SCHEMA = {
       action: { type: 'string', enum: ['reply', 'regenerate', 'focus', 'close', 'probe_site', 'sync_sites', 'open_sites', 'new_chat', 'resync'] },   // probe_site / sync_sites / open_sites：后端 → 插件（添加网站 / 一键启动）
       conversation_id: { type: 'string', minLength: 1, maxLength: 128 },
       text: { type: 'string', minLength: 1, maxLength: Limits.MAX_COMMAND_TEXT },
+      attachments: { type: 'array', maxItems: Limits.MAX_ATTACHMENTS, items: ATTACHMENT },   // reply：先上传到后端的文件
       answer_index: { type: 'integer', minimum: 0, maximum: 100000 },   // regenerate：第几条回答（从 0 开始）；不填 = 最后一条
       answer_total: { type: 'integer', minimum: 1, maximum: 100000 },   // regenerate：看板看到的回答总数，用于和页面核对
       tab_id: { type: 'integer', minimum: 0 },          // 后端转发给插件时填写
@@ -394,7 +426,9 @@ function check(schema, value, path, errors) {
     for (const [k, v] of Object.entries(value)) {
       if (props[k]) check(props[k], v, `${path}.${k}`, errors);
       else if (schema.additionalProperties === false) errors.push(`${path}.${k}: is not allowed`);
+      else if (typeOf(schema.additionalProperties) === 'object') check(schema.additionalProperties, v, `${path}.${k}`, errors);
     }
+    if (schema.maxProperties != null && Object.keys(value).length > schema.maxProperties) errors.push(`${path}: more than ${schema.maxProperties} properties`);
   }
   if (schema.allOf) {
     for (const sub of schema.allOf) check(sub, value, path, errors);
