@@ -183,45 +183,53 @@ async function loadSettings() {
   return { serverUrl: s.serverUrl || DEFAULT_SETTINGS.serverUrl, token: s.token || DEFAULT_SETTINGS.token, clientId };
 }
 
+/** 看板指令（或右键菜单）→ 对应标签页执行 */
+async function runCommand(tabId, command) {
+  if (command.action === 'probe_site') return probeSite(command);
+  if (command.action === 'sync_sites') return syncSites();
+  if (command.action === 'open_sites') return openSites(command.text);
+  if (command.action === 'new_chat') {
+    const url = String(command.text || '').trim();
+    if (!/^https:\/\/[^\s]+$/.test(url)) return { ok: false, code: 'bad_url', detail: '只支持 https 网址' };
+    await chrome.tabs.create({ url, active: false });
+    return { ok: true, detail: '已在后台新建会话' };
+  }
+  if (command.action === 'close') return closeConversationTabs(tabId, command);
+  if (command.action === 'focus') {
+    try {
+      const tab = await chrome.tabs.update(tabId, { active: true });
+      await chrome.windows.update(tab.windowId, { focused: true });
+      return { ok: true, detail: '已切换到该标签页' };
+    } catch (e) {
+      return { ok: false, code: 'tab_unreachable', detail: String(e?.message || e) };
+    }
+  }
+  try {
+    const r = await chrome.tabs.sendMessage(tabId, { kind: 'bridge_command', command });
+    return r || { ok: false, code: 'no_response' };
+  } catch (e) {
+    return { ok: false, code: 'tab_unreachable', detail: String(e?.message || e) };
+  }
+}
+
+function showConnBadge(state) {
+  const badge = { open: 'ON', auth_failed: 'AUTH', waiting: '…', connecting: '…', handshaking: '…' }[state] || '';
+  chrome.action.setBadgeText({ text: badge }).catch(() => {});
+  chrome.action.setBadgeBackgroundColor({ color: state === 'open' ? '#16a34a' : '#dc2626' }).catch(() => {});
+  chrome.action.setTitle({ title: 'AI-Chat-Room' }).catch(() => {});
+}
+
 const ready = (async () => {
   const settings = await loadSettings();
   const bg = createBackground({
     WebSocketImpl: WebSocket, storage, clientId: settings.clientId, settings,
     // 看板指令 → 对应标签页的内容脚本执行
-    executeCommand: async (tabId, command) => {
-      if (command.action === 'probe_site') return probeSite(command);
-      if (command.action === 'sync_sites') return syncSites();
-      if (command.action === 'open_sites') return openSites(command.text);
-      if (command.action === 'new_chat') {
-        const url = String(command.text || '').trim();
-        if (!/^https:\/\/[^\s]+$/.test(url)) return { ok: false, code: 'bad_url', detail: '只支持 https 网址' };
-        await chrome.tabs.create({ url, active: false });
-        return { ok: true, detail: '已在后台新建会话' };
-      }
-      if (command.action === 'close') return closeConversationTabs(tabId, command);
-      if (command.action === 'focus') {
-        try {
-          const tab = await chrome.tabs.update(tabId, { active: true });
-          await chrome.windows.update(tab.windowId, { focused: true });
-          return { ok: true, detail: '已切换到该标签页' };
-        } catch (e) {
-          return { ok: false, code: 'tab_unreachable', detail: String(e?.message || e) };
-        }
-      }
-      try {
-        const r = await chrome.tabs.sendMessage(tabId, { kind: 'bridge_command', command });
-        return r || { ok: false, code: 'no_response' };
-      } catch (e) {
-        return { ok: false, code: 'tab_unreachable', detail: String(e?.message || e) };
-      }
-    }
+    executeCommand: runCommand
   });
   await ensureRegistered();
   if (settings.token) { await bg.conn.start(); syncSites().catch(() => {}); }
   bg.conn.onStateChange = (state) => {
-    const badge = { open: 'ON', auth_failed: 'AUTH', waiting: '…', connecting: '…', handshaking: '…' }[state] || '';
-    chrome.action.setBadgeText({ text: badge }).catch(() => {});
-    chrome.action.setBadgeBackgroundColor({ color: state === 'open' ? '#16a34a' : '#dc2626' }).catch(() => {});
+    showConnBadge(state);
     if (state === 'open') syncTabsNow(bg, true);   // 连上（含重连）后立刻对账一次
   };
   return bg;
@@ -256,6 +264,7 @@ function syncTabsNow(bg, force = false) {
         return { tab_id: t.id, host, conversation_id: conversationId, supported, active: !!t.active, url: t.url, title: t.title || '' };
       }));
       bg.syncTabs(list, { force: f });
+      updateSendMenu(list);
     } catch (e) { console.warn('[bridge] tab sync failed', e); }
   }, 300);
 }
@@ -282,3 +291,62 @@ chrome.windows?.onFocusChanged?.addListener(() => { ready.then((bg) => syncTabsN
 // SW 可能被回收：用 alarm 定期唤醒并检查连接
 chrome.alarms.create('bridge-keepalive', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'bridge-keepalive') ready.then((bg) => { bg.conn.poke(); syncTabsNow(bg); }); });
+
+// ------------------------------------------------------------------ 右键菜单：选中文字发送到卡片
+// 子菜单是开着的会话标签页（能发送的只有开着标签页的会话），随标签页同步更新
+const MENU_ROOT = 'acr-send';
+let menuKey = '';
+let menuTargets = new Map();   // 菜单项 ID → { tab_id, conversation_id }
+function siteLabel(host) {
+  return host.replace(/^www\./, '');
+}
+async function updateSendMenu(list) {
+  if (!chrome.contextMenus) return;
+  const seen = new Set();
+  const items = [];
+  for (const t of list) {
+    if (!t.supported || !t.conversation_id || seen.has(t.conversation_id)) continue;
+    seen.add(t.conversation_id);
+    const title = (t.title || '').trim() || '新对话';
+    items.push({ tab_id: t.tab_id, conversation_id: t.conversation_id, label: `${title.slice(0, 40)} · ${siteLabel(t.host)}` });
+  }
+  items.sort((a, b) => a.label.localeCompare(b.label));
+  items.splice(20);
+  const key = JSON.stringify(items);
+  if (key === menuKey) return;
+  menuKey = key;
+  await chrome.contextMenus.removeAll();
+  menuTargets = new Map();
+  chrome.contextMenus.create({ id: MENU_ROOT, title: '发送到卡片', contexts: ['selection'] });
+  if (!items.length) {
+    chrome.contextMenus.create({ id: 'acr-none', parentId: MENU_ROOT, title: '没有开着的会话标签页', enabled: false, contexts: ['selection'] });
+    return;
+  }
+  items.forEach((x, i) => {
+    const id = `acr-${i}`;
+    menuTargets.set(id, x);
+    chrome.contextMenus.create({ id, parentId: MENU_ROOT, title: x.label.replace(/&/g, '&&'), contexts: ['selection'] });
+  });
+}
+
+/** 读取选区（保留换行；chrome 给的 selectionText 会丢换行），读不到时用 selectionText */
+function readSelection() { return String(window.getSelection?.() || ''); }
+
+chrome.contextMenus?.onClicked.addListener((info, tab) => {
+  const target = menuTargets.get(info.menuItemId);
+  if (!target) return;
+  (async () => {
+    let text = '';
+    try {
+      const [r] = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: info.frameId != null ? [info.frameId] : undefined }, func: readSelection });
+      text = r?.result || '';
+    } catch { /* 受限页面（如 chrome://）读不到 */ }
+    text = (text || info.selectionText || '').trim();
+    if (!text) return;
+    await ready;
+    const r = await runCommand(target.tab_id, { command_id: randomId('menu').slice(0, 40), action: 'reply', conversation_id: target.conversation_id, tab_id: target.tab_id, text: text.slice(0, 20000) });
+    chrome.action.setBadgeText({ text: r?.ok ? '✓' : '✗' }).catch(() => {});
+    chrome.action.setTitle({ title: r?.ok ? `已发送到：${target.label}` : `发送失败：${r?.detail || r?.code || '未知错误'}` }).catch(() => {});
+    setTimeout(() => ready.then((bg) => showConnBadge(bg.conn.state)), 3000);   // 3 秒后恢复连接状态徽标
+  })();
+});
