@@ -832,6 +832,7 @@
       url: win.location.href,
       conversationId: null,
       messages: Object.create(null),
+      alias: Object.create(null),                       // 被页面换掉的节点：新键 → 原消息 ID
       generating: false,
       generationStartedAt: 0,
       generationMessageId: null,
@@ -948,6 +949,35 @@
       return false;
     }
 
+    /**
+     * 页面把刚发送的消息换成另一个节点（乐观显示的临时气泡 → 服务器确认后的正式消息，ID 或位置变了）：
+     * 新键的消息与一条刚上报过、现在已不在页面上的同角色同内容消息相同时，沿用旧 ID，避免详情里出现两条。
+     */
+    var REPLACE_WINDOW_MS = 120000;
+    function reuseReplacedIds(items) {
+      var present = Object.create(null), j, id;
+      for (j = 0; j < items.length; j++) {
+        id = state.alias[items[j].id] || items[j].id;
+        if (state.messages[id]) present[id] = 1;
+      }
+      for (j = 0; j < items.length; j++) {
+        var it = items[j];
+        var mapped = state.alias[it.id];
+        if (mapped && !present[mapped + '#taken']) { it.id = mapped; present[mapped + '#taken'] = 1; continue; }
+        if (state.messages[it.id]) continue;
+        var t = now();
+        for (id in state.messages) {
+          var kn = state.messages[id];
+          if (present[id] || kn.role !== it.x.role || kn.hash !== it.x.hash || t - kn.lastEmit > REPLACE_WINDOW_MS) continue;
+          state.alias[it.id] = id;
+          present[id] = 1;
+          present[id + '#taken'] = 1;
+          it.id = id;
+          break;
+        }
+      }
+    }
+
     function scanMessages(conversationId, force, fresh) {
       if (fresh || !observer || now() - lastFullAt >= FULL_REFRESH_MS) resetCache();
       var nodes = doc.querySelectorAll(cfg.messageSelector); // querySelectorAll 结果本身不含重复节点
@@ -956,6 +986,7 @@
       // 第一遍：收集当前渲染出来的消息（长对话里页面只渲染一部分，DOM 位置不能当作消息序号）
       var items = [];
       var seen = Object.create(null);
+      var seenHash = Object.create(null);
       // 嵌套的消息节点（两种选择器同时命中父子）只处理最外层：沿父节点查是否在本次结果里（比逐个 closest(选择器) 快）
       var inResult = typeof Set === 'function' ? new Set(nodes) : null;
       for (var i = 0; i < nodes.length; i++) {
@@ -966,10 +997,17 @@
         if (!x.rawId && !x.text) continue;
         // 键：消息 ID；缺少时回退为 角色 + 位置（不能用文本哈希，否则流式输出时每次扫描都会变成一条“新消息”）
         var key = x.rawId ? x.rawId.slice(0, 128) : 'fallback:' + x.role + ':' + i;
-        // 同一条消息拆成多行（文字气泡 + 卡片共用一个 message-id）时分开记录，避免互相覆盖
-        if (seen[key]) key = (key + '#' + (++seen[key])).slice(0, 128); else seen[key] = 1;
+        // 同一条消息拆成多行（文字气泡 + 卡片共用一个 message-id）时分开记录，避免互相覆盖；
+        // 但内容完全相同的同 ID 节点（页面为同一条消息渲染了两份，如 Muse 的发送气泡）只算一条
+        if (seen[key]) {
+          if (seenHash[key] && seenHash[key][x.hash]) continue;
+          key = (key + '#' + (++seen[key])).slice(0, 128);
+        } else seen[key] = 1;
+        var base = x.rawId ? x.rawId.slice(0, 128) : key;
+        (seenHash[base] || (seenHash[base] = Object.create(null)))[x.hash] = 1;
         items.push({ id: key, x: x });
       }
+      reuseReplacedIds(items);
       assignIndexes(items);
 
       for (var k = 0; k < items.length; k++) {
@@ -1027,6 +1065,7 @@
 
       // 路由变了：旧会话的消息状态和生成状态都不带过去
       state.messages = Object.create(null);
+      state.alias = Object.create(null);
       state.maxIndex = null;
       state.generating = false;
       state.generationStartedAt = 0;

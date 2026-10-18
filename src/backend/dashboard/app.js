@@ -1351,7 +1351,9 @@ const msgCache = new Map();   // 详情：message_id → { sig, node }（打开�
 function renderDetail(scrollToEnd = false, forceBottom = false) {
   const body = $('detailBody');
   const nearBottom = forceBottom || state.composerOpen || body.scrollHeight - body.scrollTop - body.clientHeight < 120;
-  const msgs = [...state.messages.entries()].sort((a, b) => a[1].index - b[1].index);
+  // 相邻两条角色和内容完全相同的消息只显示一条（旧版插件把同一条发送重复记录过）
+  const msgs = [...state.messages.entries()].sort((a, b) => a[1].index - b[1].index)
+    .filter(([, m], i, arr) => !i || arr[i - 1][1].role !== m.role || arr[i - 1][1].text !== m.text || !m.text);
   const c = convById(state.selected);
   const src = sourceInfo(c?.source);
   const answers = msgs.filter(([, m]) => m.role === 'assistant').map(([id]) => id);

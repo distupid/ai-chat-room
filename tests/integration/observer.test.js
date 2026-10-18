@@ -232,3 +232,40 @@ test('性能：没变化的消息不重复提取正文；输入框里打字不�
   o3.stop();
   w.close();
 });
+
+test('发送的消息被页面换成新节点 / 同一 ID 渲染两份时，只上报一条（Muse 重复）', async () => {
+  const { bg, results } = offlineBackground();
+  const page = openChatGPTPage({
+    url: CONV_URL, tabId: 3, background: bg,
+    html: '<!doctype html><html><body><main id="t"><div data-message-author-role="assistant" data-message-id="a0">你好</div></main></body></html>'
+  });
+  await waitFor(() => results.some((x) => x.m.event.event_type === 'message.added'), { label: 'a0 added' });
+  const t = page.doc.getElementById('t');
+  // 乐观显示：临时气泡（没有 ID）
+  const tmp = page.doc.createElement('div');
+  tmp.setAttribute('data-message-author-role', 'user');
+  tmp.textContent = '帮我写首诗';
+  t.appendChild(tmp);
+  await waitFor(() => results.filter((x) => x.m.event.event_type === 'message.added').length === 2, { label: 'tmp added' });
+  // 服务器确认：临时气泡换成带正式 ID 的节点，并且同一 ID 渲染了两份
+  tmp.remove();
+  for (let i = 0; i < 2; i++) {
+    const real = page.doc.createElement('div');
+    real.setAttribute('data-message-author-role', 'user');
+    real.setAttribute('data-message-id', 'u1');
+    real.textContent = '帮我写首诗';
+    t.appendChild(real);
+  }
+  await sleep(1500);
+  const users = results.filter((x) => x.m.event.event_type === 'message.added' && x.m.event.payload.role === 'user');
+  assert.equal(users.length, 1, '用户消息只上报一次');
+  // 再发一条不同的消息照常上报
+  const u2 = page.doc.createElement('div');
+  u2.setAttribute('data-message-author-role', 'user');
+  u2.setAttribute('data-message-id', 'u2');
+  u2.textContent = '再来一首';
+  t.appendChild(u2);
+  await waitFor(() => results.filter((x) => x.m.event.event_type === 'message.added' && x.m.event.payload.role === 'user').length === 2, { label: 'u2' });
+  assert.ok(results.every((x) => x.r.ok));
+  page.close();
+});
