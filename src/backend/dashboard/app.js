@@ -8,7 +8,8 @@ const STATUS = {
   generating: { label: '回答中', order: 1 },
   error: { label: '出错', order: 2 },
   idle: { label: '空闲', order: 3 },
-  closed: { label: '页面已关', order: 4 }
+  closed: { label: '页面已关', order: 4 },
+  opening: { label: '打开中', order: 4 }   // 页面已关的会话正在后台重新打开（只在前端显示）
 };
 // 来源（网站）信息：全部来自后端网站列表（GET /api/sites），没有内置网站；
 // regenerate = 该网站的 DOM 配置里有“重新生成”按钮（与 page-actions.js 的判断一致）
@@ -60,6 +61,7 @@ delete settings.notify.finished;
 if (!Array.isArray(settings.quickReplies)) settings.quickReplies = [...DEFAULT_QUICK_REPLIES];
 
 const state = {
+  reopening: new Map(),   // conversation_id → 截止时间：页面已关的会话正在后台重新打开
   ws: null,
   wsState: 'idle',
   canControl: false,
@@ -738,7 +740,7 @@ function card(c) {
 
   const node = el('article', {
     class: `card s-${c.status} src-${avatarClass(c.source)} ${c.pinned ? 'pinned' : ''}`,
-    'data-conv': id, tabindex: '0', role: 'button', title: c.status === 'closed' ? '页面已关：点击重新打开并跳转' : '点击查看详情',
+    'data-conv': id, tabindex: '0', role: 'button', title: c.status === 'closed' ? '页面已关：点击查看详情，并在后台重新打开页面' : '点击查看详情',
     onclick: () => activateCard(c),
     onkeydown: (e) => { if (e.target === node && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); activateCard(c); } }
   },
@@ -753,8 +755,8 @@ function card(c) {
           c.model ? el('span', {}, c.model) : null)),
       el('div', { class: 'side' },
         el('div', { class: 'side-top' },
-          el('span', { class: `badge b-${c.status}` }, STATUS[c.status]?.label || c.status),
-          c.status === 'closed' ? el('button', { class: 'icon-btn card-del', type: 'button', title: '从数据中删除这个会话', 'aria-label': '删除会话', 'data-act': 'delete',
+          el('span', { class: `badge b-${statusKey(c)}` }, STATUS[statusKey(c)]?.label || c.status),
+          c.status === 'closed' && !isReopening(c) ? el('button', { class: 'icon-btn card-del', type: 'button', title: '从数据中删除这个会话', 'aria-label': '删除会话', 'data-act': 'delete',
             html: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.5 3.5l5 5M8.5 3.5l-5 5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
             onclick: (e) => { e.stopPropagation(); deleteConversation(c); } }) : null),
         el('span', { class: 'time', title: new Date(c.last_seen_at).toLocaleString() }, ago(c.last_seen_at)))
@@ -787,10 +789,32 @@ function card(c) {
   return node;
 }
 
-/** 点卡片：页面已关 → 重新打开该页面并跳转；否则打开详情，滚到最后一个回复（从“收藏”筛选进来的滚到收藏处） */
+/** 点卡片：打开详情，滚到最后一个回复（从“收藏”筛选进来的滚到收藏处）；页面已关的会话同时在后台标签页重新打开 */
 function activateCard(c) {
-  if (c.status === 'closed') { openUrl(c.url); return; }
+  if (c.status === 'closed' && !isReopening(c)) reopenPage(c);
   openDetail(c.conversation_id, { toFavorite: state.filter === 'favorite' && c.favorite_count > 0 });
+}
+
+/** 页面已关：插件在后台标签页打开（不切走当前窗口），卡片先显示“打开中”，页面上报后变成真实状态；没有在线插件时新开窗口 */
+const REOPEN_MS = 15000;   // 15 秒内页面没上报就恢复“页面已关”
+const isReopening = (c) => c.status === 'closed' && (state.reopening.get(c.conversation_id) || 0) > Date.now();
+const statusKey = (c) => (isReopening(c) ? 'opening' : c.status);
+async function reopenPage(c) {
+  const id = c.conversation_id;
+  state.reopening.set(id, Date.now() + REOPEN_MS);
+  render();
+  if (state.selected === id) renderDetailHead();
+  try {
+    await api(`/api/conversations/${encodeURIComponent(id)}/reopen`, { method: 'POST', body: '{}' });
+    scheduleRefresh(1500);
+    setTimeout(() => { state.reopening.delete(id); render(); if (state.selected === id) renderDetailHead(); }, REOPEN_MS + 50);
+  } catch (e) {
+    state.reopening.delete(id);
+    render();
+    if (state.selected === id) renderDetailHead();
+    if (/没有在线的浏览器插件/.test(e.message)) openUrl(c.url);
+    else snackbar(`打开页面失败：${e.message}`, 'err');
+  }
 }
 
 /** 删除页面已关的会话：从数据库移除它的消息、收藏、标记和事件 */
@@ -880,7 +904,7 @@ function placeChildren(parent, nodes) {
 function cardSig(c) {
   const id = c.conversation_id;
   const reply = state.cardReply === id;
-  return JSON.stringify([c, titleOf(c), sourceInfo(c.source), convBusy(id), canControlConv(c), reply, reply ? settings.quickReplies : 0]);
+  return JSON.stringify([c, isReopening(c), titleOf(c), sourceInfo(c.source), convBusy(id), canControlConv(c), reply, reply ? settings.quickReplies : 0]);
 }
 function renderGrid(grid, list) {
   const active = activeConvs();
@@ -1378,7 +1402,7 @@ function renderDetailHead() {
   const sub = $('detailSub');
   if (!c) { sub.replaceChildren(); return; }
   sub.replaceChildren(
-    el('span', { class: `badge b-${c.status}` }, STATUS[c.status]?.label || c.status),
+    el('span', { class: `badge b-${statusKey(c)}` }, STATUS[statusKey(c)]?.label || c.status),
     el('span', {}, sourceInfo(c.source).label),
     c.model ? el('span', {}, c.model) : null,
     el('span', {}, `${c.message_count} 条消息`),

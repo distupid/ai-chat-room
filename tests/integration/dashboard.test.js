@@ -781,11 +781,20 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   await waitFor(() => /已连接 · 0 个页面/.test(d.getElementById('connText').textContent), { label: 'conn count 0' });
   [...d.querySelectorAll('#chips .chip')].find((b) => /^页面已关/.test(b.textContent)).click();
   await waitFor(() => d.querySelector(`${cardSel}.s-closed`), { label: 'in closed view' });
+  // 点页面已关的卡片：插件在后台标签页重新打开（new_chat，不抢焦点），卡片显示“打开中”，同时打开详情
   const before = opened.length;
+  const ncBefore = ext.of('command').filter((m) => m.action === 'new_chat').length;
   d.querySelector(cardSel).click();
-  assert.equal(opened.length, before + 1);
-  assert.equal(opened.at(-1), CONV_URL);
-  assert.ok(!d.getElementById('detailScrim').classList.contains('open'), '已关闭的不打开详情');
+  await waitFor(() => d.getElementById('detailScrim').classList.contains('open'), { label: 'closed opens detail' });
+  await waitFor(() => ext.of('command').filter((m) => m.action === 'new_chat').length > ncBefore, { label: 'reopen command' });
+  assert.equal(ext.of('command').filter((m) => m.action === 'new_chat').at(-1).text, CONV_URL);
+  assert.equal(opened.length, before, '不在前台新开窗口');
+  await waitFor(() => d.querySelector(`${cardSel} .badge`)?.textContent === '打开中', { label: 'opening badge' });
+  assert.ok(!d.querySelector(`${cardSel} .card-del`), '打开中不显示删除');
+  // 页面上报后：卡片恢复真实状态
+  await sendAndAck(ext, ev('page.opened', { url: CONV_URL, title: '重新打开' }));
+  await waitFor(() => /空闲|回答中/.test(d.querySelector('#detailSub .badge')?.textContent || ''), { label: 'detail status updated', timeout: 6000 });
+  d.getElementById('detailClose').click();
 
   // 网站下拉：没有“内置”，每个网站都可编辑 / 删除；末尾“添加网站”
   assert.equal(d.getElementById('sort'), null);

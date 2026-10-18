@@ -1,5 +1,5 @@
 // MV3 Service Worker 入口：把 chrome.* API 适配到 background-core
-import { createBackground, DEFAULT_SETTINGS, PSEUDO_PREFIX } from './lib/background-core.js';
+import { createBackground, DEFAULT_SETTINGS } from './lib/background-core.js';
 import { randomId } from './shared/protocol.js';
 // 观察器脚本（经典脚本，挂到 globalThis.ChatGPTBridgeObserver）：用它的默认种子和按域名找网站的规则，与内容脚本一致
 import './lib/dom-observer.js';
@@ -272,7 +272,6 @@ function syncTabsNow(bg, force = false) {
         return { tab_id: t.id, host, conversation_id: conversationId, supported, active: !!t.active, url: t.url, title: t.title || '' };
       }));
       bg.syncTabs(list, { force: f });
-      updateSendMenu(list);
     } catch (e) { console.warn('[bridge] tab sync failed', e); }
   }, 300);
 }
@@ -287,83 +286,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return sendResponse({ ok: true });
     }
     sendResponse(bg.handleRuntimeMessage(message, sender));
-    // 页面打开 / 切换会话 / 关闭：尽快对账，右键菜单随之更新
-    if (message?.kind === 'page_event' && ['page.opened', 'page.closed', 'conversation.changed'].includes(message.event?.event_type)) syncTabsNow(bg);
   });
   return true; // 异步 sendResponse
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => { ready.then((bg) => { bg.onTabRemoved(tabId); syncTabsNow(bg); }); });
-chrome.tabs.onUpdated.addListener((tabId, info) => { if (info.url || info.title || info.status === 'complete') ready.then((bg) => syncTabsNow(bg)); });
+chrome.tabs.onUpdated.addListener((tabId, info) => { if (info.url || info.status === 'complete') ready.then((bg) => syncTabsNow(bg)); });
 chrome.tabs.onActivated.addListener(() => { ready.then((bg) => syncTabsNow(bg)); });
 chrome.windows?.onFocusChanged?.addListener(() => { ready.then((bg) => syncTabsNow(bg)); });
 
 // SW 可能被回收：用 alarm 定期唤醒并检查连接
 chrome.alarms.create('bridge-keepalive', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'bridge-keepalive') ready.then((bg) => { bg.conn.poke(); syncTabsNow(bg); }); });
-
-// ------------------------------------------------------------------ 右键菜单：选中文字发送到卡片
-// 子菜单是开着的会话标签页（能发送的只有开着标签页的会话），随标签页同步更新
-const MENU_ROOT = 'acr-send';
-let menuKey = '';
-// 菜单项 ID 直接编码目标（acr|标签页|会话），Service Worker 重启后旧菜单项仍能正确发送
-const menuId = (x) => `acr|${x.tab_id}|${x.conversation_id}`;
-function parseMenuId(id) {
-  const m = /^acr\|(\d+)\|(.+)$/.exec(String(id));
-  return m ? { tab_id: Number(m[1]), conversation_id: m[2] } : null;
-}
-async function updateSendMenu(list) {
-  if (!chrome.contextMenus) return;
-  const bg = await ready;
-  const seen = new Set();
-  const items = [];
-  for (const t of list) {
-    if (!t.supported) continue;
-    // 还没产生会话 ID 的新对话页用标签页会话 ID（与看板上的“新对话”卡片一致）
-    const conversationId = t.conversation_id || bg.pseudoId(t.tab_id);
-    if (seen.has(conversationId)) continue;
-    seen.add(conversationId);
-    const title = (t.conversation_id ? (t.title || '').trim() : '') || '新对话';
-    items.push({ tab_id: t.tab_id, conversation_id: conversationId, label: `${title.slice(0, 40)} · ${t.host.replace(/^www\./, '')}` });
-  }
-  items.sort((a, b) => a.label.localeCompare(b.label));
-  items.splice(20);
-  const key = JSON.stringify(items);
-  if (key === menuKey) return;
-  menuKey = key;
-  await chrome.contextMenus.removeAll();
-  chrome.contextMenus.create({ id: MENU_ROOT, title: '发送到卡片', contexts: ['selection'] });
-  if (!items.length) {
-    chrome.contextMenus.create({ id: 'acr-none', parentId: MENU_ROOT, title: '没有开着的会话标签页', enabled: false, contexts: ['selection'] });
-    return;
-  }
-  for (const x of items) chrome.contextMenus.create({ id: menuId(x), parentId: MENU_ROOT, title: x.label.replace(/&/g, '&&'), contexts: ['selection'] });
-}
-
-/** 读取选区（保留换行；chrome 给的 selectionText 会丢换行），读不到时用 selectionText */
-function readSelection() { return String(window.getSelection?.() || ''); }
-
-chrome.contextMenus?.onClicked.addListener((info, tab) => {
-  const target = parseMenuId(info.menuItemId);
-  if (!target) return;
-  (async () => {
-    let text = '';
-    try {
-      const [r] = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: info.frameId != null ? [info.frameId] : undefined }, func: readSelection });
-      text = r?.result || '';
-    } catch { /* 受限页面（如 chrome://）读不到 */ }
-    text = (text || info.selectionText || '').trim();
-    if (!text) return;
-    await ready;
-    // 标签页会话（新对话页）在内容脚本那里的会话是 null
-    const pageConv = target.conversation_id.startsWith(PSEUDO_PREFIX) ? null : target.conversation_id;
-    const r = await runCommand(target.tab_id, { command_id: randomId('menu').slice(0, 40), action: 'reply', conversation_id: pageConv, tab_id: target.tab_id, text: text.slice(0, 20000) });
-    chrome.action.setBadgeText({ text: r?.ok ? '✓' : '✗' }).catch(() => {});
-    chrome.action.setTitle({ title: r?.ok ? '已发送到卡片' : `发送失败：${r?.detail || r?.code || '未知错误'}` }).catch(() => {});
-    ready.then((bg) => syncTabsNow(bg));
-    setTimeout(() => ready.then((bg) => showConnBadge(bg.conn.state)), 3000);   // 3 秒后恢复连接状态徽标
-  })();
-});
-
-// Service Worker 启动：立即对账一次，重建右键菜单
-ready.then((bg) => syncTabsNow(bg));

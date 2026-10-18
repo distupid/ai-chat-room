@@ -375,18 +375,87 @@ function discoverIds(nodes) {
   return { idAttrs, idInner, coverage: { own: summarize(own), inner: summarize(inner) } };
 }
 
+// 读屏 / 搜索替身、sr-only 标签、复制排除区、代码块工具栏：不算正文（与插件观察器的 BASE_EXCLUDE 一致）
+const BASE_EXCLUDE = '[data-message-accessibility-surrogate], [data-message-search-surrogate], .sr-only, .visually-hidden, ' +
+  '[data-copy-exclude="true"], [data-streamdown="code-block-header"], [data-streamdown="code-block-actions"]';
+// 不排除 button：有的网站把文件卡片做成按钮，只有图标的按钮本来就没有文字
+const ANALYZER_EXCLUDE = '[role="toolbar"]';
+
+/** 节点里第一个不在排除区里的匹配 */
+function bodyIn(el, sel) {
+  for (const b of el.querySelectorAll(sel)) {
+    let bad = false;
+    for (let p = b; p && p !== el; p = p.parentElement) if (p.matches(BASE_EXCLUDE)) { bad = true; break; }
+    if (!bad) return b;
+  }
+  return null;
+}
+
+/** 虚拟列表里滚出视口的占位节点：除了替身 / sr-only 之外没有文字 */
+function isPlaceholder(el) {
+  const c = el.cloneNode(true);
+  for (const x of c.querySelectorAll(BASE_EXCLUDE)) x.remove();
+  return !textOf(c);
+}
+
 function pickText(nodes, candidates) {
+  nodes = nodes.filter((el) => !isPlaceholder(el));
   if (!nodes.length) return { selector: '', coverage: 0 };
   for (const sel of candidates) {
     let hit = 0;
     for (const el of nodes) {
-      const b = el.querySelector(sel);
+      const b = bodyIn(el, sel);
       if (b && textOf(b)) hit++;
     }
     const coverage = hit / nodes.length;
     if (coverage >= 0.8) return { selector: sel, coverage };
   }
   return { selector: '', coverage: 1 };
+}
+
+/**
+ * 一轮回答拆成多个节点（文字 + 文件卡片 + 文字）时的分组属性：取值像 ID、有重复、
+ * 重复的节点在页面上相邻且角色相同；名字带 turn / group 的优先。没有就返回 null。
+ */
+function discoverGroupAttr(nodes, roleSources, idAttrs) {
+  const names = new Set();
+  for (const el of nodes) for (const a of el.attributes) if (/turn|group/i.test(a.name) && UUIDISH.test(a.value)) names.add(a.name);
+  const cands = [];
+  for (const name of names) {
+    if (idAttrs[0] === name) continue;
+    const vals = nodes.map((el) => (el.getAttribute(name) || '').trim());
+    if (vals.filter(Boolean).length < nodes.length * 0.8) continue;
+    const distinct = new Set(vals.filter(Boolean)).size;
+    if (distinct === vals.filter(Boolean).length) continue;   // 没有重复：不是分组
+    let ok = true;
+    const closed = new Set();
+    for (let i = 0; i < vals.length && ok; i++) {
+      const v = vals[i];
+      if (!v) continue;
+      if (closed.has(v)) ok = false;   // 同组节点不相邻
+      if (i + 1 < vals.length && vals[i + 1] !== v) closed.add(v);
+      if (i + 1 < vals.length && vals[i + 1] === v && roleFrom(nodes[i], roleSources) !== roleFrom(nodes[i + 1], roleSources)) ok = false;
+    }
+    if (ok) cands.push({ name, distinct, turn: /turn/i.test(name) });
+  }
+  // 合并得越多越好（distinct 越少），同等时名字带 turn 的优先
+  cands.sort((a, b) => (b.turn - a.turn) || (a.distinct - b.distinct));
+  return cands[0]?.name || null;
+}
+
+/** 页面自带的“正在流式输出”标记（如 data-hatch-markdown-streaming="false"、消息里的 aria-busy="false"）→ 取值为 true 时算生成中 */
+function findStreamingFlags(doc, messageSelector) {
+  const out = new Set();
+  for (const el of doc.body ? doc.body.querySelectorAll('*') : []) {
+    for (const a of el.attributes) {
+      if (/streaming|generating/i.test(a.name) && /^(true|false)$/.test(a.value)) out.add(`[${a.name}="true"]`);
+    }
+    if (out.size >= 3) break;
+  }
+  // 只看助手消息里的 aria-busy（用户消息发送中也会 busy）
+  const parts = String(messageSelector || '').split(',').map((x) => x.trim()).filter((x) => /assistant|agent|bot/i.test(x));
+  if (parts.length && doc.querySelector(parts.map((x) => `${x} [aria-busy]`).join(','))) out.add(parts.map((x) => `${x} [aria-busy="true"]`).join(','));
+  return [...out];
 }
 
 function findStopButton(doc) {
@@ -455,7 +524,9 @@ export function analyzeDom(html, meta = {}) {
     const asstText = pickText(asstNodes, TEXT_CANDIDATES.assistant);
 
     const stop = findStopButton(doc);
-    const generating = stop && !BASE_GENERATING.includes(stop) ? [stop, ...BASE_GENERATING] : BASE_GENERATING;
+    const streaming = findStreamingFlags(doc, best.selector);
+    const generating = [...new Set([...(stop ? [stop] : []), ...streaming, ...BASE_GENERATING])];
+    const groupAttr = discoverGroupAttr(best.nodes, best.role_sources, ids.idAttrs);
 
     const config = {
       config_version: DOM_CONFIG_VERSION,
@@ -470,9 +541,10 @@ export function analyzeDom(html, meta = {}) {
         selector: best.selector,
         role_sources: best.role_sources,
         id_attrs: ids.idAttrs,
-        id_inner: ids.idInner
+        id_inner: ids.idInner,
+        ...(groupAttr ? { group_attr: groupAttr } : {})
       },
-      text: { user: userText.selector, assistant: asstText.selector },
+      text: { user: userText.selector, assistant: asstText.selector, exclude: ANALYZER_EXCLUDE },
       generating: { selector: generating.join(','), activity_idle_ms: 1500 }
     };
 
@@ -483,8 +555,10 @@ export function analyzeDom(html, meta = {}) {
     };
     const sample = (el, role) => {
       const sel = role === 'user' ? userText.selector : asstText.selector;
-      const body = sel ? el.querySelector(sel) : null;
-      return { role, id: id(el), text: textOf(body || el).slice(0, 60) };
+      const body = sel ? bodyIn(el, sel) : null;
+      const c = (body || el).cloneNode(true);
+      for (const x of c.querySelectorAll(`${BASE_EXCLUDE}, ${ANALYZER_EXCLUDE}`)) x.remove();
+      return { role, id: id(el), text: textOf(c).slice(0, 60) };
     };
 
     return {
@@ -495,6 +569,7 @@ export function analyzeDom(html, meta = {}) {
         message_count: best.nodes.length,
         roles: best.roles,
         id_coverage: ids.coverage,
+        group_attr: groupAttr || null,
         text_coverage: { user: userText.coverage, assistant: asstText.coverage },
         generating_now: !!stop,
         samples: best.nodes.slice(-6).map((el) => sample(el, roleFrom(el, best.role_sources))),

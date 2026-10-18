@@ -118,6 +118,7 @@ export function createBridgeServer(opts = {}) {
    *   GET /api/conversations/:id/events?limit=100    最近事件（不含正文）
    *   POST /api/conversations/:id/mark  {archived?: bool, pinned?: bool}  归档 / 置顶（旧字段 done 等同 archived）
    *   POST /api/conversations/:id/messages/:mid/favorite  {favorite: bool}  收藏 / 取消收藏回答
+   *   POST /api/conversations/:id/reopen               页面已关的会话：插件在后台标签页重新打开
    *   DELETE /api/conversations/:id                      删除页面已关的会话（消息 / 收藏 / 标记 / 事件）
    *   GET  /api/favorites?limit=200                      收藏的回答（正文快照）
    */
@@ -129,6 +130,17 @@ export function createBridgeServer(opts = {}) {
       return json(res, 403, { ok: false, error: 'subscribe_all + read_content scope required' });
     }
     const params = new URL(req.url, 'http://x').searchParams;
+    const reopen = /^\/api\/conversations\/([A-Za-z0-9_-]{1,128})\/reopen$/.exec(path);
+    if (reopen && req.method === 'POST') {
+      // 页面已关的会话：让插件在后台标签页重新打开（不抢焦点），页面上报后卡片状态自动更新
+      if (!client.scopes.includes(Scope.CONTROL)) return json(res, 403, { ok: false, error: 'control scope required' });
+      const url = db.conversationUrl(reopen[1]);
+      if (typeof url !== 'string' || !/^https:\/\//.test(url)) return json(res, 404, { ok: false, error: '这个会话没有记录页面地址' });
+      const target = onlineExtensions()[0];
+      if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件', url });
+      sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: randomId('reopen').slice(0, 40), action: 'new_chat', conversation_id: 'sites', text: url.slice(0, 2048) }));
+      return json(res, 202, { ok: true, url });
+    }
     const del = /^\/api\/conversations\/([A-Za-z0-9_-]{1,128})$/.exec(path);
     if (del && req.method === 'DELETE') {
       // 删除会话（只允许页面已关的会话）：从数据库移除它的消息、收藏、标记和事件

@@ -166,5 +166,5 @@ export function createBackground({ WebSocketImpl, storage, clientId, settings, c
     };
   }
 
-  return { conn, handleRuntimeMessage, onTabRemoved, syncTabs, diagnostics, tabs, pseudoId };
+  return { conn, handleRuntimeMessage, onTabRemoved, syncTabs, diagnostics, tabs };
 }

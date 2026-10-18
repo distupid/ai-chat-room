@@ -362,7 +362,10 @@
       idInner: idInner,
       userText: pickSel(t.user, 'user' in dt ? dt.user : D.text.user, 'text.user', true),
       assistantText: pickSel(t.assistant, 'assistant' in dt ? dt.assistant : D.text.assistant, 'text.assistant', true),
-      textExclude: pickSel(t.exclude, 'exclude' in dt ? dt.exclude : D.text.exclude, 'text.exclude', true),
+      // 配置里的 exclude 之外总是排除：读屏 / 搜索用的替身文字、sr-only 标签、复制排除区、代码块工具栏
+      textExclude: [pickSel(t.exclude, 'exclude' in dt ? dt.exclude : D.text.exclude, 'text.exclude', true), BASE_EXCLUDE].filter(Boolean).join(', '),
+      // 同一组（如同一轮回答拆成 文字 + 文件卡片 + 文字 多个节点）合并成一条消息：组 ID 属性
+      groupAttr: str(m.group_attr === undefined ? dm.group_attr : m.group_attr, 200) || '',
       generating: pickSel(g.selector, 'selector' in dg ? dg.selector : D.generating.selector, 'generating.selector', true),
       activityIdleMs: isFinite(idle) && idle >= 0 && idle <= 60000 ? idle
         : (dg.activity_idle_ms != null ? dg.activity_idle_ms : D.generating.activity_idle_ms),
@@ -472,6 +475,17 @@
     return text.replace(/\u00a0/g, ' ').trim();
   }
 
+  /** 代码块是否“每行一个元素”：没有换行符，或子元素带 line / block 类（空行里可能只有一个换行符） */
+  function isLineCode(code) {
+    if (code.children.length < 2) return false;
+    if ((code.textContent || '').indexOf('\n') < 0) return true;
+    var c0 = code.firstElementChild, c1 = c0 && c0.nextElementSibling;
+    return /(?:^|\s)(?:line|block)(?:\s|$)/.test(String(c0.className || '')) && !!c1 && /(?:^|\s)(?:line|block)(?:\s|$)/.test(String(c1.className || ''));
+  }
+
+  var BASE_EXCLUDE = '[data-message-accessibility-surrogate], [data-message-search-surrogate], .sr-only, .visually-hidden, ' +
+    '[data-copy-exclude="true"], [data-streamdown="code-block-header"], [data-streamdown="code-block-actions"]';
+
   var BLOCK_TAGS = {
     P: 1, DIV: 1, LI: 1, UL: 1, OL: 1, PRE: 1, H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, TABLE: 1, TR: 1,
     BLOCKQUOTE: 1, SECTION: 1, ARTICLE: 1, HR: 1, FIGURE: 1, HEADER: 1, FOOTER: 1, DL: 1, DT: 1, DD: 1
@@ -505,11 +519,11 @@
       var block = BLOCK_TAGS[tag];
       if (block) out.push('\n');
       else if (tag === 'TD' || tag === 'TH') out.push('\t');
-      // 代码高亮器（duck.ai 的 shiki）把每行放进一个 <span>、行间没有换行符：按行补换行
-      var lineSpans = tag === 'CODE' && (node.textContent || '').indexOf('\n') < 0 && node.children.length > 1;
+      // 代码高亮器（shiki / streamdown）把每行放进一个 <span>、行间没有换行符：按行补换行
+      var lineSpans = tag === 'CODE' && isLineCode(node);
       for (var ch = node.firstChild; ch; ch = ch.nextSibling) {
         walk(ch);
-        if (lineSpans && ch.nodeType === 1) out.push('\n');
+        if (lineSpans && ch.nodeType === 1 && !/\n$/.test(ch.textContent || '')) out.push('\n');
       }
       if (block) out.push('\n');
     })(root);
@@ -595,10 +609,10 @@
       if (n.nodeType !== 1 || HTML_DROP[n.tagName] || SKIP_TEXT_TAGS[n.tagName]) return;
       if (n !== root && exclude && n.matches && n.matches(exclude)) return;
       if (n.tagName === 'BR') { out.push('\n'); return; }
-      var lineSpans = n.tagName === 'CODE' && (n.textContent || '').indexOf('\n') < 0 && n.children.length > 1;
+      var lineSpans = n.tagName === 'CODE' && isLineCode(n);
       for (var ch = n.firstChild; ch; ch = ch.nextSibling) {
         walk(ch);
-        if (lineSpans && ch.nodeType === 1) out.push('\n');
+        if (lineSpans && ch.nodeType === 1 && !/\n$/.test(ch.textContent || '')) out.push('\n');
       }
     })(node);
     return out.join('').replace(/\u00a0/g, ' ').replace(/\n+$/, '');
@@ -701,8 +715,7 @@
 
   /** 消息的富文本：只有 p / br 时与纯文本等价，不发送；超过上限时不发送（看板退回 text） */
   function getNodeHtml(el, role, c, text) {
-    var sel = role === 'user' ? c.userText : role === 'assistant' ? c.assistantText : null;
-    var body = sel && el.querySelector ? el.querySelector(sel) : null;
+    var body = bodyOf(el, role, c);
     var html;
     try { html = extractHtml(body || el, c.textExclude); } catch (_) { return null; }
     if (!html || !/<(?!\/?(?:p|br)>)[a-z]/i.test(html)) return null;
@@ -712,9 +725,34 @@
 
   // 只取正文，避免把“复制/编辑”等按钮区域算进去；找不到正文节点时退回整个消息节点
   function getNodeText(el, role, c) {
+    return extractText(bodyOf(el, role, c) || el, c.textExclude);
+  }
+
+  /** 正文节点：取第一个不在排除区（替身文字、sr-only 等）里的匹配 */
+  function bodyOf(el, role, c) {
     var sel = role === 'user' ? c.userText : role === 'assistant' ? c.assistantText : null;
-    var body = sel && el.querySelector ? el.querySelector(sel) : null;
-    return extractText(body || el, c.textExclude);
+    if (!sel || !el.querySelectorAll) return null;
+    var list = el.querySelectorAll(sel);
+    for (var i = 0; i < list.length; i++) {
+      var b = list[i];
+      if (!c.textExclude) return b;
+      var bad = false;
+      for (var p = b; p && p !== el; p = p.parentElement) if (p.matches && p.matches(c.textExclude)) { bad = true; break; }
+      if (!bad) return b;
+    }
+    return null;
+  }
+
+  /**
+   * 虚拟列表：滚出视口的消息只剩一个读屏 / 搜索用的替身节点（如 Muse 的
+   * <span data-message-accessibility-surrogate class="sr-only">助手消息：……</span>）。正文为空时用它的文字（去掉“助手消息：”标签），
+   * 标记为 partial：已经上报过完整内容的消息不会被替身覆盖。
+   */
+  var SURROGATE_SEL = '[data-message-accessibility-surrogate], [data-message-search-surrogate]';
+  function surrogateText(el) {
+    var sg = el.querySelector && el.querySelector(SURROGATE_SEL);
+    if (!sg) return '';
+    return String(sg.textContent || '').replace(/\u00a0/g, ' ').replace(/^\s*[^\s:：]{1,12}[：:]\s*/, '').replace(/^\s+|\s+$/g, '');
   }
 
   /** 来源：网站列表（省略 = 默认种子）里匹配的网站标识；都不匹配时取主域名 */
@@ -930,10 +968,14 @@
       stats.extractions++;
       var role = normalizeRole(roleOf(el, cfg));
       var text = getNodeText(el, role, cfg);
-      var html = getNodeHtml(el, role, cfg, text.slice(0, MAX_TEXT));
+      var partial = false;
+      if (!text) { text = surrogateText(el); partial = !!text; }
+      var html = partial ? null : getNodeHtml(el, role, cfg, text.slice(0, MAX_TEXT));
       c = {
         role: role,
         rawId: rawMessageIdOf(el, cfg),
+        group: cfg.groupAttr ? (el.getAttribute(cfg.groupAttr) || '').trim().slice(0, 128) : '',
+        partial: partial,
         text: text,
         html: html,
         // 内容哈希含富文本：只有图片 / 格式变化（文字不变）也会上报 message.updated
@@ -978,6 +1020,29 @@
       }
     }
 
+    /** 相邻、同组 ID、同角色的节点合并成一条消息（ID = 组 ID）：文字和富文本按顺序拼接，有一段是替身就整体算 partial */
+    function mergeGroups(items) {
+      var out = [];
+      for (var j = 0; j < items.length; j++) {
+        var it = items[j];
+        var prev = out[out.length - 1];
+        if (prev && it.x.group && prev.group === it.x.group && prev.x.role === it.x.role) {
+          var a = prev.x, b = it.x;
+          var text = [a.text, b.text].filter(Boolean).join('\n\n');
+          var html = a.html || b.html
+            ? [a.html || textHtml(a.text), b.html || textHtml(b.text)].join('')
+            : null;
+          prev.x = { role: a.role, rawId: prev.group, group: prev.group, partial: a.partial || b.partial, text: text, html: html,
+            hash: html ? fnv1a64(text + '\u0000' + html) : fnv1a64(text) };
+          continue;
+        }
+        out.push(it.x.group ? { id: it.x.group, group: it.x.group, x: it.x } : it);
+      }
+      return out;
+    }
+
+    function textHtml(t) { return t ? '<p>' + escHtml(t).replace(/\n/g, '<br>') + '</p>' : ''; }
+
     function scanMessages(conversationId, force, fresh) {
       if (fresh || !observer || now() - lastFullAt >= FULL_REFRESH_MS) resetCache();
       var nodes = doc.querySelectorAll(cfg.messageSelector); // querySelectorAll 结果本身不含重复节点
@@ -1007,6 +1072,7 @@
         (seenHash[base] || (seenHash[base] = Object.create(null)))[x.hash] = 1;
         items.push({ id: key, x: x });
       }
+      if (cfg.groupAttr) items = mergeGroups(items);
       reuseReplacedIds(items);
       assignIndexes(items);
 
@@ -1018,6 +1084,8 @@
         if (role === 'assistant') lastAssistantId = id;
         var known = state.messages[id];
         if (known && known.hash === hash) continue;
+        // 替身文字（虚拟列表滚出视口）不覆盖已经上报过的内容
+        if (known && it.x.partial) continue;
 
         var text = it.x.text;
         var payload = {
