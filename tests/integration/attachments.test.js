@@ -10,7 +10,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { JSDOM } from 'jsdom';
 import { validateMessage, makeEnvelope } from '../../contracts/protocol.js';
-import { fetchAttachments } from '../../src/frontend/lib/dom-config-client.js';
+import { fetchAttachments, uploadAttachment } from '../../src/frontend/lib/dom-config-client.js';
+import { createBackground } from '../../src/frontend/lib/background-core.js';
 import { ROOT, startServer, tmpDb, TestClient, TOKENS, waitFor, ajvValidate } from '../helpers.js';
 
 const OBSERVER_SRC = readFileSync(join(ROOT, 'src/frontend/lib/dom-observer.js'), 'utf8');
@@ -107,7 +108,9 @@ test('后端：看板上传文件 → 快速回复带附件转发给插件 → �
     const up = (token, body, name, type = 'text/plain') => fetch(`${http}/api/attachments`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'x-file-name': encodeURIComponent(name), 'content-type': type }, body
     });
-    assert.equal((await up(TOKENS.extension, 'x', 'x.txt')).status, 403, '上传需要 control 权限');
+    assert.equal((await up(TOKENS.meta, 'x', 'x.txt')).status, 403, '上传需要 control 或 publish 权限');
+    const rExt = await up(TOKENS.extension, Buffer.from('plugin-bytes'), '页面文件.pdf');
+    assert.equal(rExt.status, 201, '插件凭 publish 权限可以上传页面里观察到的文件');
     const r = await up(TOKENS.observer, Buffer.from('报告内容'), '报告/2026.txt');
     assert.equal(r.status, 201);
     const att = (await r.json()).attachment;
@@ -118,7 +121,10 @@ test('后端：看板上传文件 → 快速回复带附件转发给插件 → �
     assert.equal(bad.attachment.type, 'application/octet-stream');
 
     const get = (token, id) => fetch(`${http}/api/attachments/${id}`, { headers: { authorization: `Bearer ${token}` } });
-    assert.equal((await get(TOKENS.observer, att.id)).status, 403, '取文件需要 publish（插件）权限');
+    assert.equal((await get(TOKENS.meta, att.id)).status, 403, '取文件需要 publish 或 read_content 权限');
+    const gObs = await get(TOKENS.observer, att.id);
+    assert.equal(gObs.status, 200, '看板凭 read_content 可以下载插件上传的文件');
+    assert.equal(await gObs.text(), '报告内容');
     const g = await get(TOKENS.extension, att.id);
     assert.equal(g.status, 200);
     assert.equal(await g.text(), '报告内容');
@@ -153,8 +159,45 @@ test('后端：看板上传文件 → 快速回复带附件转发给插件 → �
   }
 });
 
-test('插件后台：fetchAttachments 取回文件转 base64；404 → attachment_expired', async () => {
-  const store = { '/api/attachments/att-0000000001': Buffer.from('hello 文件') };
+test('后端：插件上传页面里观察到的文件 → 看板凭 read_content 下载；无权限被拒绝', async () => {
+  const server = await startServer({ dbPath: tmpDb() });
+  const http = `http://127.0.0.1:${server.port}`;
+  try {
+    const up = (token, body, name, type = 'application/pdf') => fetch(`${http}/api/attachments`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'x-file-name': encodeURIComponent(name), 'content-type': type }, body
+    });
+    const get = (token, id) => fetch(`${http}/api/attachments/${id}`, { headers: { authorization: `Bearer ${token}` } });
+
+    // 既无 publish 也无 control 的 token 不能上传
+    assert.equal((await up(TOKENS.meta, 'x', 'x.txt', 'text/plain')).status, 403);
+
+    // 插件凭 publish 上传页面里观察到的文件
+    const r = await up(TOKENS.extension, Buffer.from('%PDF-1.4 fake'), '合同.pdf');
+    assert.equal(r.status, 201);
+    const att = (await r.json()).attachment;
+    assert.match(att.id, /^[A-Za-z0-9_-]{8,64}$/);
+    assert.equal(att.name, '合同.pdf');
+    assert.equal(att.type, 'application/pdf');
+    assert.equal(att.size, Buffer.byteLength('%PDF-1.4 fake'));
+
+    // 看板凭 read_content 下载（observer token 有 read_content）
+    const g = await get(TOKENS.observer, att.id);
+    assert.equal(g.status, 200);
+    assert.equal(g.headers.get('content-type'), 'application/pdf');
+    assert.equal(Buffer.from(await g.arrayBuffer()).toString(), '%PDF-1.4 fake');
+
+    // 既无 publish 也无 read_content 的 token 不能下载
+    assert.equal((await get(TOKENS.meta, att.id)).status, 403);
+
+    // 插件把文件 URL 写进消息 html（<a data-file href="/api/attachments/:id">），看板据此渲染文件卡片
+    const url = `/api/attachments/${att.id}`;
+    assert.ok(url.length <= 300, '符合 ATTACHMENT.url ≤ 300');
+  } finally {
+    await server.stop();
+  }
+});
+
+test('插件后台：fetchAttachments 取回文件转 base64；404 → attachment_expired', async () => {  const store = { '/api/attachments/att-0000000001': Buffer.from('hello 文件') };
   const fetchImpl = async (url, opts) => {
     assert.equal(opts.headers.authorization, 'Bearer tok');
     const path = new URL(url).pathname;
@@ -168,4 +211,152 @@ test('插件后台：fetchAttachments 取回文件转 base64；404 → attachmen
   assert.equal(Buffer.from(r.files[0].data, 'base64').toString(), 'hello 文件');
   const r2 = await fetchAttachments({ fetchImpl, serverUrl: 'ws://127.0.0.1:8787', token: 'tok', attachments: [{ id: 'att-0000000002', name: 'b.txt', url: '/api/attachments/att-0000000002' }] });
   assert.equal(r2.code, 'attachment_expired');
+});
+
+test('插件后台整链：reply+attachments → 取回文件 → 发给内容脚本(files) → 结果回传', async () => {
+  class NoopWS { constructor() { this.readyState = 0; } send() {} close() {} }
+  const mk = (fetchCommandFiles, executeCommand) => createBackground({
+    WebSocketImpl: NoopWS, storage: null, clientId: 'ext-chain-0001',
+    settings: { serverUrl: 'ws://127.0.0.1:1', token: 'x' },
+    fetchCommandFiles, executeCommand
+  });
+  const replyCmd = (id, attachments) => ({
+    command_id: id, action: 'reply', conversation_id: 'conv-1', tab_id: 3, text: '看看这个', attachments
+  });
+  const att = { id: 'att-00000001', name: 'a.pdf', type: 'application/pdf', size: 6, url: '/api/attachments/att-00000001' };
+
+  // 成功：内容脚本收到的是 files（不是 attachments），结果原样回传
+  const seen = [];
+  const bg = mk(
+    async (atts) => ({ ok: true, files: atts.map((a) => ({ name: a.name, type: 'application/pdf', data: Buffer.from('%PDF-1').toString('base64') })) }),
+    async (tabId, command) => {
+      seen.push([tabId, command]);
+      assert.deepEqual(command.files.map((f) => f.name), ['a.pdf']);
+      assert.equal(command.attachments, undefined);
+      return { ok: true, detail: '已发送' };
+    }
+  );
+  bg.tabs.set(3, { url: 'https://chatgpt.com/c/conv-1', conversation_id: 'conv-1' });
+  const r = await bg.conn.onCommand(replyCmd('cmdchain0001', [att]));
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.detail, '已发送');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0][0], 3);
+
+  // 取回失败：直接返回错误，不打扰标签页
+  let executed = false;
+  const bg2 = mk(
+    async () => ({ ok: false, code: 'attachment_expired', detail: '文件已过期' }),
+    async () => { executed = true; return { ok: true }; }
+  );
+  bg2.tabs.set(3, { url: 'https://chatgpt.com/c/conv-1', conversation_id: 'conv-1' });
+  const r2 = await bg2.conn.onCommand(replyCmd('cmdchain0002', [{ id: 'att-00000002', name: 'old.pdf', url: '/api/attachments/att-00000002' }]));
+  assert.equal(r2.ok, false);
+  assert.equal(r2.code, 'attachment_expired');
+  assert.equal(executed, false);
+
+  // 不带附件的 reply：不走取文件分支，直接执行
+  const bg3 = mk(async () => { throw new Error('不应取文件'); }, async () => ({ ok: true, detail: '已发送' }));
+  bg3.tabs.set(3, { url: 'https://chatgpt.com/c/conv-1', conversation_id: 'conv-1' });
+  const r3 = await bg3.conn.onCommand({ command_id: 'cmdchain0003', action: 'reply', conversation_id: 'conv-1', tab_id: 3, text: '纯文字' });
+  assert.equal(r3.ok, true, JSON.stringify(r3));
+});
+
+test('插件后台：uploadAttachment 上传文件（raw bytes + x-file-name）；失败转错误码', async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts) => {
+    calls.push([url, opts]);
+    assert.equal(opts.method, 'POST');
+    assert.ok(opts.body instanceof Uint8Array, 'body 是原始字节');
+    assert.ok(url.endsWith('/api/attachments'), url);
+    const fname = decodeURIComponent(opts.headers['x-file-name']);
+    return {
+      ok: true, status: 201,
+      json: async () => ({ ok: true, attachment: { id: 'att-00000009', name: fname, type: opts.headers['content-type'], size: opts.body.length } })
+    };
+  };
+  const r = await uploadAttachment({
+    fetchImpl, serverUrl: 'ws://127.0.0.1:8787', token: 'tok',
+    name: '合同.pdf', type: 'application/pdf', data: Buffer.from('%PDF-1.4')
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.attachment.id, 'att-00000009');
+  assert.equal(r.attachment.name, '合同.pdf');
+  assert.equal(r.attachment.size, 8);
+  assert.equal(calls[0][1].headers['x-file-name'], encodeURIComponent('合同.pdf'));
+  assert.equal(calls[0][1].headers['content-type'], 'application/pdf');
+
+  // base64 字符串也能传（内容脚本抓到的文件）
+  const r2 = await uploadAttachment({
+    fetchImpl, serverUrl: 'ws://127.0.0.1:8787', token: 'tok',
+    name: 'a.txt', data: Buffer.from('hi').toString('base64')
+  });
+  assert.equal(r2.ok, true);
+
+  // 403 → forbidden；非法 data → bad_argument
+  const bad = await uploadAttachment({
+    fetchImpl: async () => ({ ok: false, status: 403, json: async () => ({ ok: false, error: 'control or publish scope required' }) }),
+    serverUrl: 'ws://127.0.0.1:8787', token: 'bad', name: 'x.txt', data: new Uint8Array([1])
+  });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, 'forbidden');
+  const badArg = await uploadAttachment({ fetchImpl, serverUrl: 'ws://127.0.0.1:8787', token: 'tok', name: 'x', data: 123 });
+  assert.equal(badArg.code, 'bad_argument');
+});
+test('联调（A2 插件侧契约）：插件上传文件 → 消息 html 引用文件 URL → 看板下载展示（端到端）', async () => {
+  const server = await startServer({ dbPath: tmpDb() });
+  const http = `http://127.0.0.1:${server.port}`;
+  const ext = await new TestClient(server.url).open();
+  const CONV = '6720a1b2-0000-4111-8222-ffffeeee0002';
+  try {
+    await ext.hello('ext-upflow-0001', TOKENS.extension, 'extension');
+
+    // 1. 插件用 publish token 上传页面里观察到的文件（raw bytes + x-file-name 头）
+    const up = await fetch(`${http}/api/attachments`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${TOKENS.extension}`,
+        'x-file-name': encodeURIComponent('会议纪要.pdf'),
+        'content-type': 'application/pdf'
+      },
+      body: Buffer.from('%PDF-1.4 fake-bytes')
+    });
+    assert.equal(up.status, 201);
+    const { attachment } = await up.json();
+    const url = `/api/attachments/${attachment.id}`;
+    assert.ok(url.length <= 300, '符合 ATTACHMENT.url ≤ 300');
+
+    // 2. 插件上报消息，html 里用 <a data-file href="文件URL"> 引用（看板渲染文件卡片）
+    const html = `<p>这是今天的纪要 <a data-file="会议纪要.pdf" href="${url}">会议纪要.pdf</a></p>`;
+    const msgEv = makeEnvelope('event', {
+      event_id: 't:upflow:msg:1', event_type: 'message.added', occurred_at: Date.now(),
+      conversation_id: CONV,
+      payload: {
+        message_id: 'm-file-0001', role: 'assistant', index: 0,
+        text: '这是今天的纪要 [文件：会议纪要.pdf]', text_length: 22, html
+      }
+    });
+    const v = validateMessage(msgEv, { direction: 'c2s' });
+    assert.ok(v.ok, '插件上报的消息符合协议：' + JSON.stringify(v.errors));
+    ext.send(msgEv);
+    await waitFor(
+      () => ext.of('ack').find((a) => a.ref_id === msgEv.event_id && a.status === 'persisted'),
+      { label: '消息落盘 ack' });
+
+    // 3. 看板查消息：html 原样存下，文件 URL 可点
+    const h = { authorization: `Bearer ${TOKENS.observer}` };
+    const msgs = await (await fetch(`${http}/api/conversations/${CONV}/messages`, { headers: h })).json();
+    const m = msgs.messages.find((x) => x.message_id === 'm-file-0001');
+    assert.ok(m, '看板能查到这条消息');
+    assert.ok(m.html.includes(url), 'html 里保留了文件 URL');
+
+    // 4. 看板凭 read_content 把文件下载下来展示
+    const g = await fetch(`${http}${url}`, { headers: h });
+    assert.equal(g.status, 200);
+    assert.equal(g.headers.get('content-type'), 'application/pdf');
+    assert.equal(await g.text(), '%PDF-1.4 fake-bytes');
+  } finally {
+    ext.close();
+    await server.stop();
+  }
 });

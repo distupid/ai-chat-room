@@ -52,9 +52,10 @@
   chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     if (sender.id !== chrome.runtime.id || !msg) return;
     if (msg.kind === 'page_info') {
-      // 后台对账用：这个标签页当前在哪个会话
+      // 后台对账用：这个标签页当前在哪个会话；顺带带上选择器健康度（命中数 + 配置警告），供诊断站点改版
       if (!observer) { sendResponse({ ok: false, code: 'not_observing' }); return; }
-      sendResponse({ ok: true, conversation_id: observer.getConversationId(), url: location.href });
+      sendResponse({ ok: true, conversation_id: observer.getConversationId(), url: location.href,
+        selector_health: observer.getSelectorHealth ? observer.getSelectorHealth() : null });
     } else if (msg.kind === 'resync') {
       if (observer) observer.resync();
       sendResponse({ ok: !!observer });

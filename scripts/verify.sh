@@ -4,6 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 echo "==> install"
 pnpm install --frozen-lockfile
+echo "==> lint + syntax"
+pnpm lint
+pnpm check-syntax
 echo "==> build + test"
 pnpm test
 echo "==> 生成物一致性"

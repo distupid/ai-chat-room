@@ -33,7 +33,7 @@
 
 - 测试命令：`pnpm test`（全量）、`pnpm test:frontend`、`pnpm test:backend`
 - 构建：`pnpm build`（导出 Schema + 同步协议到插件）
-- Lint / typecheck：待确认（尚未配置 eslint / tsc）。
+- Lint / typecheck：`pnpm lint`（eslint flat config，见 `eslint.config.mjs`；src/ 存量 warn 待各负责人清理后收紧）+ `pnpm check-syntax`（`node --check` 语法门）。暂不上 `tsc --checkJs`（纯 JS 无 JSDoc，MVP 后再评估）。
 - 本地一键检查优先使用 `scripts/verify.sh`。
 
 ## 变更纪律（严格）

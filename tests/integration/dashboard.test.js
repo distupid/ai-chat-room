@@ -150,7 +150,7 @@ test('会话实体：来源、标题、模型、消息数、回答中 → 出错
 
 // ---------------------------------------------------------------- 指令通道端到端
 
-function fakeChatGPT(conv) {
+function fakeChatGPT(_conv) {
   return `<!doctype html><html><head><title>测试 - ChatGPT</title></head><body>
   <main id="thread">
     <div data-chatgpt-search-unit-key="fallback-turn-0:0:user" data-chatgpt-search-message-ids="11111111-0000-4000-8000-000000000001">

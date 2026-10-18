@@ -190,6 +190,75 @@ test('页面操作：Hark 快速回复走 textarea + 发送按钮；duck.ai 不�
   d.win.close();
 });
 
+test('页面操作：ChatGPT 快速回复走 contenteditable 输入框；重新生成点击对应按钮', async () => {
+  const conv = '6720a1b2-0000-4111-8222-999988887777';
+  const html = `<!doctype html><html><head><title>ChatGPT</title></head><body><main>
+    <article><div data-message-author-role="assistant" data-message-id="msg-1"><div class="markdown"><p>你好</p></div></div></article>
+    <form data-chatgpt-composer="true">
+      <div id="prompt-textarea" contenteditable="true"></div>
+      <button type="button" data-testid="send-button" aria-label="发送">s</button>
+    </form>
+    <button type="button" aria-label="重新生成回复">r</button>
+  </main></body></html>`;
+  const { win, doc, obs } = runObserver(html, `https://chatgpt.com/c/${conv}`);
+  win.eval(ACTIONS_SRC);
+  assert.equal(obs.getConversationId(), conv);
+  const sent = [];
+  doc.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+    const ed = doc.querySelector('[contenteditable="true"]');
+    sent.push(ed.textContent);
+    ed.textContent = '';
+  });
+  let generating = false;
+  doc.querySelector('[aria-label="重新生成回复"]').addEventListener('click', () => { generating = true; });
+  const ctx = {
+    document: doc, window: win, actions: obs.getConfig().actions,
+    isGenerating: () => generating || obs.isGenerating(), conversationId: () => obs.getConversationId()
+  };
+  const r = await win.ChatGPTBridgeActions.execute(ctx, { action: 'reply', conversation_id: conv, text: '你好 ChatGPT' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(sent, ['你好 ChatGPT']);
+  const r2 = await win.ChatGPTBridgeActions.execute(ctx, { action: 'regenerate', conversation_id: conv });
+  assert.equal(r2.ok, true, JSON.stringify(r2));
+  assert.equal(r2.detail, '已开始重新生成');
+  obs.stop();
+  win.close();
+});
+
+test('选择器降级：站点改版后旧选择器全失效，观察器不崩、page_info 报告 0 命中', async () => {
+  const conv = '6720a1b2-0000-4111-8222-999988887777';
+  // 改版后的页面：没有任何旧选择器能命中的标记，但 URL 里仍有会话 ID
+  const redesigned = `<!doctype html><html><head><title>ChatGPT</title></head><body><div id="app-v2">
+    <section class="thread"><article class="turn" data-kind="assistant"><div class="content"><p>改版后的回答</p></div></article></section>
+  </div></body></html>`;
+
+  // 观察器层：不崩，健康度报告 0 命中，page.opened 照常发出
+  const o = runObserver(redesigned, `https://chatgpt.com/c/${conv}`);
+  await waitFor(() => o.events.some((e) => e.event_type === 'page.opened'), { label: 'page.opened' });
+  const health = o.obs.getSelectorHealth();
+  assert.equal(health.message_selector_hits, 0);
+  assert.ok(Array.isArray(health.warnings));
+  o.obs.stop();
+  o.win.close();
+
+  // 内容脚本层：page_info 把健康度带给后台
+  class NoopWS { constructor() { this.readyState = 0; } send() {} close() {} }
+  const bg = createBackground({
+    WebSocketImpl: NoopWS, storage: null, clientId: 'ext-health-0001',
+    settings: { serverUrl: 'ws://127.0.0.1:1', token: 'x' },
+    executeCommand: async () => ({ ok: true })
+  });
+  const page = openChatGPTPage({ url: `https://chatgpt.com/c/${conv}`, tabId: 11, background: bg, html: redesigned });
+  const info = await waitFor(async () => {
+    const r = await page.sendToContent({ kind: 'page_info' });
+    return r && r.ok ? r : null;
+  }, { label: 'page_info ok' });
+  assert.equal(info.conversation_id, conv);
+  assert.equal(info.selector_health.message_selector_hits, 0);
+  assert.ok(Array.isArray(info.selector_health.warnings));
+  page.close();
+});
+
 test('插件后台：focus 指令交给后台切换标签页（不经过内容脚本），会话不符时拒绝', async () => {
   class NoopWS { constructor() { this.readyState = 0; } send() {} close() {} }
   const calls = [];

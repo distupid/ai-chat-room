@@ -960,7 +960,8 @@
       routeSequence: 0,
       statusKey: null,
       statusSequence: 0,
-      lastStatusCheckAt: 0
+      lastStatusCheckAt: 0,
+      lastMessageHits: 0                              // 最近一次扫描消息选择器的命中数（0 = 疑似选择器失效，页面改版时看这个）
     };
 
     var observer = null;
@@ -1126,6 +1127,7 @@
     function scanMessages(conversationId, force, fresh) {
       if (fresh || !observer || now() - lastFullAt >= FULL_REFRESH_MS) resetCache();
       var nodes = doc.querySelectorAll(cfg.messageSelector); // querySelectorAll 结果本身不含重复节点
+      state.lastMessageHits = nodes.length;
       var lastAssistantId = null;
 
       // 第一遍：收集当前渲染出来的消息（长对话里页面只渲染一部分，DOM 位置不能当作消息序号）
@@ -1458,6 +1460,13 @@
       setConfig: setConfig,
       getConfig: function () {
         return { source: cfg.source, site: cfg.site, warnings: cfg.warnings.slice(), config: cfg.raw, actions: cfg.actions };
+      },
+      /**
+       * 选择器健康度（供后台诊断 / 看板判断站点是否改版）：
+       * message_selector_hits 为 0 且页面明显有对话内容时，多半是选择器失效。
+       */
+      getSelectorHealth: function () {
+        return { message_selector_hits: state.lastMessageHits, warnings: cfg.warnings.slice() };
       },
       /** 页面当前是否在生成（供快速回复 / 重新回答判断忙碌） */
       isGenerating: function () { return state.generating || !!(cfg.generating && doc.querySelector(cfg.generating)); },
