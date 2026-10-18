@@ -14,23 +14,23 @@
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { findSite, SEED_KEYS } from './site-seeds.js';
 
-// 插件的观察器脚本：duck.ai / hark.com 等站点直接用其内置适配在页面上试运行来验证
+// 插件的观察器脚本：duck.ai / hark.com 等默认网站直接用其种子配置在页面上试运行来验证
 const OBSERVER_SRC = readFileSync(fileURLToPath(new URL('../../frontend/lib/dom-observer.js', import.meta.url)), 'utf8');
 
+/** 网址属于哪个默认网站（按默认种子的域名匹配）；不是默认网站返回 null（走通用分析） */
 function siteOfUrl(url) {
   let host = '';
-  try { host = new URL(url).hostname; } catch { return 'chatgpt'; }
-  if (/(^|\.)duck\.ai$/.test(host)) return 'duckai';
-  if (/(^|\.)hark\.com$/.test(host)) return 'hark';
-  return 'chatgpt';
+  try { host = new URL(url).hostname; } catch { return null; }
+  return findSite(host)?.key ?? null;
 }
 
 /** 新网站的站点标识：取主域名（kimi.moonshot.cn → moonshot），避开内置站点名 */
 export function siteKeyForHost(host) {
   const parts = String(host || '').toLowerCase().split('.').filter(Boolean);
   let key = (parts.length >= 2 ? parts[parts.length - 2] : parts[0] || 'site').replace(/[^a-z0-9_-]/g, '').slice(0, 24) || 'site';
-  if (['chatgpt', 'openai', 'duck', 'duckai', 'hark', 'unknown', 'other'].includes(key)) key += '2';
+  if ([...SEED_KEYS, 'openai', 'duck', 'unknown', 'other', 'defaults', 'launch', 'probe'].includes(key)) key += '2';
   return key;
 }
 
@@ -416,7 +416,8 @@ export function analyzeDom(html, meta = {}) {
   // 不执行脚本；额外再去一遍 script，防止插件端漏删
   const clean = html.replace(/<script[\s\S]*?<\/script>/gi, '');
   const site = siteOfUrl(meta.url);
-  if (site !== 'chatgpt') return analyzeWithSiteProfile(clean, meta, site);
+  // ChatGPT 页面结构多变，走通用分析（已知结构 + 自动发现）；其他默认网站用种子配置在页面上试运行验证
+  if (site && site !== 'chatgpt') return analyzeWithSiteProfile(clean, meta, site);
   const dom = new JSDOM(clean, { url: 'https://chatgpt.com/' });
   const doc = dom.window.document;
 

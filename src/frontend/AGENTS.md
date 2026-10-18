@@ -13,7 +13,8 @@
 ## 禁区
 - 不许修改 `src/backend/`（跨子项目改动先问负责人）。
 - `src/frontend/shared/` 是生成物，禁止手改；协议只改 `contracts/protocol.js`，且先提契约 PR。
-- `lib/dom-observer.js` 同时被后端 `dom-analyzer.js` 读取用于分析，改它的导出（`ChatGPTBridgeObserver`、`DEFAULT_CONFIG`、`SITE_PROFILES`）视为契约变更。
+- `lib/dom-observer.js` 同时被后端 `dom-analyzer.js` / `site-seeds.js` 读取（分析、默认网站种子、按域名找网站），改它的导出（`ChatGPTBridgeObserver`、`DEFAULT_CONFIG`、`SITE_PROFILES`、`SEED_SITES`、`findSite`、`siteHosts`）视为契约变更。
+- 不要写死站点域名：站点由后端网站列表决定（`chrome.storage.local.siteList`，内容脚本由后台按列表动态注册），`SEED_SITES` 只是默认种子 / 离线兜底。
 
 ## 完成标准
 - 相关测试全绿；插件改动升 `manifest.json` 的 `version`；新增 host 权限写明需用户重新授权。
@@ -30,7 +31,7 @@
 
 ## 消息通道（内部）
 - 页面 → 后台：只有 `chrome.runtime.sendMessage({kind:'page_event', event})` 会被上报
-- 后台 → 页面：`capture_dom`、`get_observer_config`、`bridge_command`、`bridge_diag`
+- 后台 → 页面：`capture_dom`、`page_info`、`get_observer_config`、`bridge_command`、`bridge_diag`
 - 弹窗 → 后台：`analyze_dom`、`clear_dom_config`、`save_settings` 等
 - 后端发来的 ack / error / broadcast 只在 `connection.js` 内部分流，**永远不能进入 page_event 通道**（防循环）
 

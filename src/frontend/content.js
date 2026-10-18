@@ -1,4 +1,6 @@
-/* 内容脚本（chatgpt.com / duck.ai / hark.com，以及看板上添加的网站）：启动 DOM 观察器，把事件交给后台 Service Worker。
+/* 内容脚本（网站列表里的网站，由后台按列表动态注册）：启动 DOM 观察器，把事件交给后台 Service Worker。
+ * - 站点配置：按域名从 chrome.storage.local.siteList（后台从后端同步的网站列表）里选；还没有列表时用默认种子。
+ *   网站被停用 / 不在列表里时不观察。
  * - 页面事件只发送 kind: 'page_event'；内容脚本不接收任何后端消息，ack / error / broadcast 不会被当作页面事件重新上报。
  * - DOM 配置：启动时从 chrome.storage.local.domConfig 读取；配置变化（弹窗“分析当前页面”）时立即 setConfig 生效。
  * - 只响应本插件发来的 capture_dom 请求：返回去掉 script/style/svg 等的页面 HTML，供后端分析。 */
@@ -14,6 +16,7 @@
       document: document,
       window: window,
       site: SITE,
+      baseConfig: SITE_ENTRY && SITE_ENTRY.config ? SITE_ENTRY.config : undefined,
       config: config || undefined,
       emit: function (event) {
         try {
@@ -33,7 +36,7 @@
     try {
       var c = observer.getConfig();
       var sel = c.config && c.config.message && c.config.message.selector;
-      var base = ChatGPTBridgeObserver.SITE_PROFILES[SITE];
+      var base = SITE_ENTRY && SITE_ENTRY.config;
       sel = sel || (base && base.message && base.message.selector) || '';
       var nodes = sel ? document.querySelectorAll(sel) : [];
       var ids = [];
@@ -65,7 +68,8 @@
       catch (e) { sendResponse({ ok: false, error: String(e && e.message || e) }); }
     } else if (msg.kind === 'page_info') {
       // 后台对账用：这个标签页当前在哪个会话
-      sendResponse({ ok: true, conversation_id: observer ? observer.getConversationId() : null, url: location.href });
+      if (!observer) { sendResponse({ ok: false, code: 'not_observing' }); return; }
+      sendResponse({ ok: true, conversation_id: observer.getConversationId(), url: location.href });
     } else if (msg.kind === 'bridge_diag') {
       logDiag('manual'); sendResponse({ ok: true });
     } else if (msg.kind === 'get_observer_config') {
@@ -90,35 +94,43 @@
     }
   });
 
-  // 每个站点一份配置：domConfigs[site]；ChatGPT 兼容旧的 domConfig
-  // 看板上添加的网站：customSiteHosts[host] = 站点标识（由后台 syncSites 写入）
-  var SITE = ChatGPTBridgeObserver.siteForHost(location.hostname);
+  // 站点：按域名在 siteList（后端网站列表）里找；没有列表时用默认种子
+  // 覆盖配置：domConfigs[site]（弹窗“分析当前页面”的结果）；ChatGPT 兼容旧的 domConfig
+  var SITE = null;
+  var SITE_ENTRY = null;
   function resolveSite(s) {
-    var hosts = s && s.customSiteHosts && typeof s.customSiteHosts === 'object' ? s.customSiteHosts : {};
-    if (hosts[location.hostname]) SITE = String(hosts[location.hostname]);
+    var list = s && Array.isArray(s.siteList) ? s.siteList : null;
+    SITE_ENTRY = ChatGPTBridgeObserver.findSite(location.hostname, list);
+    SITE = SITE_ENTRY ? String(SITE_ENTRY.key) : null;
+    return !!SITE_ENTRY && SITE_ENTRY.enabled !== false;
   }
   function configFrom(s) {
     s = s || {};
     var map = s.domConfigs && typeof s.domConfigs === 'object' ? s.domConfigs : {};
-    if (map[SITE]) return map[SITE];
+    if (SITE && map[SITE]) return map[SITE];
     return SITE === 'chatgpt' ? (s.domConfig || null) : null;
+  }
+  var KEYS = ['siteList', 'domConfigs', 'domConfig'];
+  function apply(s) {
+    var enabled = resolveSite(s);
+    if (!enabled) {
+      if (observer) { observer.stop('manual'); observer = null; console.info('[chatgpt-bridge] site disabled or removed:', location.hostname); }
+      return;
+    }
+    var next = configFrom(s);
+    if (!observer) { createObserver(next); return; }
+    var warnings = observer.setConfig(next, SITE_ENTRY.config || null);
+    console.info('[chatgpt-bridge] dom config applied:', SITE, (next && next.source) || (SITE_ENTRY.config && SITE_ENTRY.config.source) || 'default', warnings);
   }
 
   chrome.storage.onChanged.addListener(function (changes, area) {
-    if (area !== 'local' || !observer || !(changes.domConfigs || (SITE === 'chatgpt' && changes.domConfig))) return;
-    chrome.storage.local.get(['domConfigs', 'domConfig']).then(function (s) {
-      var next = configFrom(s);
-      var warnings = observer.setConfig(next);
-      console.info('[chatgpt-bridge] dom config applied:', SITE, (next && next.source) || 'builtin', warnings);
-    });
+    if (area !== 'local' || !(changes.siteList || changes.domConfigs || changes.domConfig)) return;
+    chrome.storage.local.get(KEYS).then(apply);
   });
 
   try {
-    chrome.storage.local.get(['domConfigs', 'domConfig', 'customSiteHosts']).then(
-      function (s) { resolveSite(s); createObserver(configFrom(s)); },
-      function () { createObserver(null); }
-    );
+    chrome.storage.local.get(KEYS).then(apply, function () { apply({}); });
   } catch (e) {
-    createObserver(null);
+    apply({});
   }
 })();

@@ -9,6 +9,7 @@ import { openDatabase } from './db.js';
 import { Broadcaster } from './broadcaster.js';
 import { TokenBucket } from './ratelimit.js';
 import { analyzeDom, analyzeNewSite } from './dom-analyzer.js';
+import { seedSites, seedByKey, SEED_KEYS, siteHosts, sourceForUrl } from './site-seeds.js';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -193,31 +194,46 @@ export function createBridgeServer(opts = {}) {
   }
 
   // ------------------------------------------------------------- 已适配网站
-  // 网站列表（data/sites.json）：不再区分“内置”，首次启动用默认三个网站初始化，之后全部可编辑 / 删除。
-  // 有 config 的网站由插件动态注册内容脚本；chatgpt / duckai / hark 的适配代码随插件发布（按 key 识别）。
-  const DEFAULT_SITES = [
-    { key: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', host: 'chatgpt.com' },
-    { key: 'duckai', name: 'Duck.ai', url: 'https://duck.ai/', host: 'duck.ai' },
-    { key: 'hark', name: 'Hark', url: 'https://www.hark.com/chat', host: 'www.hark.com' }
-  ];
+  // 网站列表（data/sites.json）：没有“内置”网站。首次启动用默认种子（ChatGPT / Duck.ai / Hark，含 DOM 配置）初始化，
+  // 之后全部网站一样：可编辑名称 / 网址 / 域名 / DOM 配置、停用、删除；插件按这份列表注册内容脚本、按域名选配置。
+  // 默认网站删除后不会自动回来，可在看板“恢复默认网站”加回；某个默认网站的配置可“恢复默认”。
+  const MAX_SITE_CONFIG_BYTES = 128 * 1024;
   const sitesPath = opts.sitesPath ?? (opts.configPath ? join(dirname(opts.configPath), 'sites.json') : null);
   let customSites = null;
   if (sitesPath && existsSync(sitesPath)) {
-    try { const v = JSON.parse(readFileSync(sitesPath, 'utf8')); if (Array.isArray(v)) customSites = v; } catch { customSites = null; }
+    try { const v = JSON.parse(readFileSync(sitesPath, 'utf8')); if (Array.isArray(v)) customSites = v.filter((x) => x && typeof x === 'object' && x.key); } catch { customSites = null; }
   }
-  if (!customSites) customSites = DEFAULT_SITES.map((x) => ({ ...x }));
+  let sitesDirty = false;
+  if (!customSites) { customSites = seedSites(); sitesDirty = true; }
   else {
     // 旧版 sites.json 只存“添加的网站”：补上默认网站（只补一次，之后删除了就不再出现）
-    if (!customSites.some((x) => x.seeded) && !DEFAULT_SITES.every((d) => customSites.some((x) => x.key === d.key))) {
-      customSites = [...DEFAULT_SITES.filter((d) => !customSites.some((x) => x.key === d.key)).map((x) => ({ ...x })), ...customSites];
+    if (!customSites.some((x) => x.seeded) && !SEED_KEYS.every((k) => customSites.some((x) => x.key === k))) {
+      customSites = [...seedSites().filter((d) => !customSites.some((x) => x.key === d.key)), ...customSites];
+      sitesDirty = true;
+    }
+    // 旧版默认网站没有 DOM 配置（适配写在插件里）：补上种子配置和域名
+    for (const x of customSites) {
+      const seed = SEED_KEYS.includes(x.key) ? seedByKey(x.key) : null;
+      if (seed && !x.config) { x.config = seed.config; sitesDirty = true; }
+      if (seed && !Array.isArray(x.hosts)) { x.hosts = seed.hosts; sitesDirty = true; }
     }
   }
-  for (const x of customSites) { delete x.builtin; x.seeded = true; }
+  for (const x of customSites) {
+    delete x.builtin;
+    x.seeded = true;
+    if (typeof x.enabled !== 'boolean') x.enabled = true;
+    if (!Array.isArray(x.hosts)) x.hosts = [];
+  }
+  /** 对外的网站条目：去掉内部标记；has_default = 有默认种子，可“恢复默认” */
+  const siteOut = ({ seeded, ...x }) => ({ ...x, has_default: SEED_KEYS.includes(x.key) });
+  const missingDefaults = () => seedSites().filter((d) => !customSites.some((x) => x.key === d.key || siteHosts(x).some((h) => siteHosts(d).includes(h))));
+  db.setSourceResolver?.((url) => sourceForUrl(url, customSites));
   function saveSites() {
     if (!sitesPath) return;
     mkdirSync(dirname(sitesPath), { recursive: true });
     writeFileSync(sitesPath, JSON.stringify(customSites, null, 2) + '\n');
   }
+  if (sitesDirty) saveSites();
   // probe_id → { status: pending|done|error, url, target, requester, result, error, at }
   const probes = new Map();
   const PROBE_TTL_MS = 10 * 60 * 1000;
@@ -233,12 +249,14 @@ export function createBridgeServer(opts = {}) {
   }
 
   /**
-   * GET    /api/sites                     已适配网站（内置 + 已添加）；observer 或 extension token
+   * GET    /api/sites                     网站列表（含 DOM 配置、enabled、hosts、has_default）+ missing_defaults；observer 或 extension token
    * POST   /api/sites/probe {url}         看板：让插件打开网址抓取 DOM 并分析；返回 {probe_id}（control）
    * GET    /api/sites/probe/:id           看板轮询分析结果（control）
    * POST   /api/sites/probe/:id/dom       插件上传抓到的页面 {html, url, title}（publish，且必须是被指派的插件）
    * POST   /api/sites {probe_id, name}    看板确认添加（control）
-   * PATCH  /api/sites/:key {name?, url?} 编辑网站名称 / 网址（control）
+   * PATCH  /api/sites/:key {name?, url?, hosts?, enabled?, config?}  编辑网站（control）
+   * POST   /api/sites/:key/reset          默认网站的 DOM 配置 / 域名恢复默认（control）
+   * POST   /api/sites/defaults            把删掉的默认网站加回来（control）
    * DELETE /api/sites/:key                删除网站（control）
    * POST   /api/sites/launch              一键启动：让插件在后台打开所有网站（control）
    */
@@ -253,7 +271,7 @@ export function createBridgeServer(opts = {}) {
     try {
       if (path === '/api/sites' && req.method === 'GET') {
         if (!can(Scope.READ_CONTENT) && !can(Scope.PUBLISH)) return json(res, 403, { ok: false, error: 'forbidden' });
-        return json(res, 200, { ok: true, sites: customSites.map(({ seeded, ...x }) => x) });
+        return json(res, 200, { ok: true, sites: customSites.map(siteOut), missing_defaults: missingDefaults().map((x) => x.key) });
       }
       const dom = /^\/api\/sites\/probe\/([A-Za-z0-9_-]{8,64})\/dom$/.exec(path);
       if (dom && req.method === 'POST') {
@@ -271,7 +289,7 @@ export function createBridgeServer(opts = {}) {
       if (path === '/api/sites/launch' && req.method === 'POST') {
         const target = onlineExtensions()[0];
         if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件' });
-        const urls = customSites.map((x) => x.url).filter((u) => /^https:\/\//.test(u));
+        const urls = customSites.filter((x) => x.enabled !== false).map((x) => x.url).filter((u) => /^https:\/\//.test(u));
         if (!urls.length) return json(res, 400, { ok: false, error: '网站列表是空的' });
         sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: randomId('launch').slice(0, 40), action: 'open_sites', conversation_id: 'sites', text: urls.join('\n').slice(0, 20000) }));
         log.info(`[sites] launch ${urls.length} sites via ${target.clientId}`);
@@ -300,7 +318,7 @@ export function createBridgeServer(opts = {}) {
           ok: true, status: p.status, url: p.url, error: p.error,
           report: p.result?.report ?? null,
           suggested_name: (p.title || '').split(/[|\-–·]/)[0].trim().slice(0, 40) || host,
-          exists: customSites.some((x) => x.host === host)
+          exists: customSites.some((x) => siteHosts(x).includes(host.replace(/^www\./, '')))
         });
       }
       if (path === '/api/sites' && req.method === 'POST') {
@@ -309,42 +327,78 @@ export function createBridgeServer(opts = {}) {
         if (!p || p.status !== 'done' || !p.result?.ok) return json(res, 400, { ok: false, error: '没有可添加的分析结果' });
         const host = new URL(p.url).hostname;
         const same = (a, b) => a.replace(/^www\./, '') === b.replace(/^www\./, '');
-        if (customSites.some((x) => same(x.host, host) && !x.config)) return json(res, 409, { ok: false, error: '这个网站已经在列表里了' });
+        if (customSites.some((x) => SEED_KEYS.includes(x.key) && siteHosts(x).some((h) => same(h, host)))) return json(res, 409, { ok: false, error: '这个网站已经在列表里了，可以直接编辑它的配置' });
         const name = String(b.name || '').trim().slice(0, 40) || host;
-        const site = { key: p.result.config.site, name, url: p.url, host, config: p.result.config, added_at: Date.now(), seeded: true };
+        const site = { key: p.result.config.site, name, url: p.url, host, hosts: [], enabled: true, config: p.result.config, added_at: Date.now(), updated_at: Date.now(), seeded: true };
         customSites = [...customSites.filter((x) => x.host !== host && x.key !== site.key), site];
         saveSites();
         probes.delete(String(b.probe_id));
         notifySitesChanged();
         log.info(`[sites] added ${site.key} ${host}`);
-        const { seeded, ...out } = site;
-        return json(res, 200, { ok: true, site: out });
+        return json(res, 200, { ok: true, site: siteOut(site) });
+      }
+      if (path === '/api/sites/defaults' && req.method === 'POST') {
+        const add = missingDefaults().map((x) => ({ ...x, updated_at: Date.now(), seeded: true }));
+        if (add.length) { customSites = [...add, ...customSites]; saveSites(); notifySitesChanged(); }
+        return json(res, 200, { ok: true, added: add.map((x) => x.key), sites: customSites.map(siteOut) });
+      }
+      const reset = /^\/api\/sites\/([a-z0-9_-]{1,32})\/reset$/.exec(path);
+      if (reset && req.method === 'POST') {
+        const site = customSites.find((x) => x.key === reset[1]);
+        if (!site) return json(res, 404, { ok: false, error: 'site not found' });
+        const seed = seedByKey(site.key);
+        if (!seed) return json(res, 400, { ok: false, error: '这个网站没有默认配置' });
+        Object.assign(site, { config: seed.config, hosts: seed.hosts, updated_at: Date.now() });
+        saveSites();
+        notifySitesChanged();
+        return json(res, 200, { ok: true, site: siteOut(site) });
       }
       const del = /^\/api\/sites\/([a-z0-9_-]{1,32})$/.exec(path);
       if (del && req.method === 'PATCH') {
         const site = customSites.find((x) => x.key === del[1]);
         if (!site) return json(res, 404, { ok: false, error: 'site not found' });
-        const b = await body();
+        const b = await body(MAX_SITE_CONFIG_BYTES + 8192);
         const patch = {};
         if (b.name != null) {
           const name = String(b.name).trim().slice(0, 40);
           if (!name) return json(res, 400, { ok: false, error: '名称不能为空' });
           patch.name = name;
         }
+        const others = customSites.filter((x) => x !== site);
+        const taken = (h) => others.some((x) => siteHosts(x).includes(String(h).replace(/^www\./, '')));
         if (b.url != null) {
           let u;
           try { u = new URL(String(b.url).trim()); } catch { return json(res, 400, { ok: false, error: '网址无效' }); }
           if (u.protocol !== 'https:') return json(res, 400, { ok: false, error: '只支持 https 网址' });
-          if (customSites.some((x) => x !== site && x.host === u.hostname)) return json(res, 409, { ok: false, error: '另一个网站已经用了这个域名' });
+          if (taken(u.hostname)) return json(res, 409, { ok: false, error: '另一个网站已经用了这个域名' });
           patch.url = u.toString();
           patch.host = u.hostname;
         }
-        const hostChanged = patch.host && patch.host !== site.host;
+        if (b.hosts != null) {
+          if (!Array.isArray(b.hosts) || b.hosts.length > 10) return json(res, 400, { ok: false, error: '域名列表无效（最多 10 个）' });
+          const hosts = [...new Set(b.hosts.map((h) => String(h).trim().toLowerCase()).filter(Boolean))];
+          if (hosts.some((h) => !/^(?=.{1,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(h))) return json(res, 400, { ok: false, error: '域名无效（只写域名，例如 chat.example.com）' });
+          if (hosts.some(taken)) return json(res, 409, { ok: false, error: '另一个网站已经用了这个域名' });
+          patch.hosts = hosts;
+        }
+        if (b.enabled != null) {
+          if (typeof b.enabled !== 'boolean') return json(res, 400, { ok: false, error: 'enabled 必须是 true / false' });
+          patch.enabled = b.enabled;
+        }
+        if (b.config !== undefined) {
+          const c = b.config;
+          if (!c || typeof c !== 'object' || Array.isArray(c)) return json(res, 400, { ok: false, error: 'DOM 配置必须是 JSON 对象' });
+          if (Buffer.byteLength(JSON.stringify(c)) > MAX_SITE_CONFIG_BYTES) return json(res, 413, { ok: false, error: 'DOM 配置太大' });
+          if (c.message != null && (typeof c.message !== 'object' || Array.isArray(c.message))) return json(res, 400, { ok: false, error: 'config.message 必须是对象' });
+          patch.config = { ...c, config_version: c.config_version || 1, site: site.key };
+        }
+        const behaviorChanged = ['host', 'hosts', 'enabled', 'config'].some((k) => k in patch &&
+          JSON.stringify(patch[k]) !== JSON.stringify(site[k]));
         Object.assign(site, patch);
+        if (behaviorChanged) site.updated_at = Date.now();
         saveSites();
-        if (hostChanged) notifySitesChanged();
-        const { seeded, ...out } = site;
-        return json(res, 200, { ok: true, site: out });
+        if (behaviorChanged) notifySitesChanged();
+        return json(res, 200, { ok: true, site: siteOut(site) });
       }
       if (del && req.method === 'DELETE') {
         const before = customSites.length;

@@ -189,8 +189,11 @@ export function openDatabase(dbPath = ':memory:') {
     WHERE conversation_id = ? ORDER BY msg_index, updated_seq`);
   const recentEventsStmt = db.prepare('SELECT * FROM events WHERE conversation_id = ? ORDER BY seq DESC LIMIT ?');
 
+  let sourceResolver = sourceFromUrl;
   return {
     raw: db,
+    /** 网址 → 来源标识（后端按网站列表匹配域名）；没有页面上报的 conversation.status 时用 */
+    setSourceResolver(fn) { sourceResolver = typeof fn === 'function' ? fn : sourceFromUrl; },
     persistEvent(clientId, ev, now = Date.now()) {
       return persist(clientId, ev, now);
     },
@@ -214,7 +217,7 @@ export function openDatabase(dbPath = ':memory:') {
         openTabs.set(t.conversation_id, (openTabs.get(t.conversation_id) || 0) + 1);
       }
       // 源站已删除的会话（最近一次 conversation.status 为 deleted）不再跟踪；之后若再上报 ok 会自动恢复
-      return listConversationsStmt.all(limit).map((r) => deriveConversation(r, openTabs.get(r.conversation_id) || 0))
+      return listConversationsStmt.all(limit).map((r) => deriveConversation(r, openTabs.get(r.conversation_id) || 0, sourceResolver))
         .filter((c) => c.page_status !== 'deleted')
         // 标签页会话（页面开着但还没进入具体会话）：页面关掉 / 进入真正的会话后就不再显示
         .filter((c) => !(c.pending && c.open_tabs === 0));
@@ -295,14 +298,11 @@ function stripText(ev) {
 
 const TAB_STALE_MS = 12 * 60 * 60 * 1000;
 
+/** 默认的来源解析（后端会用网站列表替换，见 setSourceResolver）：取主域名 */
 function sourceFromUrl(url) {
   try {
-    const host = new URL(url).hostname;
-    if (/(^|\.)chatgpt\.com$/.test(host) || /(^|\.)chat\.openai\.com$/.test(host)) return 'chatgpt';
-    if (/(^|\.)duck\.ai$/.test(host)) return 'duckai';
-    if (/(^|\.)hark\.com$/.test(host)) return 'hark';
-    const parts = host.split('.');
-    return (parts.length >= 2 ? parts[parts.length - 2] : host) || 'unknown';
+    const parts = new URL(url).hostname.split('.');
+    return (parts.length >= 2 ? parts[parts.length - 2] : parts[0]) || 'unknown';
   } catch { return 'unknown'; }
 }
 
@@ -311,7 +311,7 @@ function sourceFromUrl(url) {
  *   status 优先级：closed（没有标签页开着）> limit_reached > error > generating > idle
  *   页面关掉后 status_detail 仍保留最后一次的限额/报错提示
  */
-function deriveConversation(r, openTabs) {
+function deriveConversation(r, openTabs, resolveSource = sourceFromUrl) {
   let st = null;
   try { st = r.status_json ? JSON.parse(r.status_json) : null; } catch { st = null; }
   const generating = r.last_generation_event === 'generation.started';
@@ -324,7 +324,7 @@ function deriveConversation(r, openTabs) {
   return {
     conversation_id: r.conversation_id,
     pending: String(r.conversation_id).startsWith('tab-'),   // 标签页会话：开着网站但还没有具体会话
-    source: st?.source || sourceFromUrl(r.last_url),
+    source: st?.source || resolveSource(r.last_url),
     title: r.title || null,
     url: r.last_url,
     model: st?.model || null,

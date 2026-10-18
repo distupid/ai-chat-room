@@ -23,7 +23,7 @@
    */
   var DEFAULT_CONFIG = {
     config_version: 1,
-    source: 'builtin',
+    source: 'default:chatgpt',
     site: 'chatgpt',
     // 会话 ID：先按 url_pattern（第 1 个捕获组）从 URL 取；取不到再按 dom 从页面元素取；再取不到用 fallback_id
     conversation: {
@@ -108,8 +108,9 @@
   };
 
   /*
-   * 其他站点的内置适配（2026-10 按真实页面编写）。字段与 DomConfig 相同；
-   * 弹窗“分析当前页面”得到的配置会叠加在对应站点的内置适配之上。
+   * 其他站点的默认适配（2026-10 按真实页面编写）。字段与 DomConfig 相同。
+   * 只作为“默认种子”：后端第一次启动时写进网站列表，之后和看板添加的网站一样可编辑 / 停用 / 删除；
+   * 插件只在还没拿到网站列表（例如第一次离线启动）时才直接用这里的种子。
    */
   var SITE_PROFILES = {
     chatgpt: DEFAULT_CONFIG,
@@ -117,7 +118,7 @@
     // duck.ai：URL 里没有会话 ID，从助手消息元素的 id（<会话uuid>-assistant-message-<n>-<m>）取
     duckai: {
       config_version: 1,
-      source: 'builtin:duckai',
+      source: 'default:duckai',
       site: 'duckai',
       conversation: {
         url_pattern: null,
@@ -162,7 +163,7 @@
     // 文件卡片看 data-align（end=用户），助手正文是 Markdown（含 <p>）、卡片（data-artifact-card），其余为用户
     hark: {
       config_version: 1,
-      source: 'builtin:hark',
+      source: 'default:hark',
       site: 'hark',
       conversation: {
         url_pattern: '/projects/([A-Za-z0-9_-]{4,100})',
@@ -199,12 +200,57 @@
     }
   };
 
-  /** 按域名选择站点适配 */
-  function siteForHost(host) {
-    host = String(host || '').toLowerCase();
-    if (/(^|\.)duck\.ai$/.test(host)) return 'duckai';
-    if (/(^|\.)hark\.com$/.test(host)) return 'hark';
-    return 'chatgpt';
+  /*
+   * 默认网站种子（后端网站列表的初始内容；“恢复默认”也用它）。
+   * host：主域名；hosts：同一网站的其他域名（都按“本域名或其子域名”匹配，www. 忽略）。
+   */
+  var SEED_SITES = [
+    { key: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', host: 'chatgpt.com', hosts: ['chatgpt.com', 'chat.openai.com'], enabled: true, config: DEFAULT_CONFIG },
+    { key: 'duckai', name: 'Duck.ai', url: 'https://duck.ai/', host: 'duck.ai', hosts: ['duck.ai'], enabled: true, config: SITE_PROFILES.duckai },
+    { key: 'hark', name: 'Hark', url: 'https://www.hark.com/chat', host: 'www.hark.com', hosts: ['hark.com'], enabled: true, config: SITE_PROFILES.hark }
+  ];
+
+  function normHost(h) { return String(h || '').toLowerCase().replace(/\.$/, '').replace(/^www\./, ''); }
+
+  /** 网站的全部域名（去掉 www.、去重） */
+  function siteHosts(site) {
+    var out = [];
+    var list = [site && site.host].concat(site && Array.isArray(site.hosts) ? site.hosts : []);
+    for (var i = 0; i < list.length; i++) {
+      var h = normHost(list[i]);
+      if (h && /^[a-z0-9.-]+$/.test(h) && out.indexOf(h) < 0) out.push(h);
+    }
+    return out;
+  }
+
+  /**
+   * 按域名在网站列表里找网站（本域名或其子域名，匹配最长的那个）；list 省略 = 默认种子。
+   * 返回网站条目（含 key / config / enabled）或 null。
+   */
+  function findSite(host, list) {
+    host = normHost(host);
+    if (!host) return null;
+    var sites = Array.isArray(list) ? list : SEED_SITES;
+    var best = null, bestLen = -1;
+    for (var i = 0; i < sites.length; i++) {
+      var hs = siteHosts(sites[i]);
+      for (var j = 0; j < hs.length; j++) {
+        var h = hs[j];
+        if ((host === h || host.slice(-(h.length + 1)) === '.' + h) && h.length > bestLen) { best = sites[i]; bestLen = h.length; }
+      }
+    }
+    return best;
+  }
+
+  function seedByKey(key) {
+    for (var i = 0; i < SEED_SITES.length; i++) if (SEED_SITES[i].key === key) return SEED_SITES[i];
+    return null;
+  }
+
+  /** 按域名选择站点标识（list 省略 = 默认种子）；找不到返回 null */
+  function siteForHost(host, list) {
+    var s = findSite(host, list);
+    return s ? s.key : null;
   }
 
   // 兼容旧导出
@@ -499,13 +545,12 @@
     return extractText(body || el, c.textExclude);
   }
 
-  /** 来源：chatgpt.com / chat.openai.com → chatgpt；其他站点取主域名 */
-  function sourceFromUrl(href) {
+  /** 来源：网站列表（省略 = 默认种子）里匹配的网站标识；都不匹配时取主域名 */
+  function sourceFromUrl(href, list) {
     var host = '';
     try { host = new URL(href).hostname; } catch (_) { return 'unknown'; }
-    if (/(^|\.)chatgpt\.com$/.test(host) || /(^|\.)chat\.openai\.com$/.test(host)) return 'chatgpt';
-    if (/(^|\.)duck\.ai$/.test(host)) return 'duckai';
-    if (/(^|\.)hark\.com$/.test(host)) return 'hark';
+    var key = siteForHost(host, list);
+    if (key) return key;
     var parts = host.split('.');
     var name = (parts.length >= 2 ? parts[parts.length - 2] : host).toLowerCase().replace(/[^a-z0-9_-]/g, '');
     return name.slice(0, 32) || 'unknown';
@@ -596,9 +641,13 @@
     var streamPollMs = options.streamPollMs == null ? DEFAULT_STREAM_POLL_MS : options.streamPollMs;
     var tickMs = Math.max(10, Math.min(pollMs, streamPollMs));
     var idleTicks = 0;
-    var site = options.site || siteForHost(win.location && win.location.hostname);
-    var base = SITE_PROFILES[site] || DEFAULT_CONFIG;
+    // 站点配置：options.baseConfig（插件从网站列表里按域名选出的配置）→ 默认种子（按 options.site 或域名）→ 通用默认
+    // options.config 是叠加在上面的覆盖配置（弹窗“分析当前页面”的结果），可省略
+    var seed = options.site ? seedByKey(options.site) : findSite(win.location && win.location.hostname);
+    var base = options.baseConfig && typeof options.baseConfig === 'object' ? options.baseConfig : (seed ? seed.config : DEFAULT_CONFIG);
+    var site = options.site || (base && base !== DEFAULT_CONFIG && base.site) || (seed && seed.key) || sourceFromUrl(win.location && win.location.href);
     var cfg = resolveConfig(options.config, doc, base);
+    if (site && !str(options.config && options.config.site, 40)) cfg.site = site;
     function convId(href) { return conversationIdFor(href, doc, cfg); }
 
     // 每次内容脚本加载唯一；页面级事件用它区分“这一次”与“上一次页面加载”
@@ -927,8 +976,10 @@
     win.addEventListener('pageshow', onPageShow);
 
     /** 运行时切换 DOM 配置：重置消息状态并立即重新扫描（同一条消息的 message.added event_id 不变，后端会去重） */
-    function setConfig(next) {
+    function setConfig(next, nextBase) {
+      if (nextBase && typeof nextBase === 'object') base = nextBase;
       cfg = resolveConfig(next, doc, base);
+      if (site && !str(next && next.site, 40)) cfg.site = str(base && base.site, 40) || site;
       state.messages = Object.create(null);
       state.maxIndex = null;
       state.lastStatusCheckAt = 0;
@@ -962,6 +1013,9 @@
     conversationIdFor: conversationIdFor,
     extractText: extractText,
     siteForHost: siteForHost,
+    findSite: findSite,
+    siteHosts: siteHosts,
+    SEED_SITES: SEED_SITES,
     SITE_PROFILES: SITE_PROFILES,
     resolveConfig: resolveConfig,
     detectStatus: detectStatus,

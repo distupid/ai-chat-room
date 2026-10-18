@@ -10,11 +10,9 @@ const STATUS = {
   idle: { label: '空闲', order: 3 },
   closed: { label: '页面已关', order: 4 }
 };
-const SOURCES = {
-  chatgpt: { label: 'ChatGPT', short: 'G', regenerate: true },
-  duckai: { label: 'Duck.ai', short: 'D', regenerate: false },
-  hark: { label: 'Hark', short: 'H', regenerate: false }
-};
+// 来源（网站）信息：全部来自后端网站列表（GET /api/sites），没有内置网站；
+// regenerate = 该网站的 DOM 配置里有“重新生成”按钮（与 page-actions.js 的判断一致）
+const SOURCES = {};
 // “全部”和各状态都不含已归档；已归档单独一个筛选
 // 状态筛选（再点一次已选中的取消 = 全部，“全部”不含页面已关）；“收藏”由顶栏星标按钮切换
 const STATUS_FILTERS = [
@@ -141,15 +139,25 @@ async function api(path, opts = {}) {
   return data;
 }
 
+const escRe = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** 页面标题里的网站名（网站列表里的名称 / 标识）：标题去掉“ - 网站名”后缀；只剩网站名的标题不算标题 */
+function siteNamesRe() {
+  const names = [...new Set(Object.entries(SOURCES).flatMap(([k, v]) => [k, v.label]).filter(Boolean))].map(escRe);
+  return names.length ? names.join('|') : null;
+}
 function titleOf(c) {
   if (c.pending) return `新对话 · ${sourceInfo(c.source).label}`;
-  const t = (c.title || '').replace(/\s*[-|·]\s*(ChatGPT|Hark|Duck\.ai|DuckDuckGo)\s*$/i, '').trim();
-  if (t && !/^(ChatGPT|Hark|Duck\.ai|聊天)$/i.test(t) && !/^Duck\.ai 是由/.test(t)) return t;
+  const names = siteNamesRe();
+  let t = (c.title || '').trim();
+  if (names) t = t.replace(new RegExp(`\\s*[-|·]\\s*(${names})\\s*$`, 'i'), '').trim();
+  const bare = /^聊天$/.test(t) || (names && (new RegExp(`^(${names})$`, 'i').test(t) || new RegExp(`^(${names}) 是由`, 'i').test(t)));
+  if (t && !bare) return t;
   if (c.first_user_text) return c.first_user_text.split('\n')[0].slice(0, 120);
   return c.conversation_id;
 }
-const BUILTIN_SOURCES = ['chatgpt', 'duckai', 'hark'];
-const avatarClass = (s) => BUILTIN_SOURCES.includes(s) ? s : 'other';
+// 只影响头像配色：index.html 里有专门配色的来源，其余统一配色
+const COLORED_SOURCES = ['chatgpt', 'duckai', 'hark'];
+const avatarClass = (s) => COLORED_SOURCES.includes(s) ? s : 'other';
 const sourceInfo = (s) => SOURCES[s] || { label: s || '未知', short: (s || '?').slice(0, 1).toUpperCase(), regenerate: false };
 
 // ------------------------------------------------------------------ 主题
@@ -501,8 +509,8 @@ function connect() {
       state.canControl = m.scopes.includes('control');
       setConn('on', connLabel());
       ws.send(JSON.stringify(makeEnvelope(MessageType.SUBSCRIBE, { conversations: ['*'] })));
-      loadConversations();
-      loadSites();
+      // 先拿网站列表（来源名称 / 能力都来自它），再拉会话
+      loadSites().then(() => loadConversations());
     } else if (m.type === 'broadcast') {
       onBroadcast(m);
     } else if (m.type === 'command_result') {
@@ -768,7 +776,7 @@ function render() {
     ? { s: document.activeElement.selectionStart, e: document.activeElement.selectionEnd } : null;
   if (!state.conversations.length) {
     grid.replaceChildren(el('div', { class: 'empty' }, state.wsState === 'open'
-      ? '还没有会话。打开 ChatGPT、Duck.ai 或 Hark 的一个对话试试。'
+      ? '还没有会话。打开网站列表（右上角地球图标）里任一网站的一个对话试试。'
       : '点右上角的设置，填入 observer token 并连接。'));
   } else if (!list.length) {
     grid.replaceChildren(el('div', { class: 'empty' }, { favorite: '还没有收藏的会话', closed: '没有已关闭的页面' }[state.filter] || '没有符合条件的会话'));
@@ -791,10 +799,18 @@ async function loadSites() {
   try {
     const r = await api('/api/sites');
     state.sites = r.sites || [];
+    state.missingDefaults = r.missing_defaults || [];
     for (const x of state.sites) {
-      if (!SOURCES[x.key]) SOURCES[x.key] = { label: x.name, short: (x.name || x.key).slice(0, 1).toUpperCase(), regenerate: false };
+      SOURCES[x.key] = {
+        label: x.name || x.key,
+        short: (x.name || x.key).slice(0, 1).toUpperCase(),
+        regenerate: !!(x.config && x.config.actions && typeof x.config.actions.regenerate_button === 'string' && x.config.actions.regenerate_button.trim()),
+        enabled: x.enabled !== false
+      };
     }
     renderSitesMenu();
+    if (state.conversations.length) render();
+    if (state.selected) renderDetail();
   } catch { /* 旧后端没有 /api/sites */ }
 }
 
@@ -809,21 +825,38 @@ function toggleSitesMenu(open) {
 const EDIT_SVG = '<svg class="i s18" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>';
 const DEL_SVG = '<svg class="i s18" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>';
 
-/** 网站下拉：所有网站一视同仁，都可编辑名称 / 网址或删除 */
+const CFG_SVG = '<svg class="i s18" viewBox="0 0 24 24"><path d="M19.14 12.94a7.07 7.07 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54A.5.5 0 0 0 13.9 2.4h-3.84a.5.5 0 0 0-.49.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.67 8.88a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.61.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54c.05.24.25.42.49.42h3.84c.24 0 .44-.18.49-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.6a3.6 3.6 0 1 1 0-7.2 3.6 3.6 0 0 1 0 7.2z"/></svg>';
+
+/** 网站下拉：所有网站一视同仁（包括默认的 ChatGPT / Duck.ai / Hark），都可编辑名称 / 网址、配置（DOM、启用、域名）或删除 */
 function renderSitesMenu() {
   const items = state.sites.map((x) => state.editingSite === x.key ? siteEditRow(x) : el('button', {
-    class: 'mi', role: 'menuitem', 'data-site': x.key, title: x.url,
+    class: `mi ${x.enabled === false ? 'off' : ''}`, role: 'menuitem', 'data-site': x.key, title: x.url,
     onclick: () => { toggleSitesMenu(false); window.open(x.url, '_blank', 'noopener'); }
   },
     el('span', { class: `avatar ${avatarClass(x.key)}` }, (x.name || x.key).slice(0, 1).toUpperCase()),
     el('span', { class: 'nm' }, x.name, el('small', {}, x.url)),
+    x.enabled === false ? el('span', { class: 'off-tag' }, '已停用') : null,
     el('span', { class: 'icon-btn ed', title: '编辑名称和网址', role: 'button', 'data-act': 'edit', html: EDIT_SVG,
       onclick: (e) => { e.stopPropagation(); state.editingSite = x.key; renderSitesMenu(); $('sitesMenu').querySelector('.editing input')?.focus(); } }),
+    el('span', { class: 'icon-btn cfg', title: '网站配置：启用 / 停用、域名、DOM 选择器、会话 ID 规则', role: 'button', 'data-act': 'config', html: CFG_SVG,
+      onclick: (e) => { e.stopPropagation(); toggleSitesMenu(false); openSiteConfig(x); } }),
     el('span', { class: 'icon-btn del', title: '删除这个网站', role: 'button', 'data-act': 'delete', html: DEL_SVG,
       onclick: (e) => { e.stopPropagation(); removeSite(x); } })));
+  if (state.missingDefaults?.length) {
+    items.push(el('button', { class: 'mi restore', role: 'menuitem', 'data-site': 'restore', onclick: (e) => { e.stopPropagation(); restoreDefaultSites(); } },
+      el('span', { class: 'plus' }, '↺'), el('span', { class: 'nm' }, '恢复默认网站', el('small', {}, `加回删掉的默认网站（${state.missingDefaults.length} 个）`))));
+  }
   items.push(el('button', { class: 'mi add', role: 'menuitem', 'data-site': '+', onclick: () => { toggleSitesMenu(false); openAddSite(); } },
     el('span', { class: 'plus' }, '+'), el('span', { class: 'nm' }, '添加网站', el('small', {}, '打开网址，获取 DOM 并分析'))));
   $('sitesMenu').replaceChildren(...items);
+}
+
+async function restoreDefaultSites() {
+  try {
+    const r = await api('/api/sites/defaults', { method: 'POST', body: '{}' });
+    snackbar(r.added?.length ? `已恢复 ${r.added.length} 个默认网站` : '默认网站都在列表里', 'ok');
+    await loadSites();
+  } catch (e) { snackbar(`恢复失败：${e.message}`, 'err'); }
 }
 
 function siteEditRow(x) {
@@ -845,6 +878,91 @@ function siteEditRow(x) {
     el('div', { class: 'row' },
       el('button', { class: 'btn text s', type: 'button', onclick: cancel }, '取消'),
       el('button', { class: 'btn filled s', type: 'button', 'data-act': 'save', onclick: saveIt }, '保存')));
+}
+
+// ------------------------------------------------------------------ 网站配置弹窗
+
+// 常用配置项（和下面的完整 JSON 双向同步）：[路径, 说明]
+const CFG_FIELDS = [
+  ['message.selector', '消息节点选择器'],
+  ['text.user', '用户正文选择器（留空 = 整个消息节点）'],
+  ['text.assistant', '回答正文选择器（留空 = 整个消息节点）'],
+  ['text.exclude', '正文中排除的部分（按钮、工具栏等）'],
+  ['conversation.url_pattern', '会话 ID：网址正则（第 1 个捕获组）'],
+  ['conversation.fallback_id', '会话 ID：网址取不到时的固定 ID'],
+  ['conversation.prefix', '会话 ID 前缀'],
+  ['generating.selector', '“正在生成”标志选择器'],
+  ['actions.composer', '输入框选择器'],
+  ['actions.send_button', '发送按钮选择器'],
+  ['actions.regenerate_button', '重新生成按钮（留空 = 不支持重新回答）']
+];
+const getPath = (o, p) => p.split('.').reduce((v, k) => (v && typeof v === 'object' ? v[k] : undefined), o);
+function setPath(o, p, v) {
+  const ks = p.split('.');
+  let cur = o;
+  for (const k of ks.slice(0, -1)) { if (!cur[k] || typeof cur[k] !== 'object') cur[k] = {}; cur = cur[k]; }
+  cur[ks.at(-1)] = v;
+}
+
+function openSiteConfig(x) {
+  state.cfgSite = x.key;
+  $('siteCfgTitle').textContent = `网站配置 · ${x.name}`;
+  $('siteCfgEnabled').setAttribute('aria-checked', String(x.enabled !== false));
+  $('siteCfgHosts').value = (x.hosts || []).join(', ');
+  $('siteCfgJson').value = JSON.stringify(x.config || {}, null, 2);
+  $('siteCfgErr').textContent = '';
+  $('siteCfgReset').hidden = !x.has_default;
+  const cfg = x.config || {};
+  $('siteCfgFields').replaceChildren(...CFG_FIELDS.map(([path, label]) => {
+    const v = getPath(cfg, path);
+    const input = el('input', { class: 'input', 'data-path': path, spellcheck: 'false' });
+    input.value = v == null ? '' : String(v);
+    input.addEventListener('input', () => {
+      let c;
+      try { c = JSON.parse($('siteCfgJson').value || '{}'); } catch { $('siteCfgErr').textContent = '完整配置不是有效的 JSON，先修正它'; return; }
+      // 会话规则里空字符串 = 不用（null）
+      setPath(c, path, input.value === '' && path.startsWith('conversation.') && path !== 'conversation.prefix' ? null : input.value);
+      $('siteCfgJson').value = JSON.stringify(c, null, 2);
+      $('siteCfgErr').textContent = '';
+    });
+    return el('label', {}, el('span', { class: 'lbl' }, label), input);
+  }));
+  $('siteCfgScrim').classList.add('open');
+}
+function syncCfgFields() {
+  let c;
+  try { c = JSON.parse($('siteCfgJson').value || '{}'); } catch { $('siteCfgErr').textContent = 'JSON 格式有误'; return; }
+  $('siteCfgErr').textContent = '';
+  for (const input of $('siteCfgFields').querySelectorAll('input[data-path]')) {
+    const v = getPath(c, input.dataset.path);
+    input.value = v == null ? '' : String(v);
+  }
+}
+function closeSiteConfig() { $('siteCfgScrim').classList.remove('open'); state.cfgSite = null; }
+async function saveSiteConfig() {
+  const key = state.cfgSite;
+  if (!key) return;
+  let config;
+  try { config = JSON.parse($('siteCfgJson').value || '{}'); } catch (e) { $('siteCfgErr').textContent = `JSON 格式有误：${e.message}`; return; }
+  if (!config || typeof config !== 'object' || Array.isArray(config)) { $('siteCfgErr').textContent = 'DOM 配置必须是 JSON 对象'; return; }
+  const hosts = $('siteCfgHosts').value.split(/[,，\s]+/).map((h) => h.trim()).filter(Boolean);
+  const enabled = $('siteCfgEnabled').getAttribute('aria-checked') === 'true';
+  try {
+    await api(`/api/sites/${encodeURIComponent(key)}`, { method: 'PATCH', body: JSON.stringify({ enabled, hosts, config }) });
+    closeSiteConfig();
+    snackbar('网站配置已保存，插件会立即同步（已开的页面按新配置观察）', 'ok');
+    await loadSites();
+  } catch (e) { $('siteCfgErr').textContent = `保存失败：${e.message}`; }
+}
+async function resetSiteConfig() {
+  const key = state.cfgSite;
+  if (!key || !window.confirm('把这个网站的 DOM 配置和域名恢复为默认？')) return;
+  try {
+    const r = await api(`/api/sites/${encodeURIComponent(key)}/reset`, { method: 'POST', body: '{}' });
+    snackbar('已恢复默认配置', 'ok');
+    await loadSites();
+    openSiteConfig(r.site);
+  } catch (e) { $('siteCfgErr').textContent = `恢复失败：${e.message}`; }
 }
 
 async function removeSite(x) {
@@ -1281,6 +1399,12 @@ $('siteScrim').addEventListener('click', (e) => { if (e.target === $('siteScrim'
 $('siteProbe').onclick = startProbe;
 $('siteUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); startProbe(); } });
 $('siteConfirm').onclick = confirmAddSite;
+$('siteCfgCancel').onclick = closeSiteConfig;
+$('siteCfgSave').onclick = saveSiteConfig;
+$('siteCfgReset').onclick = resetSiteConfig;
+$('siteCfgScrim').addEventListener('click', (e) => { if (e.target === $('siteCfgScrim')) closeSiteConfig(); });
+$('siteCfgJson').addEventListener('change', syncCfgFields);
+$('siteCfgEnabled').onclick = () => $('siteCfgEnabled').setAttribute('aria-checked', String($('siteCfgEnabled').getAttribute('aria-checked') !== 'true'));
 $('detailClose').onclick = closeDetail;
 $('detailScrim').addEventListener('click', (e) => { if (e.target === $('detailScrim')) closeDetail(); });
 $('detailJump').onclick = () => { const c = convById(state.selected); if (c) jumpTo(c); };
@@ -1324,6 +1448,7 @@ document.addEventListener('pointerdown', unlockAudio, { once: true });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if ($('alertScrim').classList.contains('open')) closePopup();
+  else if ($('siteCfgScrim').classList.contains('open')) closeSiteConfig();
   else if ($('settingsScrim').classList.contains('open')) closeSettings();
   else if (state.selected) closeDetail();
 });

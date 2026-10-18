@@ -107,13 +107,13 @@ const ACTIONS_SRC = readFileSync(join(ROOT, 'src/frontend/lib/page-actions.js'),
  * 在 jsdom 中打开一个模拟 ChatGPT 的页面，并注入真实的 dom-observer.js + content.js。
  * chrome.runtime.sendMessage 直接接到 background-core 的 handleRuntimeMessage。
  */
-export function openChatGPTPage({ url, html, background, tabId, domConfig }) {
+export function openChatGPTPage({ url, html, background, tabId, domConfig, storage }) {
   const dom = new JSDOM(html, { url, runScripts: 'outside-only', pretendToBeVisual: true });
   const win = dom.window;
   const sent = [];
   const msgListeners = [];
   const changeListeners = [];
-  const local = new Map(domConfig ? [['domConfig', domConfig]] : []);
+  const local = new Map([...(domConfig ? [['domConfig', domConfig]] : []), ...Object.entries(storage || {})]);
   win.chrome = {
     runtime: {
       id: 'test-extension-id',
@@ -160,4 +160,54 @@ export function chatHtml(messages = [], { generating = false } = {}) {
   ).join('');
   return `<!doctype html><html><head><title>ChatGPT</title></head><body><main id="thread">${body}</main>
     <form><button data-testid="${generating ? 'stop-button' : 'send-button'}">x</button></form></body></html>`;
+}
+
+/**
+ * 在 jsdom 中加载看板（index.html + app.js），连接到测试后端（observer token）。
+ * 返回 { win, d, copied, opened, errors, close }；close() 关闭 WebSocket 和窗口。
+ */
+export async function openDashboard(server, { token = TOKENS.observer } = {}) {
+  const proto = await import('../contracts/protocol.js');
+  const origin = `http://127.0.0.1:${server.port}`;
+  const html = readFileSync(join(ROOT, 'src/backend/dashboard/index.html'), 'utf8').replace(/<script type="module"[^>]*><\/script>/, '');
+  const dom = new JSDOM(html, { url: `${origin}/dashboard`, runScripts: 'outside-only', pretendToBeVisual: true });
+  const win = dom.window;
+  const copied = [];
+  const opened = [];
+  const sockets = [];
+  const errors = [];
+  win.__proto = proto;
+  win.fetch = (path, opts = {}) => fetch(new URL(path, origin), { ...opts, headers: { ...(opts.headers || {}), origin } });
+  win.WebSocket = class {
+    constructor(url) {
+      const ws = new WebSocket(url, { headers: { Origin: origin } });
+      sockets.push(ws);
+      ws.on('open', () => this.onopen?.());
+      ws.on('message', (d) => this.onmessage?.({ data: d.toString() }));
+      ws.on('close', (code, reason) => this.onclose?.({ code, reason: reason.toString() }));
+      this.ws = ws;
+    }
+    get readyState() { return this.ws.readyState; }
+    send(d) { this.ws.send(d); }
+    close() { this.ws.close(); }
+  };
+  win.AudioContext = class {
+    constructor() { this.currentTime = 0; this.state = 'running'; this.destination = {}; }
+    createOscillator() { return { frequency: {}, type: '', connect: (g) => g, start() {}, stop() {} }; }
+    createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: (x) => x }; }
+  };
+  win.CSS = { escape: (s) => String(s).replace(/"/g, '\\"') };
+  Object.defineProperty(win.navigator, 'clipboard', { value: { writeText: async (t) => { copied.push(t); } } });
+  win.open = (url) => { opened.push(url); return null; };
+  win.confirm = () => true;
+  win.__probePollMs = 30;
+  win.addEventListener('error', (e) => errors.push(e.error || e.message));
+  const appSrc = readFileSync(join(ROOT, 'src/backend/dashboard/app.js'), 'utf8')
+    .replace(/^import \{([^}]+)\} from '\.\/protocol\.js';/m, 'const {$1} = window.__proto;');
+  win.eval(`(async () => { ${appSrc} })().catch((e) => { window.__appError = e; });`);
+  const d = win.document;
+  d.getElementById('token').value = token;
+  d.getElementById('connect').click();
+  await waitFor(() => /^已连接/.test(d.getElementById('connText').textContent), { label: 'dashboard connected' });
+  return { win, d, copied, opened, errors, close: () => { for (const s of sockets) s.close(); win.close(); } };
 }

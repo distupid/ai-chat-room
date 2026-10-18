@@ -252,7 +252,7 @@
     .mi .avatar { width: 28px; height: 28px; font-size: 12px; }
     .mi .nm { flex: 1; min-width: 0; display: flex; flex-direction: column; }
     .mi .nm small { color: var(--on-surface-variant); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .mi .del, .mi .ed { width: 32px; height: 32px; }
+    .mi .del, .mi .ed, .mi .cfg { width: 32px; height: 32px; }
     .mi.add { border-top: 1px solid var(--outline-variant); margin-top: 4px; color: var(--primary); }
     .mi.add .plus { width: 28px; height: 28px; border-radius: 14px; border: 1px dashed var(--primary); display: inline-flex; align-items: center; justify-content: center; font-size: 18px; }
     .probe-st { font-size: 13px; color: var(--on-surface-variant); margin: 12px 0; }
@@ -273,6 +273,13 @@
     .menu .mi.editing { flex-wrap: wrap; cursor: default; gap: 6px; height: auto; padding: 8px 12px; }
     .menu .mi.editing .input { height: 32px; flex: 1 1 100%; padding: 0 8px; }
     .menu .mi.editing .row { display: flex; gap: 6px; justify-content: flex-end; flex: 1 1 100%; }
+    .mi.off .nm, .mi.off .avatar { opacity: .5; }
+    .mi .off-tag { font-size: 11px; color: var(--on-surface-variant); border: 1px solid var(--outline-variant); border-radius: 6px; padding: 0 6px; }
+    .mi.restore { color: var(--primary); }
+    .cfg-fields { display: grid; grid-template-columns: 1fr; gap: 8px; margin: 12px 0; }
+    .cfg-fields .input { height: 36px; font: 12.5px ui-monospace, Consolas, monospace; }
+    .cfg-json { font: 12px/1.5 ui-monospace, Consolas, monospace; min-height: 200px; white-space: pre; }
+    .dialog .df .grow { flex: 1; }
 </style>
 </head>
 <body>
@@ -363,6 +370,31 @@
         <button id="siteCancel" class="btn text">取消</button>
         <button id="siteProbe" class="btn tonal">获取 DOM</button>
         <button id="siteConfirm" class="btn filled" disabled>确认添加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 网站配置：启用 / 停用、域名、DOM 配置（常用项 + 完整 JSON）、恢复默认 -->
+  <div id="siteCfgScrim" class="scrim" role="dialog" aria-modal="true" aria-labelledby="siteCfgTitle">
+    <div class="dialog narrow">
+      <div class="dh"><h2 id="siteCfgTitle">网站配置</h2></div>
+      <div class="db">
+        <div class="switch-row">
+          <div><div class="t">启用</div><div class="d">停用后插件不再观察这个网站（已开的页面刷新后生效）</div></div>
+          <button id="siteCfgEnabled" class="switch" role="switch" aria-checked="true" type="button"></button>
+        </div>
+        <label><span class="lbl">其他域名（逗号分隔；本域名及子域名都会匹配）</span>
+          <input id="siteCfgHosts" class="input" placeholder="例如 chat.example.com, example.com" /></label>
+        <div id="siteCfgFields" class="cfg-fields"></div>
+        <label><span class="lbl">完整 DOM 配置（JSON）</span>
+          <textarea id="siteCfgJson" class="field cfg-json" spellcheck="false" rows="12"></textarea></label>
+        <div id="siteCfgErr" class="probe-st err"></div>
+      </div>
+      <div class="df">
+        <button id="siteCfgReset" class="btn text" type="button">恢复默认</button>
+        <span class="grow"></span>
+        <button id="siteCfgCancel" class="btn text" type="button">取消</button>
+        <button id="siteCfgSave" class="btn filled" type="button">保存</button>
       </div>
     </div>
   </div>

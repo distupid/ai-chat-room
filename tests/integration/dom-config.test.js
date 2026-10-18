@@ -117,7 +117,7 @@ test('HTTP 接口：认证、权限、Origin、保存、读取、清除、重启
   await server.stop();
 });
 
-test('端到端：内置配置识别不了的页面 → 抓取 DOM → 后端分析 → 写入 storage → 观察器立即按新配置监听', async () => {
+test('端到端：默认配置识别不了的页面 → 抓取 DOM → 后端分析 → 写入 storage → 观察器立即按新配置监听', async () => {
   const server = await startServer({});
   const serverUrl = `ws://127.0.0.1:${server.port}`;
   const { bg, results } = offlineBackground();
@@ -125,7 +125,7 @@ test('端到端：内置配置识别不了的页面 → 抓取 DOM → 后端分
   const page = openChatGPTPage({ url: CONV_URL, tabId: 7, background: bg, html });
   await waitFor(() => results.some((x) => x.m.event.event_type === 'page.opened'), { label: 'opened' });
   await sleep(300);
-  assert.equal(results.filter((x) => x.m.event.event_type === 'message.added').length, 0, '内置配置识别不了这种结构');
+  assert.equal(results.filter((x) => x.m.event.event_type === 'message.added').length, 0, '默认配置识别不了这种结构');
 
   // 弹窗按钮的流程（后台的 analyzeActiveTab 做的就是这几步）
   const captured = await page.sendToContent({ kind: 'capture_dom' });
@@ -153,7 +153,7 @@ test('端到端：内置配置识别不了的页面 → 抓取 DOM → 后端分
 
   // 恢复默认配置
   await page.storage.remove('domConfig');
-  assert.equal((await page.sendToContent({ kind: 'get_observer_config' })).config.source, 'builtin');
+  assert.equal((await page.sendToContent({ kind: 'get_observer_config' })).config.source, 'default:chatgpt', '回到网站列表里的配置（这里还没同步列表，用默认种子）');
   assert.ok(results.every((x) => x.r.ok));
   page.close();
   await server.stop();

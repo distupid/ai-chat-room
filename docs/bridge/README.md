@@ -126,7 +126,7 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 
 分析顺序：已知结构（旧版 `data-message-author-role`、新版 `data-chatgpt-search-unit-key`）→ 通用发现（找取值以 `user`/`assistant` 结尾的属性）→ 消息 ID（各消息取值互不相同的 UUID 属性）→ 正文选择器（避开按钮文字）→ 生成状态（内置候选 + 抓取时页面上的停止按钮，外加“文本活动”检测）。
 
-配置只包含选择器、属性名和正则字符串，没有可执行代码；观察器会校验每个字段，无效项回退到内置默认值。重新分析会覆盖旧配置；要清除可调用 `DELETE /api/dom-config`。
+配置只包含选择器、属性名和正则字符串，没有可执行代码；观察器会校验每个字段，无效项回退到默认值。重新分析会覆盖旧配置；要清除可调用 `DELETE /api/dom-config`。
 
 | 接口 | 说明 |
 |---|---|
@@ -136,15 +136,29 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 
 都需要带 `publish` 权限的 token（即 extension token），并拒绝普通网页 Origin。
 
-## 支持的站点
+## 网站列表（全部可配置）
 
-| 站点 | 会话 ID | 说明 |
+没有“内置”网站：所有网站（包括默认的 ChatGPT / Duck.ai / Hark）都是后端网站列表（`src/backend/data/sites.json`）里的普通条目，在看板顶栏的网站下拉里一样可以**编辑名称 / 网址**、打开**网站配置**（启用 / 停用、其他域名、DOM 选择器、会话 ID 规则、页面操作选择器，常用项 + 完整 JSON）、**删除**。
+
+| 默认网站 | 会话 ID | 说明 |
 |---|---|---|
 | chatgpt.com / chat.openai.com | URL `/c/<id>` | 快速回复、重新回答都支持 |
 | duck.ai | 助手消息元素 id 中的 UUID，前缀 `duck-` | URL 不带会话 ID；新聊天在第一条回答出现后才有 ID。支持快速回复，不支持重新回答 |
 | hark.com | `/chat` → `hark-main`；`/projects/<id>` → `hark-<id>` | 支持快速回复，不支持重新回答 |
 
-各站点的选择器都是按 2026-10 的真实页面写的内置适配（`src/frontend/lib/dom-observer.js` 的 `SITE_PROFILES`）。页面改版后，在该站点点插件弹窗的“分析当前页面 DOM 并应用”：配置按站点分别保存（`chrome.storage.local.domConfigs[site]`），叠加在内置适配之上。duck.ai / hark.com 的分析会用内置适配在上传的页面上试跑并返回识别报告。
+- **默认种子**：上面三个网站的配置（按 2026-10 的真实页面编写）在 `src/frontend/lib/dom-observer.js` 的 `SEED_SITES`，前后端同一份（后端 `src/backend/src/site-seeds.js` 读取）。后端第一次启动时写进网站列表；旧版 `sites.json` 里没有配置的默认网站会补上种子配置和域名。之后种子只用于“恢复默认”和插件的离线兜底。
+- **恢复默认**：网站配置弹窗里的“恢复默认”把该网站的 DOM 配置和域名恢复为种子（`POST /api/sites/:key/reset`）；删掉的默认网站可以从网站下拉的“恢复默认网站”加回（`POST /api/sites/defaults`，`GET /api/sites` 的 `missing_defaults` 列出缺少的）。
+- **插件怎么用这份列表**：后端在列表变化时给在线插件发 `sync_sites`；插件拉 `GET /api/sites`，存进 `chrome.storage.local.siteList`，并为每个**启用**的网站动态注册内容脚本（`chrome.scripting.registerContentScripts`，匹配本域名、子域名和其他域名；manifest 不再写死内容脚本）。内容脚本按当前域名在 `siteList` 里找网站（最长域名匹配，`www.` 忽略）并用它的配置；网站停用 / 被删除时不观察。还没同步过列表（例如第一次离线启动）时，插件和内容脚本都用默认种子。
+- **配置变化立即生效**：内容脚本监听 `siteList` 变化并 `setConfig()`；停用的网站立即停止观察，重新启用后开始观察（已开着但没注入过内容脚本的页面需要刷新）。
+- **弹窗“分析当前页面”**：结果作为本地覆盖配置保存在 `chrome.storage.local.domConfigs[site]`，叠加在网站列表的配置之上；之后在看板上改了该网站的配置（`updated_at` 变化），同步时清掉本地覆盖，以看板为准。duck.ai / hark.com 的分析会用默认种子在上传的页面上试跑并返回识别报告。
+
+| 接口（网站） | 说明 |
+|---|---|
+| `GET /api/sites` | 网站列表：`key, name, url, host, hosts[], enabled, config, has_default, updated_at` + `missing_defaults`（observer 或 extension token） |
+| `PATCH /api/sites/:key` | `{name?, url?, hosts?, enabled?, config?}`（control）；`config` 必须是 JSON 对象（≤ 128KB），域名不能与其他网站重复 |
+| `POST /api/sites/:key/reset` | 默认网站恢复默认配置（control） |
+| `POST /api/sites/defaults` | 加回删掉的默认网站（control） |
+| `DELETE /api/sites/:key` | 删除（control），任何网站都能删 |
 
 ## 会话管理看板
 
@@ -154,7 +168,7 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 - 按状态筛选：置顶 / 回答中 / 出错 / 空闲 / 页面已关（页面已关的会话只在这里显示，点击会重新打开页面并跳转）；多个来源时还可以按来源筛选；顶栏星标查看收藏会话
 - **点卡片**：有标签页开着这个会话就切换过去，否则新开页面
 - 卡片按钮：置顶、关闭页面（插件关掉开着该会话的标签页）、回复（向下弹出快速回复栏，Enter 发送、Shift+Enter 换行，发送后自动收起；点击常见回答直接发送）
-- 顶栏：已连接 · N 个页面、搜索、网站（全部可编辑 / 删除，无“内置”）、收藏、设置、一键启动（插件在后台打开所有网站）
+- 顶栏：已连接 · N 个页面、搜索、网站（全部可编辑 / 配置 / 停用 / 删除，无“内置”，见“网站列表”）、收藏、设置、一键启动（插件在后台打开所有启用的网站）
 - **详情**弹窗：完整对话，实时流式更新，代码块和行内代码有格式；右上角可复制最后一条回答、跳转到页面
 - **设置**：连接（token、连接 / 断开）、外观、系统通知（已到限额 / 回答完成 / 出错，可设为只在看板不在前台时通知，含测试通知）、后台状态（运行时间、在线客户端、事件和指令计数）
 
@@ -163,7 +177,7 @@ ChatGPT 改版后选择器会失效。插件弹窗里点 **「分析当前页面
 | 字段 | 含义 |
 |---|---|
 | `conversation_id` | URL 中的会话 ID |
-| `source` | 来源，chatgpt.com / chat.openai.com → `chatgpt` |
+| `source` | 来源：页面上报的网站标识；没有时按网站列表的域名匹配（chatgpt.com / chat.openai.com → `chatgpt`），都不匹配取主域名 |
 | `title` / `url` | 页面标题、地址 |
 | `model` | 当前模型（页面上能找到模型切换按钮时） |
 | `status` | `generating` 回答中 / `limit_reached` 已到限额 / `error` 出错 / `idle` 空闲 / `closed` 页面已关 |

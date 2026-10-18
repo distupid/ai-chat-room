@@ -1,20 +1,24 @@
 // MV3 Service Worker 入口：把 chrome.* API 适配到 background-core
 import { createBackground, DEFAULT_SETTINGS } from './lib/background-core.js';
 import { randomId } from './shared/protocol.js';
+// 观察器脚本（经典脚本，挂到 globalThis.ChatGPTBridgeObserver）：用它的默认种子和按域名找网站的规则，与内容脚本一致
+import './lib/dom-observer.js';
 import { analyzeDomOnServer, clearDomConfigOnServer, getSitesFromServer, submitProbeDom } from './lib/dom-config-client.js';
 
-function siteOf(url) {
+const Observer = globalThis.ChatGPTBridgeObserver;
+
+/** 按域名在网站列表（没有同步过时用默认种子）里找网站标识 */
+async function siteOf(url) {
   const host = new URL(url).hostname;
-  if (/(^|\.)duck\.ai$/.test(host)) return 'duckai';
-  if (/(^|\.)hark\.com$/.test(host)) return 'hark';
-  return 'chatgpt';
+  const { siteList } = await chrome.storage.local.get(['siteList']);
+  return Observer.siteForHost(host, Array.isArray(siteList) ? siteList : null) || Observer.sourceFromUrl(url);
 }
 
 /** 弹窗按钮：抓取当前标签页 DOM → 后端分析 → 保存配置（内容脚本监听 storage 变化后立即生效） */
 async function analyzeActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab) return { ok: false, error: '没有找到当前标签页' };
-  const site = siteOf(tab.url);
+  const site = await siteOf(tab.url);
   let captured;
   try { captured = await chrome.tabs.sendMessage(tab.id, { kind: 'capture_dom' }); }
   catch { return { ok: false, error: '页面上没有运行内容脚本：重新加载插件后，请按 F5 刷新当前页面' }; }
@@ -60,9 +64,7 @@ function waitTabComplete(tabId, timeoutMs) {
     const done = () => { clearTimeout(t); chrome.tabs.onUpdated.removeListener(on); resolve(); };
     const on = (id, info) => { if (id === tabId && info.status === 'complete') done(); };
     const t = setTimeout(done, timeoutMs);
-    chrome.tabs.onActivated.addListener(() => { ready.then((bg) => syncTabsNow(bg)); });
-chrome.windows?.onFocusChanged?.addListener(() => { ready.then((bg) => syncTabsNow(bg)); });
-chrome.tabs.onUpdated.addListener(on);
+    chrome.tabs.onUpdated.addListener(on);
     chrome.tabs.get(tabId).then((tab) => { if (tab.status === 'complete') done(); }, done);
   });
 }
@@ -88,34 +90,58 @@ async function probeSite(command) {
   }
 }
 
-/** 拉取网站列表：保存各站点的 DomConfig，并为添加的网站注册内容脚本（已打开的页面刷新后生效） */
+/** 网站 → 内容脚本注册项（本域名及子域名；停用 / 没有配置的不注册） */
+function scriptsFor(list) {
+  return (list || []).filter((x) => x && x.key && x.enabled !== false && x.config).map((x) => ({
+    id: `site-${x.key}`,
+    matches: Observer.siteHosts(x).flatMap((h) => [`https://${h}/*`, `https://*.${h}/*`]),
+    js: CONTENT_JS, runAt: 'document_idle', persistAcrossSessions: true
+  })).filter((x) => x.matches.length);
+}
+
+/** 按网站列表注册内容脚本（与已注册的一致时不动）；已打开的页面刷新后生效 */
+async function registerSites(list) {
+  const want = scriptsFor(list);
+  const registered = await chrome.scripting.getRegisteredContentScripts();
+  const mine = registered.filter((x) => x.id.startsWith('site-'));
+  const sig = (arr) => JSON.stringify(arr.map((x) => [x.id, [...(x.matches || [])].sort()]).sort());
+  if (sig(mine) === sig(want)) return want.length;
+  if (mine.length) await chrome.scripting.unregisterContentScripts({ ids: mine.map((x) => x.id) });
+  if (want.length) await chrome.scripting.registerContentScripts(want);
+  return want.length;
+}
+
+/** 启动时：还没同步过网站列表（例如第一次离线启动）就按默认种子注册，保证默认网站能被观察 */
+async function ensureRegistered() {
+  const { siteList } = await chrome.storage.local.get(['siteList']);
+  try { await registerSites(Array.isArray(siteList) ? siteList : Observer.SEED_SITES); }
+  catch (e) { console.warn('[bridge] register content scripts failed', e); }
+}
+
+/**
+ * 拉取网站列表（所有网站，含默认种子网站）：存进 siteList（内容脚本按域名选配置），并按列表注册内容脚本。
+ * 某个网站的配置在看板上改过（updated_at 变了）时，清掉弹窗“分析当前页面”留下的本地覆盖配置，让看板的修改生效。
+ */
 async function syncSites() {
   const { serverUrl, token } = await loadSettings();
   if (!token) return { ok: false, code: 'no_token' };
   let r;
   try { r = await getSitesFromServer({ serverUrl, token }); } catch (e) { return { ok: false, code: 'unreachable', detail: String(e?.message || e) }; }
   if (!r.ok) return { ok: false, code: 'sites_failed', detail: r.error };
-  const custom = (r.sites || []).filter((x) => x.host && x.key && x.config);
-  const { domConfigs = {} } = await chrome.storage.local.get(['domConfigs']);
-  const { customSiteKeys: oldKeys = [] } = await chrome.storage.local.get(['customSiteKeys']);
-  const next = { ...domConfigs };
-  for (const k of oldKeys) delete next[k];
-  const hosts = {};
-  for (const x of custom) { next[x.key] = { ...x.config, site: x.key }; hosts[x.host] = x.key; }
-  await chrome.storage.local.set({ domConfigs: next, customSiteHosts: hosts, customSiteKeys: custom.map((x) => x.key) });
-  try {
-    const registered = await chrome.scripting.getRegisteredContentScripts();
-    const ids = registered.map((x) => x.id).filter((id) => id.startsWith('site-'));
-    if (ids.length) await chrome.scripting.unregisterContentScripts({ ids });
-    if (custom.length) {
-      await chrome.scripting.registerContentScripts(custom.map((x) => ({
-        id: `site-${x.key}`, matches: [`https://${x.host}/*`], js: CONTENT_JS, runAt: 'document_idle', persistAcrossSessions: true
-      })));
-    }
-  } catch (e) {
-    return { ok: false, code: 'register_failed', detail: String(e?.message || e) };
-  }
-  return { ok: true, detail: `${custom.length} 个添加的网站` };
+  const list = (r.sites || []).filter((x) => x && x.key && x.host).map((x) => ({
+    key: x.key, name: x.name, url: x.url, host: x.host, hosts: Array.isArray(x.hosts) ? x.hosts : [],
+    enabled: x.enabled !== false, config: x.config ? { ...x.config, site: x.key } : null, updated_at: x.updated_at || 0
+  }));
+  const { siteList: old = [], domConfigs = {} } = await chrome.storage.local.get(['siteList', 'domConfigs']);
+  const before = new Map((Array.isArray(old) ? old : []).map((x) => [x.key, x.updated_at || 0]));
+  const overrides = { ...domConfigs };
+  for (const x of list) if (before.has(x.key) && before.get(x.key) !== x.updated_at) delete overrides[x.key];
+  for (const k of Object.keys(overrides)) if (!list.some((x) => x.key === k)) delete overrides[k];
+  await chrome.storage.local.set({ siteList: list, domConfigs: overrides });
+  await chrome.storage.local.remove(['customSiteHosts', 'customSiteKeys']);   // 旧版字段
+  let n;
+  try { n = await registerSites(list); } catch (e) { return { ok: false, code: 'register_failed', detail: String(e?.message || e) }; }
+  return { ok: true, detail: `${list.length} 个网站，${n} 个已启用` };
 }
 
 /**
@@ -201,6 +227,7 @@ const ready = (async () => {
       }
     }
   });
+  await ensureRegistered();
   if (settings.token) { await bg.conn.start(); syncSites().catch(() => {}); }
   bg.conn.onStateChange = (state) => {
     const badge = { open: 'ON', auth_failed: 'AUTH', waiting: '…', connecting: '…', handshaking: '…' }[state] || '';
@@ -262,6 +289,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => { ready.then((bg) => { bg.onTabRemoved(tabId); syncTabsNow(bg); }); });
 chrome.tabs.onUpdated.addListener((tabId, info) => { if (info.url || info.status === 'complete') ready.then((bg) => syncTabsNow(bg)); });
+chrome.tabs.onActivated.addListener(() => { ready.then((bg) => syncTabsNow(bg)); });
+chrome.windows?.onFocusChanged?.addListener(() => { ready.then((bg) => syncTabsNow(bg)); });
 
 // SW 可能被回收：用 alarm 定期唤醒并检查连接
 chrome.alarms.create('bridge-keepalive', { periodInMinutes: 0.5 });
