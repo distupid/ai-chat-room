@@ -617,12 +617,24 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
   const repliesBefore = ext.of('command').filter((x) => x.action === 'reply').length;
   ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  // 选中常见回答 + Enter：直接发送；发送成功后才关闭弹窗（这里插件返回失败，弹窗保留、输入保留）
-  assert.ok(d.getElementById('detailScrim').classList.contains('open'), '发送结果回来之前不关闭弹窗');
+  // 选中常见回答 + Enter：直接发送；发出后立即关闭弹窗，右下角圆形按钮显示发送进度
+  assert.ok(!d.getElementById('detailScrim').classList.contains('open'), '发出后立即关闭弹窗');
+  assert.equal(d.getElementById('snackbars'), null, '不再有 snackbar');
+  const fab = () => d.querySelector('#fabs .fab-item:last-child');
+  assert.equal(fab().dataset.state, 'pending');
+  assert.ok(fab().querySelector('.ring .bar'), '圆环进度');
   await waitFor(() => ext.of('command').filter((x) => x.action === 'reply' && x.text === '帮我写单元测试').length > 0 && ext.of('command').filter((x) => x.action === 'reply').length > repliesBefore, { label: 'detail reply command', timeout: 6000 });
-  await waitFor(() => /快速回复失败/.test(d.getElementById('snackbars').textContent), { label: 'reply toast', timeout: 6000 });
-  assert.ok(d.getElementById('detailScrim').classList.contains('open'), '发送失败不关闭弹窗');
-  assert.equal(ta.value, '帮我写单元测试', '发送失败保留输入');
+  // 这里插件返回失败：按钮变成错误，点击展开看原因和原文，“重新编辑”回到详情并还原输入
+  await waitFor(() => fab()?.dataset.state === 'err', { label: 'fab error', timeout: 6000 });
+  assert.ok(!fab().classList.contains('open'), '错误默认收起');
+  fab().querySelector('.fab').click();
+  assert.ok(fab().classList.contains('open'), '点击展开');
+  assert.match(fab().querySelector('.fab-text').textContent, /发送失败/);
+  assert.equal(fab().querySelector('.fab-detail').textContent, '帮我写单元测试');
+  [...fab().querySelectorAll('.fab-actions button')].find((b) => b.textContent === '重新编辑').click();
+  await waitFor(() => d.getElementById('detailScrim').classList.contains('open') && ta.value === '帮我写单元测试', { label: 'reedit restores draft' });
+  d.getElementById('detailClose').click();
+  ta.value = '';
 
   // 再次进入弹窗：输入框是空的；普通文字按 Enter 发送（Shift+Enter 不发送）
   d.querySelector(cardSel).click();
@@ -633,11 +645,12 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.ok(d.getElementById('detailScrim').classList.contains('open'), 'Shift+Enter 不发送');
   ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   await waitFor(() => ext.of('command').some((x) => x.action === 'reply' && x.text === '手动输入'), { label: 'enter reply', timeout: 6000 });
-  assert.ok(d.getElementById('detailScrim').classList.contains('open'), '成功结果回来之前弹窗保持打开');
-  assert.equal(d.getElementById('quickSend').textContent, '发送中…');
+  assert.ok(!d.getElementById('detailScrim').classList.contains('open'), '发出后关闭弹窗');
+  const okFab = fab();
+  assert.equal(okFab.dataset.state, 'pending');
   ext.send(makeEnvelope('command_result', { command_id: ext.of('command').filter((x) => x.action === 'reply').at(-1).command_id, ok: true, detail: '已发送' }));
-  await waitFor(() => !d.getElementById('detailScrim').classList.contains('open'), { label: 'closed after success' });
-  assert.ok(!/快速回复：|正在发送/.test(d.getElementById('snackbars').textContent), '发送成功不弹提示');
+  await waitFor(() => okFab.dataset.state === 'ok', { label: 'fab ok' });
+  await waitFor(() => !okFab.isConnected, { label: 'fab fades', timeout: 4000 });
   d.querySelector(cardSel).click();
   await waitFor(() => d.getElementById('detailScrim').classList.contains('open'), { label: 'detail reopen 2' });
 

@@ -126,15 +126,90 @@ function duration(ms) {
 }
 
 /** 提示条：同样的内容正在显示时只延长不重复；最多同时 2 条；成功提示 2 秒、错误 5 秒 */
+// ------------------------------------------------------------------ 右下角状态按钮（替代原来的 snackbar）
+// 每条提示 / 每次发送是一个圆形浮动按钮，从下往上叠：
+//   pending 发送中：圆环进度（逐渐逼近 90%，结果回来补满）
+//   ok      成功：对号 + 旁边短暂显示文字，随后淡出
+//   err     失败：红色感叹号，一直留着；点击展开查看错误（发送失败可“重新编辑 / 重试”）
+const FAB_MAX = 4;
+const FAB_OK_MS = 1600;
+const SEND_TIMEOUT_MS = 45000;
+const FAB_ICON = {
+  ok: '<svg class="i s22" viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>',
+  err: '<svg class="i s22" viewBox="0 0 24 24"><path d="M11 15h2v2h-2zm0-8h2v6h-2zm1-5C6.47 2 2 6.5 2 12a10 10 0 1 0 10-10zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16z"/></svg>',
+  send: '<svg class="i s18" viewBox="0 0 24 24"><path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>',
+  close: '<svg class="i s18" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>'
+};
+const RING_R = 22;
+const RING_LEN = 2 * Math.PI * RING_R;
+
+function fabHost() {
+  let host = document.getElementById('fabs');
+  if (!host) { host = el('div', { id: 'fabs', 'aria-live': 'polite' }); document.body.append(host); }
+  return host;
+}
+function removeFab(f) {
+  clearTimeout(f._timer); clearInterval(f._tick);
+  f.classList.add('leaving');
+  setTimeout(() => f.remove(), 220);
+}
+function trimFabs(host) {
+  const done = [...host.children].filter((x) => x.dataset.state !== 'pending' && !x.classList.contains('leaving'));
+  while (host.children.length > FAB_MAX && done.length) removeFab(done.shift());
+}
+/** 新建一个状态按钮；opts.detail 展开时的说明，opts.actions 展开时的按钮 [{label, onclick}] */
+function makeFab(state, text, opts = {}) {
+  const host = fabHost();
+  const f = el('div', { class: 'fab-item', 'data-state': state });
+  const ring = `<svg class="ring" viewBox="0 0 48 48"><circle class="track" cx="24" cy="24" r="${RING_R}"/><circle class="bar" cx="24" cy="24" r="${RING_R}" stroke-dasharray="${RING_LEN}" stroke-dashoffset="${RING_LEN}"/></svg>`;
+  const btn = el('button', { class: 'fab', type: 'button', html: ring + `<span class="fab-ic"></span>` });
+  const label = el('span', { class: 'fab-label' });
+  const panel = el('div', { class: 'fab-panel', role: 'dialog' });
+  f.append(panel, label, btn);
+  f._btn = btn; f._label = label; f._panel = panel;
+  btn.addEventListener('click', () => { if (f.dataset.state === 'err') f.classList.toggle('open'); });
+  host.append(f);
+  setFab(f, state, text, opts);
+  trimFabs(host);
+  return f;
+}
+function setFab(f, state, text, opts = {}) {
+  clearTimeout(f._timer);
+  f.dataset.state = state;
+  f._text = text;
+  f._label.textContent = text;
+  f._btn.title = text;
+  f._btn.setAttribute('aria-label', text);
+  f._btn.querySelector('.fab-ic').innerHTML = state === 'pending' ? FAB_ICON.send : state === 'ok' ? FAB_ICON.ok : FAB_ICON.err;
+  if (state !== 'pending') { clearInterval(f._tick); setRing(f, 1); }
+  if (state === 'ok') f._timer = setTimeout(() => removeFab(f), opts.ms || FAB_OK_MS);
+  if (state === 'err') {
+    const actions = [...(opts.actions || []), { label: '关闭', onclick: () => removeFab(f) }];
+    f._panel.replaceChildren(
+      el('div', { class: 'fab-title' }, opts.title || '出错了'),
+      el('div', { class: 'fab-text' }, text),
+      opts.detail ? el('div', { class: 'fab-detail' }, opts.detail) : null,
+      el('div', { class: 'fab-actions' }, actions.map((a, i) => el('button', {
+        class: i === actions.length - 1 ? 'btn text' : 'btn tonal', type: 'button',
+        onclick: (e) => { e.stopPropagation(); a.onclick(); }
+      }, a.label))));
+  }
+}
+function setRing(f, ratio) {
+  f._ratio = ratio;
+  f._btn.querySelector('.bar')?.setAttribute('stroke-dashoffset', String(RING_LEN * (1 - Math.max(0, Math.min(1, ratio)))));
+}
+/** 发送进度：每 200ms 向 90% 逼近，结果回来由 setFab 补满 */
+function startProgress(f) {
+  setRing(f, 0.06);
+  f._tick = setInterval(() => setRing(f, f._ratio + (0.9 - f._ratio) * 0.08), 200);
+}
+/** 普通提示（原 snackbar）：ok / 默认 = 对号 + 短暂文字；err = 红色按钮，点击展开 */
 function snackbar(text, kind = '') {
-  const box = $('snackbars');
-  const ms = kind === 'err' ? 5000 : 2000;
-  const same = [...box.children].find((x) => x.textContent === text);
-  if (same) { clearTimeout(same._timer); same._timer = setTimeout(() => same.remove(), ms); return; }
-  const t = el('div', { class: `snackbar ${kind}`, role: 'status' }, text);
-  box.append(t);
-  while (box.children.length > 2) box.firstChild.remove();
-  t._timer = setTimeout(() => t.remove(), ms);
+  const host = fabHost();
+  const same = [...host.children].find((x) => x._text === text && x.dataset.state !== 'pending' && !x.classList.contains('leaving'));
+  if (same) { if (same.dataset.state === 'ok') setFab(same, 'ok', text, { ms: 2400 }); return same; }
+  return kind === 'err' ? makeFab('err', text) : makeFab('ok', text, { ms: 2400 });
 }
 
 async function api(path, opts = {}) {
@@ -485,16 +560,22 @@ async function copyText(text, what = '回答') {
   } catch (e) { snackbar(`复制失败：${e.message}`, 'err'); }
 }
 
-function sendCommand(conversationId, action, text, { quiet = false, extra = {}, closeOnOk = null } = {}) {
+function sendCommand(conversationId, action, text, { quiet = false, extra = {}, closeOnOk = null, fab = null } = {}) {
   if (!state.ws || state.ws.readyState !== 1 || state.wsState !== 'open' || !state.canControl) return false;
   const commandId = randomId('cmd').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
-  state.pendingCommands.set(commandId, { conversation_id: conversationId, action, closeOnOk });
+  state.pendingCommands.set(commandId, { conversation_id: conversationId, action, closeOnOk, fab, text });
   state.ws.send(JSON.stringify(makeEnvelope(MessageType.COMMAND, {
     command_id: commandId, action, conversation_id: conversationId, ...(text ? { text } : {}), ...extra
   })));
   render();
   if (state.selected === conversationId) { renderComposer(); renderDetail(); }
-  return true;
+  if (fab) {
+    // 插件 / 后台一直没有回结果（连接断开等）时按超时处理
+    fab._cmdTimer = setTimeout(() => {
+      if (state.pendingCommands.has(commandId)) onCommandResult({ command_id: commandId, ok: false, code: 'timeout' });
+    }, SEND_TIMEOUT_MS);
+  }
+  return commandId;
 }
 
 /** 详情里的“跳转到页面”：有标签页开着就切过去，没有就新开一个 */
@@ -529,6 +610,14 @@ function onCommandResult(msg) {
     return;
   }
   const what = { reply: '快速回复', close: '关闭页面' }[p?.action] || '重新回答';
+  if (p?.fab) {
+    clearTimeout(p.fab._cmdTimer);
+    if (msg.ok) setFab(p.fab, 'ok', '已发送');
+    else sendFailed(p, msg);
+    render();
+    if (state.selected) { renderComposer(); renderDetail(); }
+    return;
+  }
   if (msg.ok) {
     // 成功不再弹提示：回复成功时弹窗关闭 / 回复栏收起、页面关闭和重新回答会在卡片状态上体现
     if (p?.action === 'reply') {
@@ -1613,8 +1702,47 @@ function sendQuick() {
   if (!text) return snackbar('回复内容不能为空', 'err');
   closeCands();
   if (convBusy(id)) return;
-  // 发送成功后才关闭弹窗（onCommandResult）；失败时保留输入内容并提示
-  if (!sendCommand(id, 'reply', text, { quiet: true, extra: {}, closeOnOk: 'detail' })) return snackbar('实时连接未建立，无法发送', 'err');
+  // 发出后立即关闭弹窗，右下角显示发送进度；失败时点它展开，可回到详情重新编辑（保留原文）或直接重试
+  sendReplyWithFab(id, text, () => {
+    $('quickText').value = '';
+    state.drafts.delete(id);
+    if (state.selected === id) closeDetail();
+  });
+}
+
+function sendReplyWithFab(id, text, onSent) {
+  const name = titleOf(convById(id) || { conversation_id: id });
+  const f = makeFab('pending', `正在发送到「${name}」`);
+  f._conv = id;
+  if (!sendCommand(id, 'reply', text, { quiet: true, extra: {}, fab: f })) {
+    sendFailed({ conversation_id: id, text, fab: f }, { ok: false, detail: '实时连接未建立' });
+    return false;
+  }
+  startProgress(f);
+  onSent?.();
+  return true;
+}
+
+/** 发送失败：按钮变红，展开后显示原因、发送的内容，可重新编辑或重试 */
+function sendFailed(p, msg) {
+  const id = p.conversation_id;
+  const reason = CODE_TEXT[msg.code] || msg.detail || msg.code || '未知错误';
+  const name = titleOf(convById(id) || { conversation_id: id });
+  const f = p.fab;
+  state.drafts.set(id, p.text);   // 回到详情时输入框还原成没发出去的内容
+  setFab(f, 'err', `发送失败：${reason}`, {
+    title: `「${name}」`,
+    detail: p.text.length > 160 ? `${p.text.slice(0, 160)}…` : p.text,
+    actions: [
+      { label: '重新编辑', onclick: () => { removeFab(f); openDetail(id).then(() => restoreDraft(id)); restoreDraft(id); } },
+      { label: '重试', onclick: () => { removeFab(f); sendReplyWithFab(id, p.text, () => state.drafts.delete(id)); } }
+    ]
+  });
+}
+function restoreDraft(id) {
+  if (state.selected !== id || !state.drafts.has(id)) return;
+  if (!$('quickText').value) $('quickText').value = state.drafts.get(id);
+  renderComposer();
 }
 
 // ------------------------------------------------------------------ 设置：常见回答
