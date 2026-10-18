@@ -1643,7 +1643,8 @@
             "probe_site",
             "sync_sites",
             "open_sites",
-            "new_chat"
+            "new_chat",
+            "resync"
           ]
         },
         "conversation_id": {

@@ -480,7 +480,8 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.match(cardEl.querySelector('.title').textContent, /^界面测试：/);
   assert.equal(cardEl.querySelector('.badge').textContent, '空闲');
   assert.ok(cardEl.classList.contains('src-chatgpt'), '卡片带来源类名（空闲时背景取头像颜色）');
-  assert.ok(cardEl.querySelector('.side .badge + .time'), '时间在状态下方');
+  assert.ok(cardEl.querySelector('.side .side-top + .time'), '时间在状态下方');
+  assert.ok(cardEl.querySelector('.side-top .badge'));
   assert.ok(!cardEl.querySelector('.sub .time'));
   assert.equal(d.title, 'AI-Chat-Room');
   assert.match(cardEl.querySelector('.sub').textContent, /ChatGPT/);
@@ -616,10 +617,12 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
   const repliesBefore = ext.of('command').filter((x) => x.action === 'reply').length;
   ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  // 选中常见回答 + Enter：直接发送，并关闭弹窗
-  assert.ok(!d.getElementById('detailScrim').classList.contains('open'), '发送后关闭弹窗');
+  // 选中常见回答 + Enter：直接发送；发送成功后才关闭弹窗（这里插件返回失败，弹窗保留、输入保留）
+  assert.ok(d.getElementById('detailScrim').classList.contains('open'), '发送结果回来之前不关闭弹窗');
   await waitFor(() => ext.of('command').filter((x) => x.action === 'reply' && x.text === '帮我写单元测试').length > 0 && ext.of('command').filter((x) => x.action === 'reply').length > repliesBefore, { label: 'detail reply command', timeout: 6000 });
   await waitFor(() => /快速回复失败/.test(d.getElementById('snackbars').textContent), { label: 'reply toast', timeout: 6000 });
+  assert.ok(d.getElementById('detailScrim').classList.contains('open'), '发送失败不关闭弹窗');
+  assert.equal(ta.value, '帮我写单元测试', '发送失败保留输入');
 
   // 再次进入弹窗：输入框是空的；普通文字按 Enter 发送（Shift+Enter 不发送）
   d.querySelector(cardSel).click();
@@ -629,8 +632,12 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
   assert.ok(d.getElementById('detailScrim').classList.contains('open'), 'Shift+Enter 不发送');
   ta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  assert.ok(!d.getElementById('detailScrim').classList.contains('open'));
   await waitFor(() => ext.of('command').some((x) => x.action === 'reply' && x.text === '手动输入'), { label: 'enter reply', timeout: 6000 });
+  assert.ok(d.getElementById('detailScrim').classList.contains('open'), '成功结果回来之前弹窗保持打开');
+  assert.equal(d.getElementById('quickSend').textContent, '发送中…');
+  ext.send(makeEnvelope('command_result', { command_id: ext.of('command').filter((x) => x.action === 'reply').at(-1).command_id, ok: true, detail: '已发送' }));
+  await waitFor(() => !d.getElementById('detailScrim').classList.contains('open'), { label: 'closed after success' });
+  assert.ok(!/快速回复：|正在发送/.test(d.getElementById('snackbars').textContent), '发送成功不弹提示');
   d.querySelector(cardSel).click();
   await waitFor(() => d.getElementById('detailScrim').classList.contains('open'), { label: 'detail reopen 2' });
 
@@ -641,10 +648,18 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   d.getElementById('detailClose').click();
   assert.ok(!d.getElementById('detailScrim').classList.contains('open'));
 
-  // 有收藏的会话：点开后滚动到收藏的回答（高亮一下）
+  // 普通进入：不跳到收藏，固定在最后一个回复
+  d.querySelector(cardSel).click();
+  await waitFor(() => d.getElementById('detailScrim').classList.contains('open') && d.querySelector('#detailMsgs .msg'), { label: 'detail normal' });
+  await new Promise((r) => setTimeout(r, 100));
+  assert.ok(!d.querySelector('#detailMsgs .msg.fav.flash'), '普通进入不跳到收藏');
+  d.getElementById('detailClose').click();
+  // 从“收藏”筛选进入：滚动到收藏的回答（高亮一下）
+  d.getElementById('favBtn').click();
   d.querySelector(cardSel).click();
   await waitFor(() => d.querySelector('#detailMsgs .msg.fav.flash'), { label: 'scroll to favorite' });
   d.getElementById('detailClose').click();
+  d.getElementById('favBtn').click();
 
   // 卡片上的“回复”：向下弹出快速回复栏
   const replyBtn = () => d.querySelector(`${cardSel} [data-act="reply"]`);
@@ -655,9 +670,11 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.ok(![...panel.querySelectorAll('button')].some((b) => b.textContent === '收起'), '没有收起按钮');
   const cardBefore = ext.of('command').filter((x) => x.action === 'reply').length;
   [...panel.querySelectorAll('.qr button')].find((b) => b.textContent === '帮我写单元测试').click();
-  // 点常见回答直接发送，并自动收起
-  await waitFor(() => !d.querySelector(`${cardSel} .creply`), { label: 'card reply closed' });
+  // 点常见回答直接发送，发送成功后自动收起
   await waitFor(() => ext.of('command').filter((x) => x.action === 'reply').length > cardBefore, { label: 'card quick command', timeout: 6000 });
+  assert.ok(d.querySelector(`${cardSel} .creply`), '成功前不收起');
+  ext.send(makeEnvelope('command_result', { command_id: ext.of('command').filter((x) => x.action === 'reply').at(-1).command_id, ok: true, detail: '已发送' }));
+  await waitFor(() => !d.querySelector(`${cardSel} .creply`), { label: 'card reply closed' });
   // 再展开：输入框为空；Enter 发送后收起
   replyBtn().click();
   const panel2 = await waitFor(() => d.querySelector(`${cardSel} .creply`), { label: 'card reply 2' });
@@ -665,8 +682,9 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.equal(cta.value, '');
   cta.value = '卡片里输入';
   cta.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  await waitFor(() => !d.querySelector(`${cardSel} .creply`), { label: 'card reply closed 2' });
   await waitFor(() => ext.of('command').some((x) => x.action === 'reply' && x.text === '卡片里输入'), { label: 'card enter command', timeout: 6000 });
+  ext.send(makeEnvelope('command_result', { command_id: ext.of('command').filter((x) => x.action === 'reply').at(-1).command_id, ok: true, detail: '已发送' }));
+  await waitFor(() => !d.querySelector(`${cardSel} .creply`), { label: 'card reply closed 2' });
 
   // 通知等级：普通会话回答完成 → 音效，不弹窗
   await sendAndAck(ext, ev('generation.started', { message_id: 'a1', generation_sequence: 1 }));
@@ -940,6 +958,33 @@ test('看板性能：刷新时没变化的卡片复用原 DOM（回复栏输入�
   assert.equal(cardOf(CONV).querySelector('.creply textarea'), ta);
   assert.equal(ta.value, '正在输入');
   close();
+  ext.close();
+  await server.stop();
+});
+
+test('删除页面已关的会话 / 重置数据库：开着的会话不能删；重置后插件收到 resync，网站列表保留', async () => {
+  const server = await startServer();
+  const api = (path, { method = 'GET', body } = {}) =>
+    fetch(`http://127.0.0.1:${server.port}${path}`, { method, headers: { authorization: `Bearer ${TOKENS.observer}`, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const list = async () => (await (await api('/api/conversations')).json()).conversations.map((c) => c.conversation_id);
+  const ext = await extClient(server, 'ext-reset-0001');
+  await sendAndAck(ext, ev('page.opened', { url: CONV_URL, title: '会话' }));
+  await sendAndAck(ext, ev('message.added', { message_id: 'u1', role: 'user', index: 0, text: '你好', text_length: 2 }));
+  assert.equal((await api(`/api/conversations/${CONV}`, { method: 'DELETE' })).status, 409, '页面开着不能删');
+  await sendAndAck(ext, ev('page.closed', { url: CONV_URL, reason: 'unload' }));
+  const del = await (await api(`/api/conversations/${CONV}`, { method: 'DELETE' })).json();
+  assert.ok(del.ok && del.removed.messages === 1);
+  assert.ok(!(await list()).includes(CONV), '删除后不在列表里');
+  assert.equal((await (await api(`/api/conversations/${CONV}/messages`)).json()).messages.length, 0);
+
+  await sendAndAck(ext, ev('page.opened', { url: CONV_URL, title: '会话' }));
+  assert.ok((await list()).includes(CONV));
+  assert.equal((await api('/api/admin/reset-db', { method: 'POST', body: {} })).status, 400, '需要确认');
+  const r = await (await api('/api/admin/reset-db', { method: 'POST', body: { confirm: 'RESET' } })).json();
+  assert.ok(r.ok && r.removed.events > 0);
+  assert.deepEqual(await list(), []);
+  await waitFor(() => ext.of('command').some((x) => x.action === 'resync'), { label: 'resync command' });
+  assert.equal((await (await api('/api/sites')).json()).sites.length, 3, '网站列表保留');
   ext.close();
   await server.stop();
 });

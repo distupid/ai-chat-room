@@ -75,7 +75,7 @@ export function createBridgeServer(opts = {}) {
       });
       return;
     }
-    if (path === '/api/sites' || path.startsWith('/api/sites/')) {
+    if (path === '/api/sites' || path.startsWith('/api/sites/') || path === '/api/admin/reset-db') {
       handleSitesApi(req, res, path).catch((err) => {
         log.error('[sites]', err);
         if (!res.headersSent) json(res, 500, { ok: false, error: 'internal error' });
@@ -118,6 +118,7 @@ export function createBridgeServer(opts = {}) {
    *   GET /api/conversations/:id/events?limit=100    最近事件（不含正文）
    *   POST /api/conversations/:id/mark  {archived?: bool, pinned?: bool}  归档 / 置顶（旧字段 done 等同 archived）
    *   POST /api/conversations/:id/messages/:mid/favorite  {favorite: bool}  收藏 / 取消收藏回答
+   *   DELETE /api/conversations/:id                      删除页面已关的会话（消息 / 收藏 / 标记 / 事件）
    *   GET  /api/favorites?limit=200                      收藏的回答（正文快照）
    */
   async function handleDashboardApi(req, res, path) {
@@ -128,6 +129,12 @@ export function createBridgeServer(opts = {}) {
       return json(res, 403, { ok: false, error: 'subscribe_all + read_content scope required' });
     }
     const params = new URL(req.url, 'http://x').searchParams;
+    const del = /^\/api\/conversations\/([A-Za-z0-9_-]{1,128})$/.exec(path);
+    if (del && req.method === 'DELETE') {
+      // 删除会话（只允许页面已关的会话）：从数据库移除它的消息、收藏、标记和事件
+      if (db.openTabsFor(del[1]).length) return json(res, 409, { ok: false, error: '页面还开着，先关闭页面再删除' });
+      return json(res, 200, { ok: true, conversation_id: del[1], removed: db.deleteConversation(del[1]) });
+    }
     const mark = /^\/api\/conversations\/([A-Za-z0-9_-]{1,128})\/mark$/.exec(path);
     if (mark && req.method === 'POST') {
       let body = {};
@@ -286,6 +293,15 @@ export function createBridgeServer(opts = {}) {
         return json(res, 200, { ok: true });
       }
       if (!can(Scope.CONTROL)) return json(res, 403, { ok: false, error: 'control scope required' });
+      if (path === '/api/admin/reset-db' && req.method === 'POST') {
+        // 重置数据库：清空会话 / 消息 / 收藏 / 置顶归档 / 事件，网站列表和设置保留；随后让插件把开着的页面重新上报一遍
+        const b = await body();
+        if (b.confirm !== 'RESET') return json(res, 400, { ok: false, error: 'confirm required' });
+        const removed = db.resetAll();
+        for (const rec of onlineExtensions()) sendTo(rec, makeEnvelope(MessageType.COMMAND, { command_id: randomId('resync').slice(0, 40), action: 'resync', conversation_id: 'sites' }));
+        log.info(`[admin] database reset by ${client.name}: ${JSON.stringify(removed)}`);
+        return json(res, 200, { ok: true, removed });
+      }
       if (path === '/api/sites/launch' && req.method === 'POST') {
         const target = onlineExtensions()[0];
         if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件' });
@@ -560,7 +576,7 @@ export function createBridgeServer(opts = {}) {
       return sendError(conn, msg.id, ErrorCode.FORBIDDEN, 'token lacks control scope', false);
     }
     counters.commands_received++;
-    if (['probe_site', 'sync_sites', 'open_sites', 'new_chat'].includes(msg.action)) return reply(conn, commandResult(msg.command_id, false, 'forbidden_action', '该指令只能由后端发出'));
+    if (['probe_site', 'sync_sites', 'open_sites', 'new_chat', 'resync'].includes(msg.action)) return reply(conn, commandResult(msg.command_id, false, 'forbidden_action', '该指令只能由后端发出'));
     if (msg.action === 'reply' && !msg.text?.trim()) return reply(conn, commandResult(msg.command_id, false, 'text_required', '回复内容不能为空'));
     if (pendingCommands.has(msg.command_id)) return reply(conn, commandResult(msg.command_id, false, 'duplicate_command', null));
 

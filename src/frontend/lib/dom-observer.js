@@ -1302,6 +1302,22 @@
       isGenerating: function () { return state.generating || !!(cfg.generating && doc.querySelector(cfg.generating)); },
       getConversationId: function () { return convId(win.location.href); },
       scanNow: function () { scan(true); },
+      /** 后端重置数据库后：重新上报 page.opened（新 event_id）并把当前页面的全部消息重新上报一遍 */
+      resync: function () {
+        if (!state.started) return api;
+        state.startSequence++;
+        state.messages = Object.create(null);
+        state.maxIndex = null;
+        state.statusKey = null;
+        state.lastStatusCheckAt = 0;
+        statusDirty = true;
+        resetCache();
+        send('page.opened', state.conversationId,
+          { url: state.url.slice(0, 2048), title: String(doc.title || '').slice(0, 512) },
+          loadId + '|' + state.startSequence + '|resync');
+        scan(true);
+        return api;
+      },
       state: state,
       stats: stats
     };

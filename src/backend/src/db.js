@@ -224,6 +224,30 @@ export function openDatabase(dbPath = ':memory:') {
     raw: db,
     /** 网址 → 来源标识（后端按网站列表匹配域名）；没有页面上报的 conversation.status 时用 */
     setSourceResolver(fn) { sourceResolver = typeof fn === 'function' ? fn : sourceFromUrl; },
+    /** 删除单个会话的全部数据 */
+    deleteConversation(conversationId) {
+      const removed = {};
+      db.exec('BEGIN');
+      try {
+        for (const t of ['messages', 'favorites', 'conversation_marks', 'conversations', 'events']) {
+          removed[t] = Number(db.prepare(`DELETE FROM ${t} WHERE conversation_id = ?`).run(conversationId).changes);
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return removed;
+    },
+    /** 重置：清空所有会话数据（网站列表在 sites.json，不受影响）；事件 seq 继续递增（AUTOINCREMENT），订阅游标不会倒退 */
+    resetAll() {
+      const removed = {};
+      db.exec('BEGIN');
+      try {
+        for (const t of ['messages', 'favorites', 'conversation_marks', 'conversations', 'events']) {
+          removed[t] = Number(db.prepare(`DELETE FROM ${t}`).run().changes);
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return removed;
+    },
     persistEvent(clientId, ev, now = Date.now()) {
       return persist(clientId, ev, now);
     },

@@ -123,11 +123,16 @@ function duration(ms) {
   return `${Math.floor(s / 3600)} 小时 ${Math.floor((s % 3600) / 60)} 分`;
 }
 
+/** 提示条：同样的内容正在显示时只延长不重复；最多同时 2 条；成功提示 2 秒、错误 5 秒 */
 function snackbar(text, kind = '') {
+  const box = $('snackbars');
+  const ms = kind === 'err' ? 5000 : 2000;
+  const same = [...box.children].find((x) => x.textContent === text);
+  if (same) { clearTimeout(same._timer); same._timer = setTimeout(() => same.remove(), ms); return; }
   const t = el('div', { class: `snackbar ${kind}`, role: 'status' }, text);
-  $('snackbars').append(t);
-  while ($('snackbars').children.length > 3) $('snackbars').firstChild.remove();
-  setTimeout(() => t.remove(), kind === 'err' ? 6000 : 3500);
+  box.append(t);
+  while (box.children.length > 2) box.firstChild.remove();
+  t._timer = setTimeout(() => t.remove(), ms);
 }
 
 async function api(path, opts = {}) {
@@ -400,6 +405,7 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
   state.streaming = new Set();
   state.longOpen = new Set();
   state.composerOpen = true;   // 点卡片打开详情时直接展开快速回复
+  state.stickBottom = !toFavorite;   // 默认固定在最后一个回复
   $('quickText').value = '';   // 每次进入弹窗清空输入框，避免把上次没发出去的文字发到别的会话
   closeCands();
   $('detailScrim').classList.add('open');
@@ -442,8 +448,7 @@ async function setMark(c, patch, okText) {
   try {
     await api(`/api/conversations/${encodeURIComponent(c.conversation_id)}/mark`, { method: 'POST', body: JSON.stringify(patch) });
     Object.assign(c, patch);   // 先本地更新，避免等下一次拉取
-    render();
-    snackbar(okText, 'ok');
+    render();   // 置顶 / 归档在卡片上直接体现，不再弹提示
     loadConversations();
   } catch (e) { snackbar(`操作失败：${e.message}`, 'err'); }
 }
@@ -457,8 +462,7 @@ async function toggleFavorite(conversationId, messageId) {
     await api(`/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/favorite`,
       { method: 'POST', body: JSON.stringify({ favorite: next }) });
     m.favorite = next;
-    renderDetail();
-    snackbar(next ? '已收藏这条回答' : '已取消收藏', 'ok');
+    renderDetail();   // 星标状态直接体现，不再弹提示
     scheduleRefresh(100);
   } catch (e) { snackbar(`收藏失败：${e.message}`, 'err'); }
 }
@@ -468,7 +472,6 @@ async function toggleFavorite(conversationId, messageId) {
 async function newChat(c) {
   try {
     await api(`/api/sites/${encodeURIComponent(c.source)}/new-chat`, { method: 'POST', body: '{}' });
-    snackbar(`已在后台新建 ${sourceInfo(c.source).label} 会话`, 'ok');
     scheduleRefresh(1500);
   } catch (e) { snackbar(`新建失败：${e.message}`, 'err'); }
 }
@@ -480,14 +483,13 @@ async function copyText(text, what = '回答') {
   } catch (e) { snackbar(`复制失败：${e.message}`, 'err'); }
 }
 
-function sendCommand(conversationId, action, text, { quiet = false, extra = {} } = {}) {
+function sendCommand(conversationId, action, text, { quiet = false, extra = {}, closeOnOk = null } = {}) {
   if (!state.ws || state.ws.readyState !== 1 || state.wsState !== 'open' || !state.canControl) return false;
   const commandId = randomId('cmd').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
-  state.pendingCommands.set(commandId, { conversation_id: conversationId, action });
+  state.pendingCommands.set(commandId, { conversation_id: conversationId, action, closeOnOk });
   state.ws.send(JSON.stringify(makeEnvelope(MessageType.COMMAND, {
     command_id: commandId, action, conversation_id: conversationId, ...(text ? { text } : {}), ...extra
   })));
-  if (!quiet) snackbar({ reply: '正在发送回复…', close: '正在关闭页面…' }[action] || '正在请求重新回答…');
   render();
   if (state.selected === conversationId) { renderComposer(); renderDetail(); }
   return true;
@@ -526,10 +528,12 @@ function onCommandResult(msg) {
   }
   const what = { reply: '快速回复', close: '关闭页面' }[p?.action] || '重新回答';
   if (msg.ok) {
-    snackbar(`${what}：${msg.detail || '成功'}`, 'ok');
+    // 成功不再弹提示：回复成功时弹窗关闭 / 回复栏收起、页面关闭和重新回答会在卡片状态上体现
     if (p?.action === 'reply') {
       state.drafts.delete(p.conversation_id);
       if (state.selected === p.conversation_id) $('quickText').value = '';
+      if (p.closeOnOk === 'detail' && state.selected === p.conversation_id) closeDetail();
+      if (p.closeOnOk === 'card' && state.cardReply === p.conversation_id) state.cardReply = null;
     }
   } else {
     snackbar(`${what}失败：${CODE_TEXT[msg.code] || msg.detail || msg.code || '未知错误'}`, 'err');
@@ -748,7 +752,11 @@ function card(c) {
           el('span', {}, src.label),
           c.model ? el('span', {}, c.model) : null)),
       el('div', { class: 'side' },
-        el('span', { class: `badge b-${c.status}` }, STATUS[c.status]?.label || c.status),
+        el('div', { class: 'side-top' },
+          el('span', { class: `badge b-${c.status}` }, STATUS[c.status]?.label || c.status),
+          c.status === 'closed' ? el('button', { class: 'icon-btn card-del', type: 'button', title: '从数据中删除这个会话', 'aria-label': '删除会话', 'data-act': 'delete',
+            html: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.5 3.5l5 5M8.5 3.5l-5 5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
+            onclick: (e) => { e.stopPropagation(); deleteConversation(c); } }) : null),
         el('span', { class: 'time', title: new Date(c.last_seen_at).toLocaleString() }, ago(c.last_seen_at)))
     ),
     el('div', { class: 'tags' },
@@ -779,10 +787,21 @@ function card(c) {
   return node;
 }
 
-/** 点卡片：页面已关 → 重新打开该页面并跳转；否则打开详情（有收藏的滚到收藏处） */
+/** 点卡片：页面已关 → 重新打开该页面并跳转；否则打开详情，滚到最后一个回复（从“收藏”筛选进来的滚到收藏处） */
 function activateCard(c) {
   if (c.status === 'closed') { openUrl(c.url); return; }
-  openDetail(c.conversation_id, { toFavorite: c.favorite_count > 0 });
+  openDetail(c.conversation_id, { toFavorite: state.filter === 'favorite' && c.favorite_count > 0 });
+}
+
+/** 删除页面已关的会话：从数据库移除它的消息、收藏、标记和事件 */
+async function deleteConversation(c) {
+  if (!confirm(`删除“${titleOf(c)}”？\n会从数据中移除这个会话的全部消息和收藏，无法恢复。`)) return;
+  try {
+    await api(`/api/conversations/${encodeURIComponent(c.conversation_id)}`, { method: 'DELETE' });
+    state.conversations = state.conversations.filter((x) => x.conversation_id !== c.conversation_id);
+    if (state.selected === c.conversation_id) closeDetail();
+    render();
+  } catch (e) { snackbar(`删除失败：${e.message}`, 'err'); }
 }
 
 /** 关闭页面：让插件关掉开着这个会话的标签页，会话随后进入“页面已关” */
@@ -816,15 +835,15 @@ function cardReplyPanel(c, online, busy) {
   const send = (preset) => {
     const text = (typeof preset === 'string' ? preset : ta.value).trim();
     if (!text) return snackbar('回复内容不能为空', 'err');
-    if (!sendCommand(id, 'reply', text)) return snackbar('实时连接未建立，无法发送', 'err');
-    // 发出后自动收起
-    state.drafts.delete(id);
-    if (state.cardReply === id) { state.cardReply = null; render(); }
+    if (convBusy(id)) return;
+    // 发送成功后才收起（onCommandResult）；失败时保留输入内容
+    state.drafts.set(id, ta.value);
+    if (!sendCommand(id, 'reply', text, { quiet: true, closeOnOk: 'card' })) return snackbar('实时连接未建立，无法发送', 'err');
   };
   ta.addEventListener('input', () => state.drafts.set(id, ta.value));
   // 焦点离开回复栏自动收起（看板刷新重建卡片引起的失焦不算）
   ta.addEventListener('blur', () => setTimeout(() => {
-    if (state.rendering || state.cardReply !== id) return;
+    if (state.rendering || state.cardReply !== id || convBusy(id)) return;
     if (document.activeElement?.closest?.('.creply')) return;
     toggleCardReply(id);
   }, 150));
@@ -1383,7 +1402,12 @@ function scrollDetailBottom() {
 }
 (() => {
   const body = $('detailBody');
+  // 只有用户自己滚动（滚轮 / 触摸 / 拖滚动条 / 键盘）才改变“固定在底部”；内容变高、图片加载、长消息折叠引起的滚动事件不算
+  let userAt = 0;
+  const mark = () => { userAt = Date.now(); };
+  for (const t of ['wheel', 'touchmove', 'pointerdown', 'keydown']) body.addEventListener(t, mark, { passive: true });
   body.addEventListener('scroll', () => {
+    if (Date.now() - userAt > 800) { if (state.stickBottom) body.scrollTop = body.scrollHeight; return; }
     state.stickBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
   }, { passive: true });
   const keep = () => { if (state.selected && state.stickBottom) body.scrollTop = body.scrollHeight; };
@@ -1455,7 +1479,7 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
     for (const id of msgCache.keys()) if (!keep.has(id)) msgCache.delete(id);
   }
   applyLongFold();
-  if ((scrollToEnd || state.composerOpen) && nearBottom) body.scrollTop = body.scrollHeight;
+  if (((scrollToEnd || state.composerOpen) && nearBottom) || state.stickBottom) body.scrollTop = body.scrollHeight;
 }
 
 /**
@@ -1564,11 +1588,9 @@ function sendQuick() {
   if (!id) return;
   if (!text) return snackbar('回复内容不能为空', 'err');
   closeCands();
-  if (!sendCommand(id, 'reply', text)) return snackbar('实时连接未建立，无法发送', 'err');
-  // 发出后关闭弹窗；结果通过提示条反馈
-  $('quickText').value = '';
-  state.drafts.delete(id);
-  closeDetail();
+  if (convBusy(id)) return;
+  // 发送成功后才关闭弹窗（onCommandResult）；失败时保留输入内容并提示
+  if (!sendCommand(id, 'reply', text, { quiet: true, extra: {}, closeOnOk: 'detail' })) return snackbar('实时连接未建立，无法发送', 'err');
 }
 
 // ------------------------------------------------------------------ 设置：常见回答
@@ -1717,6 +1739,15 @@ qt.addEventListener('keydown', (e) => {
     closeCands();
   }
 });
+// 重置数据库：清空所有会话、消息、收藏和置顶 / 归档记录（网站列表和看板设置保留），开着的页面随后重新上报
+$('resetDb').onclick = async () => {
+  if (!confirm('确定重置数据库？\n\n会清空所有会话、消息、收藏、置顶和归档记录，无法恢复。\n网站列表和看板设置会保留，开着的页面会重新上报当前会话。')) return;
+  try {
+    await api('/api/admin/reset-db', { method: 'POST', body: JSON.stringify({ confirm: 'RESET' }) });
+    snackbar('数据库已重置', 'ok');
+    setTimeout(() => location.reload(), 600);
+  } catch (e) { snackbar(`重置失败：${e.message}`, 'err'); }
+};
 $('soundTest').onclick = () => { if (!playSound(false)) snackbar('当前浏览器不支持音效', 'err'); };
 $('qrAdd').onclick = addQuickReply;
 $('qrNew').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addQuickReply(); } });

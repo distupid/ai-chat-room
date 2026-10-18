@@ -55,6 +55,9 @@
       // 后台对账用：这个标签页当前在哪个会话
       if (!observer) { sendResponse({ ok: false, code: 'not_observing' }); return; }
       sendResponse({ ok: true, conversation_id: observer.getConversationId(), url: location.href });
+    } else if (msg.kind === 'resync') {
+      if (observer) observer.resync();
+      sendResponse({ ok: !!observer });
     } else if (msg.kind === 'get_observer_config') {
       sendResponse({ ok: true, config: observer ? observer.getConfig() : null });
     } else if (msg.kind === 'bridge_command') {
