@@ -46,10 +46,7 @@
     .btn.tonal { background: var(--secondary-container); color: var(--on-secondary-container); }
     .btn.outlined { background: transparent; border: 1px solid var(--outline); color: var(--primary); }
     .btn:not(:disabled):hover { filter: brightness(1.06); }
-    #analyzeMsg { font-size: 12px; min-height: 0; }
-    #analyzeMsg:empty { display: none; }
     .ok { color: var(--st-idle); } .err { color: var(--error); }
-    pre { margin: 0; background: var(--surface-container-high); color: var(--on-surface-variant); border-radius: 8px; padding: 8px 10px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all; font: 11px/16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   </style>
 </head>
 <body>
@@ -63,15 +60,6 @@
       <label><span class="lbl">后端地址</span><input id="url" class="input" placeholder="ws://127.0.0.1:8787" /></label>
       <label><span class="lbl">Token（server/data/config.json 中 extension 的 token）</span><input id="token" class="input" type="password" autocomplete="off" /></label>
       <div class="row"><span class="grow"></span><button id="save" class="btn filled">保存并连接</button></div>
-    </section>
-    <section class="card">
-      <div class="row">
-        <button id="refresh" class="btn outlined">刷新诊断</button>
-        <span class="grow"></span>
-        <button id="analyze" class="btn tonal" title="抓取当前标签页 DOM，由后端分析并应用到这个站点">分析当前页面 DOM 并应用</button>
-      </div>
-      <div id="analyzeMsg"></div>
-      <pre id="diag">-</pre>
     </section>
   </main>
   <script src="popup.js"></script>

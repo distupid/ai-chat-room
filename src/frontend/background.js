@@ -69,15 +69,45 @@ function waitTabComplete(tabId, timeoutMs) {
   });
 }
 
-/** 后端指令 probe_site：后台打开网址（用这个浏览器的登录状态）→ 等页面渲染 → 抓 DOM → 上传分析 → 关闭标签页 */
+/** 页面里执行：正文长度（判断单页应用是否渲染完） */
+function pageTextSize() { return document.body ? document.body.innerText.length : 0; }
+
+/** 等单页应用渲染稳定：正文长度连续两次不变（最多 maxMs） */
+async function waitRendered(tabId, maxMs) {
+  const end = Date.now() + maxMs;
+  let last = -1, stable = 0;
+  while (Date.now() < end) {
+    await new Promise((r) => setTimeout(r, 1000));
+    let size = 0;
+    try { [{ result: size }] = await chrome.scripting.executeScript({ target: { tabId }, func: pageTextSize }); } catch { continue; }
+    stable = size > 0 && size === last ? stable + 1 : 0;
+    last = size;
+    if (stable >= 2) return;
+  }
+}
+
+/**
+ * 后端指令 probe_site：抓 DOM → 上传分析。
+ * 已经打开了这个网站的标签页时直接用它（不新开、不关闭，也不会把用户正在看的页面关掉）；
+ * 否则后台新开一个，等渲染稳定后抓取，抓完关闭。
+ */
 async function probeSite(command) {
   const url = command.text;
   if (!/^https:\/\//.test(url || '')) return { ok: false, code: 'bad_url', detail: '只支持 https 网址' };
-  let tab;
+  const host = new URL(url).hostname.replace(/^www\./, '');
+  let tab, opened = false;
   try {
-    tab = await chrome.tabs.create({ url, active: false });
-    await waitTabComplete(tab.id, 30000);
-    await new Promise((r) => setTimeout(r, 4000));   // 单页应用：再等消息渲染出来
+    const tabs = (await chrome.tabs.query({})).filter((t) => {
+      try { const h = new URL(t.url || '').hostname.replace(/^www\./, ''); return h === host || h.endsWith('.' + host); } catch { return false; }
+    });
+    // 优先：网址完全一致 → 正在看的 → 不在首页（多半是对话页）
+    tab = tabs.find((t) => t.url === url) || tabs.find((t) => t.active) || tabs.find((t) => new URL(t.url).pathname.length > 1) || tabs[0];
+    if (!tab) {
+      tab = await chrome.tabs.create({ url, active: false });
+      opened = true;
+      await waitTabComplete(tab.id, 30000);
+    }
+    await waitRendered(tab.id, opened ? 15000 : 3000);
     const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: capturePage });
     if (!res?.result?.html) return { ok: false, code: 'capture_failed', detail: '没能读取页面内容' };
     const { serverUrl, token } = await loadSettings();
@@ -86,7 +116,7 @@ async function probeSite(command) {
   } catch (e) {
     return { ok: false, code: 'probe_failed', detail: String(e?.message || e) };
   } finally {
-    if (tab?.id != null) chrome.tabs.remove(tab.id).catch(() => {});
+    if (opened && tab?.id != null) chrome.tabs.remove(tab.id).catch(() => {});
   }
 }
 
