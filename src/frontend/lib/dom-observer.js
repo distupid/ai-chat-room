@@ -263,10 +263,15 @@
       }
     },
 
-    // meta.ai（2026-10-19）：未能实地验证——站点被网络策略屏蔽，公开资料无可靠 DOM。
-    // 用户反馈旧版自定义配置曾导致状态卡在“回答中”，因此 generating.selector 故意留空
-    // （不猜停止按钮，猜错会复现卡死），靠文本活动检测 + 后端超时回落。
-    // 待用看板 probe_site 抓取真实 DOM 后细化；当前 0 命中属预期，看 selector_health。
+    // meta.ai（2026-10-19）：输入框选择器来自用户提供的真实 DOM（已确认）。
+    // 输入框是 Lexical 编辑器：
+    //   div[contenteditable="true"][data-testid="composer-input"][data-lexical-editor="true"][role="textbox"]
+    // （另有个隐藏的 textarea[data-testid="composer-input"] 是 prehydration 占位，不能用）。
+    // 发送按钮平时 disabled：button[data-testid="composer-send-button"]，
+    // 必须先 focus 编辑器并填入文字，disabled 才会消失。
+    // 附件按钮：button[data-testid="composer-add-attachment-button"]。
+    // 发送逻辑：focus → execCommand 插入文字（Lexical 兼容）→ 等 disabled 消失 → 点击；
+    // 按钮超时未启用则直接 send_not_confirmed（enter_fallback: false，不回车）。
     metai: {
       config_version: 1,
       source: 'default:metai',
@@ -301,9 +306,11 @@
         check_interval_ms: 2000
       },
       actions: {
-        composer: 'textarea, div[contenteditable="true"]',
-        send_button: 'button[aria-label*="发送"], button[aria-label*="Send"]',
-        regenerate_button: ''
+        composer: 'div[contenteditable="true"][data-testid="composer-input"][data-lexical-editor="true"]',
+        send_button: 'button[data-testid="composer-send-button"]',
+        regenerate_button: '',
+        attach_button: 'button[data-testid="composer-add-attachment-button"]',
+        enter_fallback: false   // 发送按钮超时未启用时不回车，直接失败（Lexical 回车语义不可靠）
       }
     }
   };

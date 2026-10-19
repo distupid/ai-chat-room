@@ -148,7 +148,7 @@ test/                         单元测试 + 多客户端 E2E 验收测试
 | chatgpt.com / chat.openai.com | URL `/c/<id>` | 快速回复、重新回答都支持 |
 | duck.ai | 助手消息元素 id 中的 UUID，前缀 `duck-` | URL 不带会话 ID；新聊天在第一条回答出现后才有 ID。支持快速回复，不支持重新回答 |
 | hark.com | `/chat` → `hark-main`；`/projects/<id>` → `hark-<id>` | 支持快速回复，不支持重新回答 |
-| meta.ai | 未验证（待 probe 补充） | 选择器未实测；generating 选择器故意留空（防状态卡“回答中”），靠文本活动检测 + 后端超时回落 |
+| meta.ai | 未验证（待 probe 补充） | 输入框/发送/附件按钮按 2026-10-19 用户提供的真实 DOM 确认（Lexical 编辑器，发送按钮空时 disabled）；generating 选择器故意留空（防状态卡“回答中”），靠文本活动检测 + 后端超时回落 |
 | muse.ai | 暂无（快照 URL 仅为 `https://muse.ai/`，待补充） | 选择器按 2026-10-19 用户提供的真实 DOM 快照确认；虚拟化列表用替身 span 取正文；生成中信号为 `button[aria-label="停止任务"]`；无发送按钮，回车发送 |
 
 - **默认种子**：上面五个网站的配置（ChatGPT / Duck.ai / Hark 按 2026-10 的真实页面编写；Meta AI 为未验证的保守通用配置；Muse 按 2026-10-19 用户提供的真实 DOM 快照确认，见 `SITE_PROFILES` 注释）在 `src/frontend/lib/dom-observer.js` 的 `SEED_SITES`，前后端同一份（后端 `src/backend/src/site-seeds.js` 读取）。后端第一次启动时写进网站列表；旧版 `sites.json` 里没有配置的默认网站会补上种子配置和域名。之后种子只用于“恢复默认”和插件的离线兜底。

@@ -17,7 +17,10 @@
     attach_button: '[data-testid="composer-plus-btn"], button[aria-label*="添加文件"], button[aria-label*="附件"], button[aria-label*="上传"], ' +
       'button[aria-label*="Attach"], button[aria-label*="attach"], button[aria-label*="Upload"], button[aria-label*="upload"], ' +
       'button[aria-label*="Add files"], button[aria-label*="Add photos"], [data-testid*="attach"], [data-testid*="upload"]',
-    file_input: 'input[type="file"]'
+    file_input: 'input[type="file"]',
+    // 布尔开关：发送按钮超时未出现/未启用时，是否回退到回车发送；false = 直接失败（send_not_confirmed）。
+    // meta.ai 的 Lexical 编辑器回车语义不可靠，设 false。
+    enter_fallback: true
   };
   var UPLOAD_WAIT_MS = 90000;   // 带文件时等页面上传完成（发送按钮可用）的最长时间
 
@@ -32,6 +35,7 @@
     var out = {};
     Object.keys(DEFAULT_ACTIONS).forEach(function (k) {
       if ((k === 'regenerate_button' || k === 'send_button') && a[k] === '') { out[k] = ''; return; }   // 该站点不支持
+      if (k === 'enter_fallback') { out[k] = a[k] === false ? false : true; return; }   // 布尔开关
       if (k === 'regenerate_menu_text') {
         var t = typeof a[k] === 'string' && a[k].length <= 300 ? a[k] : DEFAULT_ACTIONS[k];
         try { out.menuText = new RegExp(t, 'i'); } catch (_) { out.menuText = new RegExp(DEFAULT_ACTIONS[k], 'i'); }
@@ -185,12 +189,18 @@
         var b = findSendBtn();
         return isEnabled(b) ? b : null;
       }, files.length ? UPLOAD_WAIT_MS : 3000, files.length ? 200 : 50) : null;
-      // 文字已填好、发送按钮仍不可用：源站限制发送（到达上限）
+      // 文字已填好、发送按钮仍不可用：enter_fallback=false 的站（如 meta.ai）
+      // 直接判失败（按钮不启用说明文字没被编辑器识别）；否则按到达上限处理
       if (!btn && !files.length && text.trim() && findSendBtn()) {
+        if (sel.enter_fallback === false) {
+          return { ok: false, code: 'send_not_confirmed', detail: '发送按钮一直处于不可用状态，文字可能没被编辑器识别，未发送' };
+        }
         return { ok: false, code: 'limit_reached', detail: '到达上限（发送按钮不可用）' };
       }
       if (!btn && files.length) return { ok: false, code: 'upload_not_finished', detail: '文件已交给页面，但等不到上传完成（发送按钮一直不可用）' };
-      if (btn) btn.click(); else pressEnter(win, input);
+      if (btn) btn.click();
+      else if (sel.enter_fallback !== false) pressEnter(win, input);
+      else return { ok: false, code: 'send_not_confirmed', detail: '没等到发送按钮出现，未发送' };
       // 发送确认（两阶段，防误报 ok）：
       //  1) 8 秒内等页面真正接受：进入生成中（最强信号）、或输入框被清空、或纯文件时发送按钮变不可用；
       //  2) 若靠“输入框清空”确认，再观察 1.2 秒：必须保持清空（排除页面瞬时抖动/回填），
