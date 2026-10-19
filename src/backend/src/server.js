@@ -385,22 +385,41 @@ export function createBridgeServer(opts = {}) {
       if (path === '/api/sites/launch' && req.method === 'POST') {
         const target = onlineExtensions()[0];
         if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件' });
-        // 一键打开：优先打开“页面已关”的会话；已有同 host 标签页开着的跳过，不重复打开
+        // 一键打开：遍历默认站点（四个种类），每个站点：
+        //   1) 已有关闭的会话 → 把它们全部重新打开；
+        //   2) 没有已关闭会话（无数据）→ 为它新建一个（打开站点首页）；
+        //   3) 该站点已有标签页开着 → 跳过，不重复打开。
         const openHosts = db.openTabHosts();
-        const toOpen = [];
-        const seen = new Set();
+        const seeds = seedSites();
+        // 已关闭会话按站点 key 分组（source 对不上时按 host 兜底）
+        const closedBySite = new Map();
         for (const c of db.listConversations(500)) {
           if (c.status !== 'closed' || !c.url || !/^https:\/\//.test(c.url)) continue;
-          let host;
-          try { host = new URL(c.url).hostname.replace(/^www\./, ''); } catch { continue; }
-          if (openHosts.has(host) || seen.has(host)) continue;   // 已有同 host 标签页，跳过
-          seen.add(host);
-          toOpen.push(c.url);
+          let key = c.source;
+          if (!seeds.some((s) => s.key === key)) {
+            try {
+              const h = new URL(c.url).hostname.replace(/^www\./, '');
+              const s = seeds.find((x) => siteHosts(x).some((sh) => h === sh || h.endsWith('.' + sh)));
+              key = s ? s.key : null;
+            } catch { key = null; }
+          }
+          if (!key) continue;
+          if (!closedBySite.has(key)) closedBySite.set(key, []);
+          closedBySite.get(key).push(c.url);
         }
-        if (!toOpen.length) return json(res, 200, { ok: true, count: 0 });
+        const toOpen = [];
+        let reopened = 0, created = 0;
+        for (const s of seeds) {
+          const hosts = siteHosts(s);
+          if (hosts.some((h) => openHosts.has(h))) continue;   // 已有同站标签页，跳过
+          const closed = closedBySite.get(s.key) || [];
+          if (closed.length) { toOpen.push(...closed); reopened += closed.length; }
+          else if (/^https:\/\//.test(s.url)) { toOpen.push(s.url); created++; }   // 无数据才新建
+        }
+        if (!toOpen.length) return json(res, 200, { ok: true, count: 0, reopened: 0, created: 0 });
         sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: randomId('launch').slice(0, 40), action: 'open_sites', conversation_id: 'sites', text: toOpen.join('\n').slice(0, 20000) }));
-        log.info(`[sites] launch ${toOpen.length} closed conversations via ${target.clientId}`);
-        return json(res, 202, { ok: true, count: toOpen.length });
+        log.info(`[sites] launch reopened=${reopened} created=${created} via ${target.clientId}`);
+        return json(res, 202, { ok: true, count: toOpen.length, reopened, created });
       }
       const nc = path.match(/^\/api\/sites\/([^/]+)\/new-chat$/);
       if (nc && req.method === 'POST') {

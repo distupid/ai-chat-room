@@ -977,7 +977,11 @@ function closePage(c) {
 async function launchAll() {
   try {
     const r = await api('/api/sites/launch', { method: 'POST', body: '{}' });
-    snackbar(r.count ? `正在后台打开 ${r.count} 个已关会话（已有同站标签页的已跳过）` : '没有需要打开的已关会话', r.count ? 'ok' : undefined);
+    if (!r.count) return snackbar('四个站点都开着，没有需要打开的', undefined);
+    const parts = [];
+    if (r.reopened) parts.push(`重开 ${r.reopened} 个已关会话`);
+    if (r.created) parts.push(`新建 ${r.created} 个站点`);
+    snackbar(`正在后台打开：${parts.join('，')}`, 'ok');
   } catch (e) { snackbar(`一键打开失败：${e.message}`, 'err'); }
 }
 
