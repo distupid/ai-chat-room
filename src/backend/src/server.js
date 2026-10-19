@@ -12,6 +12,7 @@ import { analyzeDom, analyzeNewSite } from './dom-analyzer.js';
 import { seedSites, seedByKey, SEED_KEYS, siteHosts, sourceForUrl } from './site-seeds.js';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -50,6 +51,11 @@ export function createBridgeServer(opts = {}) {
 
   // DOM 配置：插件上传页面 DOM → 分析 → 统一配置；保存在 data/dom-config.json，重启后仍然有效
   const domConfigPath = opts.domConfigPath ?? (opts.configPath ? join(dirname(opts.configPath), 'dom-config.json') : null);
+  // 多 AI 共享上下文：群发结果存成 JSON，下次发送时拼进 prompt；保存在数据目录
+  const dbPathForCtx = config.dbPath || opts.dbPath || ':memory:';
+  const sharedContextPath = () => dbPathForCtx === ':memory:'
+    ? join(tmpdir(), 'bridge-shared-context.json')
+    : join(dirname(dbPathForCtx), 'shared-context.json');
   let domConfig = null;
   if (domConfigPath && existsSync(domConfigPath)) {
     try { domConfig = JSON.parse(readFileSync(domConfigPath, 'utf8')); } catch { domConfig = null; }
@@ -450,6 +456,32 @@ export function createBridgeServer(opts = {}) {
         const add = missingDefaults().map((x) => ({ ...x, updated_at: Date.now(), seeded: true }));
         if (add.length) { customSites = [...add, ...customSites]; saveSites(); notifySitesChanged(); }
         return json(res, 200, { ok: true, added: add.map((x) => x.key), sites: customSites.map(siteOut) });
+      }
+      // 多 AI 共享上下文：看板把群发结果存成 JSON，下次发送时拼进 prompt
+      if (path === '/api/shared-context' && (req.method === 'GET' || req.method === 'POST')) {
+        if (!client.scopes.includes(Scope.CONTROL)) return json(res, 403, { ok: false, error: 'control scope required' });
+        const ctxPath = sharedContextPath();
+        if (req.method === 'GET') {
+          try {
+            const raw = readFileSync(ctxPath, 'utf8');
+            const data = JSON.parse(raw);
+            if (data && Array.isArray(data.entries)) return json(res, 200, { ok: true, updated_at: data.updated_at || 0, entries: data.entries });
+          } catch { /* 没有或坏了就返回空 */ }
+          return json(res, 200, { ok: true, updated_at: 0, entries: [] });
+        }
+        const b = await body();
+        const entries = Array.isArray(b.entries) ? b.entries.slice(0, 50).map((e) => ({
+          source: String(e.source || '').slice(0, 32),
+          name: String(e.name || e.source || '').slice(0, 40),
+          reply: String(e.reply || '').slice(0, 8000),
+          at: Number(e.at) || Date.now(),
+          conversation_id: String(e.conversation_id || '').slice(0, 128),
+        })) : [];
+        try {
+          mkdirSync(dirname(ctxPath), { recursive: true });
+          writeFileSync(ctxPath, JSON.stringify({ updated_at: Date.now(), entries }, null, 2));
+        } catch (e) { return json(res, 500, { ok: false, error: `写入失败：${e.message}` }); }
+        return json(res, 200, { ok: true, entries: entries.length });
       }
       const reset = /^\/api\/sites\/([a-z0-9_-]{1,32})\/reset$/.exec(path);
       if (reset && req.method === 'POST') {
