@@ -46,27 +46,20 @@ async function waitRendered(tabId, maxMs) {
 
 /**
  * 后端指令 probe_site：抓 DOM → 上传分析。
- * 已经打开了这个网站的标签页时直接用它（不新开、不关闭，也不会把用户正在看的页面关掉）；
- * 否则后台新开一个，等渲染稳定后抓取，抓完关闭。
+ * 统一新开后台标签页，不复用已有标签页：已有标签页的状态不可预测
+ * （旧对话、React 未水合完），复用它只等 6 秒稳定容易抓到旧 DOM；
+ * 新开标签页等加载完成 + 20 秒渲染稳定，保证抓到的是目标 URL 渲染完成后的 DOM。
+ * 抓完关闭，不动用户已有的标签页（同浏览器 profile，登录态一致）。
  */
 async function probeSite(command) {
   const url = command.text;
   if (!/^https:\/\//.test(url || '')) return { ok: false, code: 'bad_url', detail: '只支持 https 网址' };
-  const host = new URL(url).hostname.replace(/^www\./, '');
-  let tab, opened = false;
+  let tab;
   try {
-    const tabs = (await chrome.tabs.query({})).filter((t) => {
-      try { const h = new URL(t.url || '').hostname.replace(/^www\./, ''); return h === host || h.endsWith('.' + host); } catch { return false; }
-    });
-    // 优先：网址完全一致 → 正在看的 → 不在首页（多半是对话页）
-    tab = tabs.find((t) => t.url === url) || tabs.find((t) => t.active) || tabs.find((t) => new URL(t.url).pathname.length > 1) || tabs[0];
-    if (!tab) {
-      tab = await chrome.tabs.create({ url, active: false });
-      opened = true;
-      await waitTabComplete(tab.id, 30000);
-    }
+    tab = await chrome.tabs.create({ url, active: false });
+    await waitTabComplete(tab.id, 30000);
     // React 等 SSR 页面会先水合，失败（如 React #418）时整页重新渲染：等文字和元素数都稳定再抓
-    await waitRendered(tab.id, opened ? 20000 : 6000);
+    await waitRendered(tab.id, 20000);
     const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: capturePage });
     if (!res?.result?.html) return { ok: false, code: 'capture_failed', detail: '没能读取页面内容' };
     const { serverUrl, token } = await loadSettings();
@@ -75,7 +68,7 @@ async function probeSite(command) {
   } catch (e) {
     return { ok: false, code: 'probe_failed', detail: String(e?.message || e) };
   } finally {
-    if (opened && tab?.id != null) chrome.tabs.remove(tab.id).catch(() => {});
+    if (tab?.id != null) chrome.tabs.remove(tab.id).catch(() => {});
   }
 }
 
