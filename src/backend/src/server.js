@@ -130,9 +130,11 @@ export function createBridgeServer(opts = {}) {
     }
   }
   /**
-   *   POST /api/attachments   （observer token，需要 control）body = 文件原始内容；
-   *        header x-file-name = encodeURIComponent(文件名)，content-type = 文件类型 → {ok, attachment:{id,name,type,size}}
-   *   GET  /api/attachments/:id（extension token，需要 publish）→ 文件内容
+   *   POST /api/attachments   body = 文件原始内容；header x-file-name = encodeURIComponent(文件名)，
+   *        content-type = 文件类型 → {ok, attachment:{id,name,type,size}}
+   *        鉴权：control（看板发快速回复附件）或 publish（插件上传页面里观察到的文件）
+   *   GET  /api/attachments/:id → 文件内容
+   *        鉴权：publish（插件取快速回复附件）或 read_content（看板看插件上传的文件）
    */
   async function handleAttachments(req, res, path) {
     if (!originAllowed(req.headers.origin, req.headers.host)) return json(res, 403, { ok: false, error: 'forbidden origin' });
@@ -140,7 +142,9 @@ export function createBridgeServer(opts = {}) {
     if (!client) return json(res, 401, { ok: false, error: 'unauthorized' });
     pruneAttachments();
     if (path === '/api/attachments' && req.method === 'POST') {
-      if (!client.scopes.includes(Scope.CONTROL)) return json(res, 403, { ok: false, error: 'control scope required' });
+      if (!client.scopes.includes(Scope.CONTROL) && !client.scopes.includes(Scope.PUBLISH)) {
+        return json(res, 403, { ok: false, error: 'control or publish scope required' });
+      }
       let name = 'file';
       try { name = decodeURIComponent(String(req.headers['x-file-name'] || 'file')); } catch { /* 保持默认 */ }
       name = name.replace(/[\u0000-\u001f\u007f/\\]/g, '_').trim().slice(0, 255) || 'file';
@@ -156,7 +160,9 @@ export function createBridgeServer(opts = {}) {
     }
     const one = /^\/api\/attachments\/([A-Za-z0-9_-]{8,64})$/.exec(path);
     if (one && req.method === 'GET') {
-      if (!client.scopes.includes(Scope.PUBLISH)) return json(res, 403, { ok: false, error: 'publish scope required' });
+      if (!client.scopes.includes(Scope.PUBLISH) && !client.scopes.includes(Scope.READ_CONTENT)) {
+        return json(res, 403, { ok: false, error: 'publish or read_content scope required' });
+      }
       const a = attachments.get(one[1]);
       if (!a) return json(res, 404, { ok: false, error: '附件不存在或已过期' });
       res.writeHead(200, {
@@ -379,11 +385,41 @@ export function createBridgeServer(opts = {}) {
       if (path === '/api/sites/launch' && req.method === 'POST') {
         const target = onlineExtensions()[0];
         if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件' });
-        const urls = customSites.filter((x) => x.enabled !== false).map((x) => x.url).filter((u) => /^https:\/\//.test(u));
-        if (!urls.length) return json(res, 400, { ok: false, error: '网站列表是空的' });
-        sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: randomId('launch').slice(0, 40), action: 'open_sites', conversation_id: 'sites', text: urls.join('\n').slice(0, 20000) }));
-        log.info(`[sites] launch ${urls.length} sites via ${target.clientId}`);
-        return json(res, 202, { ok: true, count: urls.length });
+        // 一键打开：遍历默认站点（四个种类），每个站点：
+        //   1) 已有关闭的会话 → 把它们全部重新打开；
+        //   2) 没有已关闭会话（无数据）→ 为它新建一个（打开站点首页）；
+        //   3) 该站点已有标签页开着 → 跳过，不重复打开。
+        const openHosts = db.openTabHosts();
+        const seeds = seedSites();
+        // 已关闭会话按站点 key 分组（source 对不上时按 host 兜底）
+        const closedBySite = new Map();
+        for (const c of db.listConversations(500)) {
+          if (c.status !== 'closed' || !c.url || !/^https:\/\//.test(c.url)) continue;
+          let key = c.source;
+          if (!seeds.some((s) => s.key === key)) {
+            try {
+              const h = new URL(c.url).hostname.replace(/^www\./, '');
+              const s = seeds.find((x) => siteHosts(x).some((sh) => h === sh || h.endsWith('.' + sh)));
+              key = s ? s.key : null;
+            } catch { key = null; }
+          }
+          if (!key) continue;
+          if (!closedBySite.has(key)) closedBySite.set(key, []);
+          closedBySite.get(key).push(c.url);
+        }
+        const toOpen = [];
+        let reopened = 0, created = 0;
+        for (const s of seeds) {
+          const hosts = siteHosts(s);
+          if (hosts.some((h) => openHosts.has(h))) continue;   // 已有同站标签页，跳过
+          const closed = closedBySite.get(s.key) || [];
+          if (closed.length) { toOpen.push(...closed); reopened += closed.length; }
+          else if (/^https:\/\//.test(s.url)) { toOpen.push(s.url); created++; }   // 无数据才新建
+        }
+        if (!toOpen.length) return json(res, 200, { ok: true, count: 0, reopened: 0, created: 0 });
+        sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: randomId('launch').slice(0, 40), action: 'open_sites', conversation_id: 'sites', text: toOpen.join('\n').slice(0, 20000) }));
+        log.info(`[sites] launch reopened=${reopened} created=${created} via ${target.clientId}`);
+        return json(res, 202, { ok: true, count: toOpen.length, reopened, created });
       }
       const nc = path.match(/^\/api\/sites\/([^/]+)\/new-chat$/);
       if (nc && req.method === 'POST') {

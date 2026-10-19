@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI-Chat-Room",
-  "version": "1.6.0",
+  "version": "1.8.0",
   "description": "AI-Chat-Room：观察看板网站列表里的 AI 网站页面 DOM（默认 ChatGPT / Duck.ai / Hark，可编辑、停用、删除、添加），通过 WebSocket 上报到本地 Node.js 后端，并接收后端指令。",
   "minimum_chrome_version": "116",
   "permissions": [
@@ -17,6 +17,7 @@
     "https://www.hark.com/*",
     "https://hark.com/*",
     "https://duck.ai/*",
+    "https://muse.ai/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],

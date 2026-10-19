@@ -51,7 +51,9 @@
       user: '[data-user-message-bubble] .whitespace-pre-wrap, [data-user-message-bubble]',
       assistant: '[data-dil-message-id], .markdown',
       // 正文中要去掉的部分：代码块工具栏（“复制代码 / 启用自动换行”）、按钮、读屏专用文字
-      exclude: '[data-markdown-copy="exclude"], button, .sr-only'
+      exclude: '[data-markdown-copy="exclude"], button, .sr-only',
+      // 正文开头要删掉的前缀（正则）：如 muse.ai 替身文字自带“用户消息：/助手消息：”
+      strip: ''
     },
     generating: {
       selector:
@@ -202,6 +204,63 @@
         send_button: 'button[data-testid="send-button"]',
         regenerate_button: ''
       }
+    },
+
+    // muse.ai（2026-10-19）：选择器来自用户提供的真实 DOM 快照（已确认）。
+    // 消息行 [data-message-item="true"]，data-message-role="user|assistant" 区分角色，
+    // data-message-id 取 ID。注意列表虚拟化：可视区外的消息只有 sr-only 替身 span
+    //（[data-message-accessibility-surrogate]，自带“用户消息：/助手消息：”前缀），
+    // 可视区内是可见 <p>（“你：”前缀在 sr-only 里，已被 BASE_EXCLUDE 排除）。
+    // text 指向替身 span（bodyOf 豁免显式选择的候选），strip 去前缀；无替身时退回整行。
+    // 输入框是 textarea[aria-label="消息"]；发送按钮平时不在 DOM 里
+    // （div[data-hatch-composer-action-slot] 是空槽位），填了内容才渲染出
+    // button[aria-label="发送"]；填完等按钮出现再点，不出现则回车发送。
+    // 生成中：button[aria-label="停止任务"] 出现即为生成中（快照抓取时正在生成，
+    // 最后一条 assistant 消息还是空壳）。附件按钮：button[aria-label="附加文件"]。
+    // 类名是 Tailwind 动态生成的，只用 data-*/aria-* 语义属性。
+    // 会话 ID：快照未提供 URL 模式，暂用标签页伪 ID，待补充。
+    muse: {
+      config_version: 1,
+      source: 'default:muse',
+      site: 'muse',
+      conversation: {
+        url_pattern: null,   // 待补充：快照 URL 仅为 https://muse.ai/
+        dom: null,
+        fallback_id: null,
+        fallback_path: null,
+        prefix: 'muse-'
+      },
+      message: {
+        selector: '[data-message-item="true"]',
+        role_sources: [],
+        role_rules: [
+          { selector: '[data-message-role="assistant"]', role: 'assistant', scope: 'self' },
+          { selector: '[data-message-role="user"]', role: 'user', scope: 'self' }
+        ],
+        id_attrs: ['data-message-id'],
+        id_inner: null
+      },
+      text: {
+        user: '[data-message-accessibility-surrogate="true"]',
+        assistant: '[data-message-accessibility-surrogate="true"]',
+        exclude: 'button, [aria-hidden="true"]',
+        strip: '^(用户消息|助手消息)：'
+      },
+      generating: {
+        selector: 'button[aria-label="停止任务"]:not([disabled])',
+        activity_idle_ms: 2000
+      },
+      status: {
+        model_selector: '',
+        exclude_messages: true,
+        check_interval_ms: 2000
+      },
+      actions: {
+        composer: 'textarea[aria-label="消息"]',
+        send_button: 'div[data-hatch-composer-action-slot="true"] button[aria-label="发送"], button[aria-label="发送"]',
+        regenerate_button: '',
+        attach_button: 'button[aria-label="附加文件"]'
+      }
     }
   };
 
@@ -212,7 +271,9 @@
   var SEED_SITES = [
     { key: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', host: 'chatgpt.com', hosts: ['chatgpt.com', 'chat.openai.com'], enabled: true, config: DEFAULT_CONFIG },
     { key: 'duckai', name: 'Duck.ai', url: 'https://duck.ai/', host: 'duck.ai', hosts: ['duck.ai'], enabled: true, config: SITE_PROFILES.duckai },
-    { key: 'hark', name: 'Hark', url: 'https://www.hark.com/chat', host: 'www.hark.com', hosts: ['hark.com'], enabled: true, config: SITE_PROFILES.hark }
+    { key: 'hark', name: 'Hark', url: 'https://www.hark.com/chat', host: 'www.hark.com', hosts: ['hark.com'], enabled: true, config: SITE_PROFILES.hark },
+    // 2026-10-19 新增：muse.ai（meta.ai 已于同日移除）
+    { key: 'muse', name: 'Muse', url: 'https://muse.ai/', host: 'muse.ai', hosts: ['muse.ai'], enabled: true, config: SITE_PROFILES.muse }
   ];
 
   function normHost(h) { return String(h || '').toLowerCase().replace(/\.$/, '').replace(/^www\./, ''); }
@@ -369,6 +430,8 @@
       assistantText: pickSel(t.assistant, 'assistant' in dt ? dt.assistant : D.text.assistant, 'text.assistant', true),
       // 配置里的 exclude 之外总是排除：读屏 / 搜索用的替身文字、sr-only 标签、复制排除区、代码块工具栏
       textExclude: [pickSel(t.exclude, 'exclude' in dt ? dt.exclude : D.text.exclude, 'text.exclude', true), BASE_EXCLUDE].filter(Boolean).join(', '),
+      // 正文前缀清理（muse.ai 替身文字自带“用户消息：/助手消息：”）；null = 不处理
+      textStrip: pickRe(t.strip, 'strip' in dt ? dt.strip : D.text.strip, 'text.strip'),
       // 同一组（如同一轮回答拆成 文字 + 文件卡片 + 文字 多个节点）合并成一条消息：组 ID 属性
       groupAttr: str(m.group_attr === undefined ? dm.group_attr : m.group_attr, 200) || '',
       generating: pickSel(g.selector, 'selector' in dg ? dg.selector : D.generating.selector, 'generating.selector', true),
@@ -730,7 +793,9 @@
 
   // 只取正文，避免把“复制/编辑”等按钮区域算进去；找不到正文节点时退回整个消息节点
   function getNodeText(el, role, c) {
-    return extractText(bodyOf(el, role, c) || el, c.textExclude);
+    var text = extractText(bodyOf(el, role, c) || el, c.textExclude);
+    if (text && c.textStrip) text = text.replace(c.textStrip, '');
+    return text;
   }
 
   /** 正文节点：取第一个不在排除区（替身文字、sr-only 等）里的匹配 */
@@ -741,8 +806,9 @@
     for (var i = 0; i < list.length; i++) {
       var b = list[i];
       if (!c.textExclude) return b;
+      // 显式选中的候选本身不排除（muse.ai 的正文就是替身 span），只看祖先是否在排除区
       var bad = false;
-      for (var p = b; p && p !== el; p = p.parentElement) if (p.matches && p.matches(c.textExclude)) { bad = true; break; }
+      for (var p = b.parentElement; p && p !== el; p = p.parentElement) if (p.matches && p.matches(c.textExclude)) { bad = true; break; }
       if (!bad) return b;
     }
     return null;
@@ -960,7 +1026,8 @@
       routeSequence: 0,
       statusKey: null,
       statusSequence: 0,
-      lastStatusCheckAt: 0
+      lastStatusCheckAt: 0,
+      lastMessageHits: 0                              // 最近一次扫描消息选择器的命中数（0 = 疑似选择器失效，页面改版时看这个）
     };
 
     var observer = null;
@@ -1126,6 +1193,7 @@
     function scanMessages(conversationId, force, fresh) {
       if (fresh || !observer || now() - lastFullAt >= FULL_REFRESH_MS) resetCache();
       var nodes = doc.querySelectorAll(cfg.messageSelector); // querySelectorAll 结果本身不含重复节点
+      state.lastMessageHits = nodes.length;
       var lastAssistantId = null;
 
       // 第一遍：收集当前渲染出来的消息（长对话里页面只渲染一部分，DOM 位置不能当作消息序号）
@@ -1458,6 +1526,13 @@
       setConfig: setConfig,
       getConfig: function () {
         return { source: cfg.source, site: cfg.site, warnings: cfg.warnings.slice(), config: cfg.raw, actions: cfg.actions };
+      },
+      /**
+       * 选择器健康度（供后台诊断 / 看板判断站点是否改版）：
+       * message_selector_hits 为 0 且页面明显有对话内容时，多半是选择器失效。
+       */
+      getSelectorHealth: function () {
+        return { message_selector_hits: state.lastMessageHits, warnings: cfg.warnings.slice() };
       },
       /** 页面当前是否在生成（供快速回复 / 重新回答判断忙碌） */
       isGenerating: function () { return state.generating || !!(cfg.generating && doc.querySelector(cfg.generating)); },

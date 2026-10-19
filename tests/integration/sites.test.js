@@ -190,6 +190,128 @@ test('页面操作：Hark 快速回复走 textarea + 发送按钮；duck.ai 不�
   d.win.close();
 });
 
+test('页面操作：ChatGPT 快速回复走 contenteditable 输入框；重新生成点击对应按钮', async () => {
+  const conv = '6720a1b2-0000-4111-8222-999988887777';
+  const html = `<!doctype html><html><head><title>ChatGPT</title></head><body><main>
+    <article><div data-message-author-role="assistant" data-message-id="msg-1"><div class="markdown"><p>你好</p></div></div></article>
+    <form data-chatgpt-composer="true">
+      <div id="prompt-textarea" contenteditable="true"></div>
+      <button type="button" data-testid="send-button" aria-label="发送">s</button>
+    </form>
+    <button type="button" aria-label="重新生成回复">r</button>
+  </main></body></html>`;
+  const { win, doc, obs } = runObserver(html, `https://chatgpt.com/c/${conv}`);
+  win.eval(ACTIONS_SRC);
+  assert.equal(obs.getConversationId(), conv);
+  const sent = [];
+  doc.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+    const ed = doc.querySelector('[contenteditable="true"]');
+    sent.push(ed.textContent);
+    ed.textContent = '';
+  });
+  let generating = false;
+  doc.querySelector('[aria-label="重新生成回复"]').addEventListener('click', () => { generating = true; });
+  const ctx = {
+    document: doc, window: win, actions: obs.getConfig().actions,
+    isGenerating: () => generating || obs.isGenerating(), conversationId: () => obs.getConversationId()
+  };
+  const r = await win.ChatGPTBridgeActions.execute(ctx, { action: 'reply', conversation_id: conv, text: '你好 ChatGPT' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(sent, ['你好 ChatGPT']);
+  const r2 = await win.ChatGPTBridgeActions.execute(ctx, { action: 'regenerate', conversation_id: conv });
+  assert.equal(r2.ok, true, JSON.stringify(r2));
+  assert.equal(r2.detail, '已开始重新生成');
+  obs.stop();
+  win.close();
+});
+
+test('选择器降级：站点改版后旧选择器全失效，观察器不崩、page_info 报告 0 命中', async () => {
+  const conv = '6720a1b2-0000-4111-8222-999988887777';
+  // 改版后的页面：没有任何旧选择器能命中的标记，但 URL 里仍有会话 ID
+  const redesigned = `<!doctype html><html><head><title>ChatGPT</title></head><body><div id="app-v2">
+    <section class="thread"><article class="turn" data-kind="assistant"><div class="content"><p>改版后的回答</p></div></article></section>
+  </div></body></html>`;
+
+  // 观察器层：不崩，健康度报告 0 命中，page.opened 照常发出
+  const o = runObserver(redesigned, `https://chatgpt.com/c/${conv}`);
+  await waitFor(() => o.events.some((e) => e.event_type === 'page.opened'), { label: 'page.opened' });
+  const health = o.obs.getSelectorHealth();
+  assert.equal(health.message_selector_hits, 0);
+  assert.ok(Array.isArray(health.warnings));
+  o.obs.stop();
+  o.win.close();
+
+  // 内容脚本层：page_info 把健康度带给后台
+  class NoopWS { constructor() { this.readyState = 0; } send() {} close() {} }
+  const bg = createBackground({
+    WebSocketImpl: NoopWS, storage: null, clientId: 'ext-health-0001',
+    settings: { serverUrl: 'ws://127.0.0.1:1', token: 'x' },
+    executeCommand: async () => ({ ok: true })
+  });
+  const page = openChatGPTPage({ url: `https://chatgpt.com/c/${conv}`, tabId: 11, background: bg, html: redesigned });
+  const info = await waitFor(async () => {
+    const r = await page.sendToContent({ kind: 'page_info' });
+    return r && r.ok ? r : null;
+  }, { label: 'page_info ok' });
+  assert.equal(info.conversation_id, conv);
+  assert.equal(info.selector_health.message_selector_hits, 0);
+  assert.ok(Array.isArray(info.selector_health.warnings));
+  page.close();
+});
+
+// ---------------------------------------------------------------------------
+// 新默认站点种子：meta.ai / muse.ai（2026-10-19）
+// 注意：两站选择器均为未验证的保守通用配置（见 SITE_PROFILES 注释），非实测 DOM；
+// 断言的是“配置按假设工作”，真实选择器待看板 probe_site 细化。
+// ---------------------------------------------------------------------------
+
+test('新种子：meta.ai / muse.ai 按域名找到对应站点配置', () => {
+  const { win, obs } = runObserver('<!doctype html><html><head><title>x</title></head><body></body></html>', 'https://www.meta.ai/');
+  const O = win.ChatGPTBridgeObserver;
+  assert.equal(O.findSite('www.meta.ai').key, 'metai');
+  assert.equal(O.findSite('meta.ai').key, 'metai');
+  assert.equal(O.findSite('muse.ai').key, 'muse');
+  assert.equal(O.siteHosts(O.findSite('www.meta.ai')).join(','), 'meta.ai');
+  // 种子顺序：chatgpt、duck.ai、hark 之后是 meta.ai、muse.ai
+  assert.equal(O.SEED_SITES.map((s) => s.key).join(','), 'chatgpt,duckai,hark,metai,muse');
+  obs.stop();
+  win.close();
+});
+
+test('muse.ai：generating 选择器故意留空（防卡“回答中”）；健康度可观测', async () => {
+  const { win, obs, events } = runObserver(
+    '<!doctype html><html><head><title>Muse</title></head><body><div id="app"></div></body></html>',
+    'https://muse.ai/');
+  await waitFor(() => events.some((e) => e.event_type === 'page.opened'), { label: 'page.opened' });
+  const cfg = obs.getConfig();
+  assert.equal(cfg.site, 'muse');
+  // 解析后的 generating 选择器为空：不猜停止按钮，防卡“回答中”
+  const O = win.ChatGPTBridgeObserver;
+  const resolved = O.resolveConfig(null, win.document, O.SITE_PROFILES.muse);
+  assert.equal(resolved.generating, '', 'generating 选择器留空，不猜停止按钮');
+  assert.equal(obs.isGenerating(), false);
+  // 选择器未验证，0 命中属预期，且能被后台观测到（等 probe 拿回真实 DOM 后写实）
+  assert.equal(obs.getSelectorHealth().message_selector_hits, 0);
+  obs.stop(); win.close();
+});
+
+test('meta.ai：generating 选择器故意留空（防卡“回答中”）；健康度可观测', async () => {
+  const { win, obs, events } = runObserver(
+    '<!doctype html><html><head><title>Meta AI</title></head><body><div id="app"></div></body></html>',
+    'https://www.meta.ai/');
+  await waitFor(() => events.some((e) => e.event_type === 'page.opened'), { label: 'page.opened' });
+  const cfg = obs.getConfig();
+  assert.equal(cfg.site, 'metai');
+  // 解析后的 generating 选择器为空：不猜停止按钮，防卡“回答中”
+  const O = win.ChatGPTBridgeObserver;
+  const resolved = O.resolveConfig(null, win.document, O.SITE_PROFILES.metai);
+  assert.equal(resolved.generating, '', 'generating 选择器留空，不猜停止按钮');
+  assert.equal(obs.isGenerating(), false);
+  // 选择器未验证，0 命中属预期，且能被后台观测到（等 probe_site 细化）
+  assert.equal(obs.getSelectorHealth().message_selector_hits, 0);
+  obs.stop(); win.close();
+});
+
 test('插件后台：focus 指令交给后台切换标签页（不经过内容脚本），会话不符时拒绝', async () => {
   class NoopWS { constructor() { this.readyState = 0; } send() {} close() {} }
   const calls = [];

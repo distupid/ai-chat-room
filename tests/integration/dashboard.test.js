@@ -150,7 +150,7 @@ test('会话实体：来源、标题、模型、消息数、回答中 → 出错
 
 // ---------------------------------------------------------------- 指令通道端到端
 
-function fakeChatGPT(conv) {
+function fakeChatGPT(_conv) {
   return `<!doctype html><html><head><title>测试 - ChatGPT</title></head><body>
   <main id="thread">
     <div data-chatgpt-search-unit-key="fallback-turn-0:0:user" data-chatgpt-search-message-ids="11111111-0000-4000-8000-000000000001">
@@ -543,7 +543,8 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   assert.ok(d.getElementById('detailScrim').classList.contains('open'));
   await waitFor(() => d.querySelectorAll('#detailMsgs .msg').length === 2, { label: 'detail' });
   const mact = (act) => d.querySelector(`#detailMsgs .msg.assistant [data-act="${act}"]`);
-  assert.ok(!d.querySelector('#detailMsgs .msg.user .mact'), '提问上没有回答操作');
+  assert.ok(!d.querySelector('#detailMsgs .msg.user [data-act="copy"]'), '提问上没有回答的复制/收藏/重新回答操作');
+  assert.ok(d.querySelector('#detailMsgs .msg.user [data-act="forward"]'), '提问上有转发按钮');
   // 复制
   mact('copy').click();
   await waitFor(() => copied.length === 1, { label: 'copied' });
@@ -796,7 +797,7 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   // 一键启动：插件收到 open_sites（后台打开所有网站）
   d.getElementById('launchBtn').click();
   const launch = await waitFor(() => ext.of('command').find((m) => m.action === 'open_sites'), { label: 'launch' });
-  assert.deepEqual(launch.text.split('\n'), ['https://chatgpt.com/', 'https://duck.ai/', 'https://www.hark.com/chat']);
+  assert.deepEqual(launch.text.split('\n'), ['https://chatgpt.com/', 'https://duck.ai/', 'https://www.hark.com/chat', 'https://www.meta.ai/', 'https://claude.ai/new']);
 
   // 关闭页面：插件收到 close；页面关闭后只在“页面已关”里显示，点击重新打开并跳转
   await waitFor(() => btn('关闭') && !btn('关闭').disabled, { label: 'close enabled', timeout: 8000 });
@@ -829,10 +830,10 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   // 网站下拉：没有“内置”，每个网站都可编辑 / 删除；末尾“添加网站”
   assert.equal(d.getElementById('sort'), null);
   d.getElementById('sitesBtn').click();
-  await waitFor(() => d.querySelectorAll('#sitesMenu .mi').length === 4, { label: 'sites menu' });
-  assert.deepEqual([...d.querySelectorAll('#sitesMenu .mi')].map((n) => n.dataset.site), ['chatgpt', 'duckai', 'hark', '+']);
-  assert.equal(d.querySelectorAll('#sitesMenu .mi .ed').length, 3);
-  assert.equal(d.querySelectorAll('#sitesMenu .mi .del').length, 3);
+  await waitFor(() => d.querySelectorAll('#sitesMenu .mi').length === 6, { label: 'sites menu' });
+  assert.deepEqual([...d.querySelectorAll('#sitesMenu .mi')].map((n) => n.dataset.site), ['chatgpt', 'duckai', 'hark', 'metai', 'claude', '+']);
+  assert.equal(d.querySelectorAll('#sitesMenu .mi .ed').length, 5);
+  assert.equal(d.querySelectorAll('#sitesMenu .mi .del').length, 5);
   d.querySelector('#sitesMenu [data-site="duckai"] .ed').click();
   const edit = d.querySelector('#sitesMenu .mi.editing');
   const [nameIn, urlIn] = edit.querySelectorAll('input');
@@ -858,7 +859,7 @@ test('看板前端：在 jsdom 中加载，连接、渲染卡片、主题、设�
   d.getElementById('sitesBtn').click();
   await waitFor(() => d.querySelector('#sitesMenu [data-site="example"]'), { label: 'new site in menu' });
   d.querySelector('#sitesMenu [data-site="example"] .del').click();
-  await waitFor(() => !d.querySelector('#sitesMenu [data-site="example"]') && d.querySelectorAll('#sitesMenu .mi').length === 4, { timeout: 3000, label: 'site removed' });
+  await waitFor(() => !d.querySelector('#sitesMenu [data-site="example"]') && d.querySelectorAll('#sitesMenu .mi').length === 6, { timeout: 3000, label: 'site removed' });
 
   assert.equal(win.__appError, undefined, String(win.__appError?.stack));
   assert.deepEqual(errors, []);
@@ -904,7 +905,7 @@ test('添加网站：看板发起 → 插件收到 probe_site → 上传 DOM →
     fetch(`http://127.0.0.1:${server.port}${path}`, { method, headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
 
   const list0 = await (await api('/api/sites')).json();
-  assert.deepEqual(list0.sites.map((x) => x.key), ['chatgpt', 'duckai', 'hark']);
+  assert.deepEqual(list0.sites.map((x) => x.key), ['chatgpt', 'duckai', 'hark', 'metai', 'claude']);
   assert.equal((await api('/api/sites', { token: 'nope' })).status, 401);
   assert.equal((await api('/api/sites/probe', { method: 'POST', body: { url: 'https://chat.example.com/c/abc12345def' } })).status, 409, '没有在线插件');
 
@@ -951,7 +952,7 @@ test('添加网站：看板发起 → 插件收到 probe_site → 上传 DOM →
 
   assert.equal((await api('/api/sites/example', { method: 'DELETE' })).status, 200);
   assert.equal((await api('/api/sites/example', { method: 'DELETE' })).status, 404);
-  assert.deepEqual((await (await api('/api/sites')).json()).sites.map((x) => x.key), ['chatgpt', 'duckai', 'hark']);
+  assert.deepEqual((await (await api('/api/sites')).json()).sites.map((x) => x.key), ['chatgpt', 'duckai', 'hark', 'metai', 'claude']);
   assert.ok((await (await api('/api/sites')).json()).sites.every((x) => !('builtin' in x)), '没有“内置”概念');
 
   // 编辑：任何网站都能改名称 / 网址；只接受 https，域名不能重复
@@ -963,12 +964,12 @@ test('添加网站：看板发起 → 插件收到 probe_site → 上传 DOM →
   assert.equal((await api('/api/sites/chatgpt', { method: 'PATCH', body: { name: 'x' }, token: TOKENS.extension })).status, 403);
   // 一键启动：插件收到 open_sites（所有网址）
   const ln = await (await api('/api/sites/launch', { method: 'POST' })).json();
-  assert.equal(ln.count, 3);
+  assert.equal(ln.count, 5);
   const open = await waitFor(() => ext.of('command').find((m) => m.action === 'open_sites'), { label: 'open_sites' });
   assert.match(open.text, /https:\/\/chatgpt\.com\/g\/x/);
   // 默认网站也能删除
   assert.equal((await api('/api/sites/hark', { method: 'DELETE' })).status, 200);
-  assert.deepEqual((await (await api('/api/sites')).json()).sites.map((x) => x.key), ['chatgpt', 'duckai']);
+  assert.deepEqual((await (await api('/api/sites')).json()).sites.map((x) => x.key), ['chatgpt', 'duckai', 'metai', 'claude']);
   ext.close?.();
   await server.stop();
 });
@@ -1023,7 +1024,123 @@ test('删除页面已关的会话 / 重置数据库：开着的会话不能删�
   assert.ok(r.ok && r.removed.events > 0);
   assert.deepEqual(await list(), []);
   await waitFor(() => ext.of('command').some((x) => x.action === 'resync'), { label: 'resync command' });
-  assert.equal((await (await api('/api/sites')).json()).sites.length, 3, '网站列表保留');
+  assert.equal((await (await api('/api/sites')).json()).sites.length, 5, '网站列表保留');
   ext.close();
   await server.stop();
+});
+
+test('详情消息排序：广播带来的新序号不覆盖已有序号，顺序保持后端 (index, seq) 一致', async () => {
+  const server = await startServer({});
+  const ext = await extClient(server, 'ext-sort-0001');
+  const SORT_CONV = 'sort-conv-0001';
+  const SURL = `https://chatgpt.com/c/${SORT_CONV}`;
+  const E = (type, payload) => ev(type, payload, { conv: SORT_CONV });
+  await sendAndAck(ext, E('page.opened', { url: SURL, title: '排序' }));
+  await sendAndAck(ext, E('message.added', { message_id: 's-m1', role: 'user', index: 1000, text: '第一', text_length: 2 }));
+  await sendAndAck(ext, E('message.added', { message_id: 's-m2', role: 'assistant', index: 2000, text: '第二', text_length: 2 }));
+  await sendAndAck(ext, E('message.added', { message_id: 's-m3', role: 'assistant', index: 3000, text: '第三', text_length: 2 }));
+
+  const { d, close } = await openDashboard(server);
+  try {
+    const cardEl = await waitFor(() => d.querySelector(`.card[data-conv="${SORT_CONV}"]`), { label: 'card' });
+    cardEl.click();
+    const order = () => [...d.querySelectorAll('#detailMsgs .msg')].map((n) => n.dataset.mid);
+    await waitFor(() => order().length === 3, { label: 'detail messages' });
+    assert.deepEqual(order(), ['s-m1', 's-m2', 's-m3']);
+
+    // 新页面加载的上报带着全新的序号基数：广播不得覆盖已有消息的序号，否则会乱序
+    await sendAndAck(ext, E('message.updated', { message_id: 's-m1', role: 'user', index: 99999999, text: '第一（更新）', text_length: 6 }));
+    await waitFor(() => d.querySelector('#detailMsgs .msg')?.textContent.includes('第一（更新）'), { label: 'updated' });
+    assert.deepEqual(order(), ['s-m1', 's-m2', 's-m3'], '已有消息的序号不被广播覆盖');
+  } finally {
+    close(); ext.close(); await server.stop();
+  }
+});
+
+test('生成状态兜底：长时间无新事件自动回落 idle；用户发新消息后不再显示回答中', async () => {
+  const server = await startServer({});
+  try {
+    const t0 = Date.now();
+    const old = t0 - 10 * 60 * 1000;    // 10 分钟前
+    const recent = t0 - 60 * 1000;      // 1 分钟前
+    const mkEv = (id, type, payload, conv, at) => ({
+      type: 'event', event_id: id, event_type: type, occurred_at: at,
+      conversation_id: conv, tab_id: 5, payload
+    });
+    const statusOf = (conv) => server.db.listConversations(200, t0).find((c) => c.conversation_id === conv)?.status;
+
+    // 卡死：10 分钟前开始生成，之后再无事件 → 回落 idle（标签页还在，open_tabs=1）
+    server.db.persistEvent('ext-gen-0001', mkEv('t:gen:stuck:1', 'page.opened', { url: 'https://meta.ai/c/stuck1', title: '卡死' }, 'gen-stuck-0001', old), old);
+    server.db.persistEvent('ext-gen-0001', mkEv('t:gen:stuck:2', 'generation.started', { message_id: 'm1' }, 'gen-stuck-0001', old), old);
+    assert.equal(statusOf('gen-stuck-0001'), 'idle');
+
+    // 对照：1 分钟前开始的生成 → 仍是 generating
+    server.db.persistEvent('ext-gen-0001', mkEv('t:gen:ok:1', 'page.opened', { url: 'https://meta.ai/c/ok1', title: '正常' }, 'gen-ok-0001', recent), recent);
+    server.db.persistEvent('ext-gen-0001', mkEv('t:gen:ok:2', 'generation.started', { message_id: 'm1' }, 'gen-ok-0001', recent), recent);
+    assert.equal(statusOf('gen-ok-0001'), 'generating');
+
+    // 用户在生成开始后又发了新消息 → 那次生成肯定已结束，不再显示回答中
+    server.db.persistEvent('ext-gen-0001', mkEv('t:gen:um:1', 'page.opened', { url: 'https://meta.ai/c/um1', title: '追问' }, 'gen-um-0001', recent), recent);
+    server.db.persistEvent('ext-gen-0001', mkEv('t:gen:um:2', 'generation.started', { message_id: 'm1' }, 'gen-um-0001', recent), recent);
+    server.db.persistEvent('ext-gen-0001', mkEv('t:gen:um:3', 'message.added',
+      { message_id: 'u2', role: 'user', index: 2, text: '换个话题', text_length: 4 }, 'gen-um-0001', t0), t0);
+    assert.equal(statusOf('gen-um-0001'), 'idle');
+  } finally {
+    await server.stop();
+  }
+});
+
+test('网站下拉：删掉默认网站后出现“恢复默认网站”，一点加回来', async () => {
+  const server = await startServer({});
+  const { d, close } = await openDashboard(server);
+  try {
+    d.getElementById('sitesBtn').click();
+    await waitFor(() => d.querySelectorAll('#sitesMenu .mi').length === 6, { label: 'sites menu' });
+    assert.equal(d.querySelector('#sitesMenu .mi.restore'), null, '没缺默认网站时不显示恢复按钮');
+    // 删掉 hark（confirm 已在 openDashboard 里 mock 为 true）
+    d.querySelector('#sitesMenu [data-site="hark"] .del').click();
+    const restore = await waitFor(() => d.querySelector('#sitesMenu .mi.restore'), { label: 'restore button' });
+    assert.match(restore.textContent, /恢复默认网站/);
+    assert.match(restore.textContent, /hark/);
+    restore.click();
+    await waitFor(() => d.querySelector('#sitesMenu [data-site="hark"]'), { label: 'hark restored' });
+    assert.equal(d.querySelector('#sitesMenu .mi.restore'), null, '恢复后按钮消失');
+  } finally {
+    close(); await server.stop();
+  }
+});
+
+test('转发：用户消息气泡上的转发按钮 → 选目标 AI → 选会话 → reply 命令', async () => {
+  const server = await startServer({});
+  const ext = await extClient(server, 'ext-fwd-0001');
+  const C1 = 'fwd-conv-0001', C2 = 'fwd-conv-0002';
+  const E = (type, payload, conv, tab) => ev(type, payload, { conv, tab });
+  await sendAndAck(ext, E('page.opened', { url: 'https://chatgpt.com/c/fwd-conv-0001', title: '源会话' }, C1, 21));
+  await sendAndAck(ext, E('page.opened', { url: 'https://duck.ai/c/fwd-conv-0002', title: '目标会话' }, C2, 22));
+  await sendAndAck(ext, E('message.added', { message_id: 'f-m1', role: 'user', index: 1, text: '请把这段话转给 Duck', text_length: 10 }, C1, 21));
+  await sendAndAck(ext, E('message.added', { message_id: 'f-m2', role: 'user', index: 1, text: '目标已有消息', text_length: 6 }, C2, 22));
+
+  const { d, close } = await openDashboard(server);
+  try {
+    const cardEl = await waitFor(() => d.querySelector(`.card[data-conv="${C1}"]`), { label: 'card1' });
+    cardEl.click();
+    await waitFor(() => d.querySelector('#detailMsgs .msg.user'), { label: 'user msg' });
+    const fwdBtn = d.querySelector('#detailMsgs .msg.user [data-act="forward"]');
+    assert.ok(fwdBtn, '用户消息有转发按钮');
+    fwdBtn.click();
+    await waitFor(() => d.getElementById('forwardScrim').classList.contains('open'), { label: 'forward open' });
+    const siteBtn = await waitFor(
+      () => [...d.querySelectorAll('#forwardList .fwitem')].find((n) => n.textContent.includes('Duck')), { label: 'duck site' });
+    siteBtn.click();
+    const convBtn = await waitFor(
+      () => [...d.querySelectorAll('#forwardList .fwitem')].find((n) => n.textContent.includes('目标会话')), { label: 'target conv' });
+    convBtn.click();
+    const cmd = await waitFor(() => ext.messages.find((m) => m.type === 'command' && m.action === 'reply'),
+      { label: 'reply command', timeout: 10000 });
+    assert.equal(cmd.conversation_id, C2);
+    assert.equal(cmd.text, '请把这段话转给 Duck');
+    assert.ok(!d.getElementById('forwardScrim').classList.contains('open'), '发送后弹窗关闭');
+  } finally {
+    close(); ext.close(); await server.stop();
+  }
 });

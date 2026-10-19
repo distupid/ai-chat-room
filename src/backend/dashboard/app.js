@@ -6,7 +6,6 @@ const $ = (id) => document.getElementById(id);
 
 const STATUS = {
   generating: { label: '回答中', order: 1 },
-  limit_reached: { label: '到达上限', order: 2 },
   error: { label: '出错', order: 2 },
   idle: { label: '空闲', order: 3 },
   closed: { label: '页面已关', order: 4 },
@@ -16,8 +15,9 @@ const STATUS = {
 // regenerate = 该网站的 DOM 配置里有“重新生成”按钮（与 page-actions.js 的判断一致）
 const SOURCES = {};
 // 状态筛选（再点一次已选中的取消 = 全部，“全部”不含页面已关）；“收藏”由顶栏星标按钮切换
+// 筛选 chips 只保留：置顶、回答中、空闲、页面已关
 const STATUS_FILTERS = [
-  ['all', '全部'], ['pinned', '置顶'], ['generating', '回答中'], ['error', '出错'],
+  ['all', '全部'], ['pinned', '置顶'], ['generating', '回答中'],
   ['idle', '空闲'], ['closed', '页面已关'], ['favorite', '收藏']
 ];
 const DEFAULT_QUICK_REPLIES = ['继续', '请详细解释一下', '给出完整代码', '总结一下要点', '换一种思路再试试', '用中文回答', '谢谢，没问题了'];
@@ -26,6 +26,7 @@ const SVG = {
   add: '<svg class="i s18" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>',
   closeTab: '<svg class="i s18" viewBox="0 0 24 24"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm-3.59 12L14 16.41 12 14.41l-2 2L8.59 15l2-2-2-2L10 9.59l2 2 2-2L15.41 11l-2 2 2 2z"/></svg>',
   reply: '<svg class="i s18" viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>',
+  forward: '<svg class="i s18" viewBox="0 0 24 24"><path d="M14 9V5l7 7-7 7v-4.1c-5 0-8.5 1.6-11 5.1 1-5 4-10 11-11z"/></svg>',
   pin: '<svg class="i s18" viewBox="0 0 24 24"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>',
   copy: '<svg class="i s18" viewBox="0 0 24 24"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z"/></svg>',
   star: '<svg class="i s18" viewBox="0 0 24 24"><path d="m22 9.24-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/></svg>',
@@ -65,6 +66,7 @@ const state = {
   sentFiles: new Map((() => { try { return JSON.parse(localStorage.getItem('sentFiles') || '[]'); } catch { return []; } })()),   // conversation_id → 已发送的文件 [{ordinal, at, files}]
   files: new Map(),       // conversation_id → 详情输入框里待发送的文件 [{key, name, size, type, status, progress, id, error, xhr, preview}]
   reopening: new Map(),   // conversation_id → 截止时间：页面已关的会话正在后台重新打开
+  readMids: new Set(),    // 用户已看过的消息 id：看过之后不再通知
   ws: null,
   wsState: 'idle',
   canControl: false,
@@ -85,6 +87,7 @@ const state = {
   longOpen: new Set(),   // 超长消息：用户手动展开了全文的 message_id
   composerOpen: false,
   candIndex: -1,
+  showAllMsgs: new Set(),   // 超长对话：已点“显示更早消息”的会话
   drafts: new Map(),
   cardReply: null,
   pendingCommands: new Map(),
@@ -256,6 +259,13 @@ function titleOf(c) {
 // 只影响头像配色：index.html 里有专门配色的来源，其余统一配色
 const COLORED_SOURCES = ['chatgpt', 'duckai', 'hark'];
 const avatarClass = (s) => COLORED_SOURCES.includes(s) ? s : 'other';
+/** 未预置配色的站点：按 key 稳定生成一个色相，保证各站卡片底色不重复 */
+function srcHueStyle(s) {
+  if (!s || COLORED_SOURCES.includes(s)) return '';
+  let h = 0;
+  for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return `--src: hsl(${h} 55% 48%);`;
+}
 const sourceInfo = (s) => SOURCES[s] || { label: s || '未知', short: (s || '?').slice(0, 1).toUpperCase(), regenerate: false };
 
 // ------------------------------------------------------------------ 主题
@@ -342,9 +352,14 @@ async function latestAnswerText(c, conversationId) {
  * 正在看另一个会话的详情时排队，关掉当前详情后依次打开，一个回答对应一次弹出。
  */
 const answerQueue = [];
-const genSeq = new Map();
 const answerSeen = new Set();
 const answerKey = (conv, mid) => `${conv}|${mid || ''}`;
+// 同一条消息短时间内重复 finished（muse.ai 生成信号闪烁会导致 sequence 递增但 mid 不变）→ 只通知一次
+const lastNotifyByMsg = new Map();   // answerKey → 时间戳
+const NOTIFY_DUP_MS = 60000;         // 60 秒内同一条消息重复完成视为重复，不再通知
+// 心跳兜底：页面周期性 DOM 更新（如 muse.ai 的心跳）可能触发假的 generation.finished，
+// 内容没有实质变化时不通知
+const lastNotifyTextByConv = new Map();   // conversation_id → 上次通知时的回答正文（前 500 字）
 // 正在输入（焦点在输入框里且最近 4 秒内打过字）时不弹出，等输入停下来再弹，防止打断
 let lastInputAt = 0;
 document.addEventListener('input', (e) => { if (isEditable(e.target)) lastInputAt = Date.now(); }, true);
@@ -389,8 +404,8 @@ function focusAnswer(conv, mid) {
   setTimeout(() => node.classList.remove('flash'), 1700);
 }
 
-async function systemNotify(c, conversationId, mid, title, secs) {
-  const answer = (await latestAnswerText(c, conversationId)).replace(/\s+/g, ' ').trim();
+async function systemNotify(c, conversationId, mid, title, secs, answerText) {
+  const answer = (answerText ?? (await latestAnswerText(c, conversationId))).replace(/\s+/g, ' ').trim();
   const body = [secs, answer.length > 300 ? answer.slice(0, 300) + '…' : answer].filter(Boolean).join('\n');
   try {
     const note = new Notification(title, { body, tag: `answer:${answerKey(conversationId, mid)}`, renotify: true, requireInteraction: !!c?.pinned });
@@ -406,7 +421,7 @@ async function systemNotify(c, conversationId, mid, title, secs) {
 }
 
 /** 回答完成：普通会话 → 音效（打开“所有会话弹出”时同置顶）；置顶会话 → 打开详情 + 提示音；在后台时另发系统通知（含回答内容） */
-function onAnswerFinished(c, conversationId, name, secs, mid, seq) {
+async function onAnswerFinished(c, conversationId, name, secs, mid, eventId) {
   const n = settings.notify;
   const pinned = !!c?.pinned;
   if (pinned && !n.pinned_popup) return 'none';
@@ -414,14 +429,30 @@ function onAnswerFinished(c, conversationId, name, secs, mid, seq) {
     if (n.sound) { playSound(false); return 'sound'; }
     return 'none';
   }
-  // 一次回答完成（会话 + 回答 + 第几次生成）只弹一次：同一事件重复送达不再弹；重新回答是新的一次
-  const key = `${answerKey(conversationId, mid)}|${seq ?? ''}`;
-  const keyed = mid || seq != null;
-  if (keyed && answerSeen.has(key)) return 'dup';
-  if (keyed) { answerSeen.add(key); if (answerSeen.size > 500) answerSeen.delete(answerSeen.values().next().value); }
+  // 已读：这条消息用户已经看过，不再通知
+  if (mid && state.readMids.has(mid)) return 'read';
+  // 去重：同一条消息只通知一次。
+  // 事件键（event_id）：同一广播重复送达（重连回放等）直接丢弃。
+  // 语义键（会话+mid）：muse.ai 生成信号闪烁时，插件会发多次 finished，
+  //   message_id 相同但 generation_sequence 递增——按 mid 去重，不再按 sequence 区分。
+  //   60 秒内同一条消息重复完成视为重复；超过 60 秒可能是重新回答，允许再次通知。
+  const evtKey = eventId ? `evt:${eventId}` : null;
+  if (evtKey && answerSeen.has(evtKey)) return 'dup';
+  const semKey = answerKey(conversationId, mid);
+  const lastAt = lastNotifyByMsg.get(semKey);
+  if (lastAt && Date.now() - lastAt < NOTIFY_DUP_MS) return 'dup';
+  // 心跳兜底：页面周期性 DOM 更新触发的假 finished，回答正文没有实质变化 → 不通知
+  const text = (await latestAnswerText(c, conversationId)).replace(/\s+/g, ' ').trim().slice(0, 500);
+  const prevText = lastNotifyTextByConv.get(conversationId);
+  if (prevText !== undefined && prevText === text) return 'dup-content';
+  if (evtKey) { answerSeen.add(evtKey); if (answerSeen.size > 1000) answerSeen.delete(answerSeen.values().next().value); }
+  lastNotifyByMsg.set(semKey, Date.now());
+  if (lastNotifyByMsg.size > 500) lastNotifyByMsg.delete(lastNotifyByMsg.keys().next().value);
+  if (text) lastNotifyTextByConv.set(conversationId, text);
+  if (lastNotifyTextByConv.size > 200) lastNotifyTextByConv.delete(lastNotifyTextByConv.keys().next().value);
   if (pinned || n.sound) playSound(pinned);
   if (!pageInFront() && n.enabled && notificationsSupported() && Notification.permission === 'granted') {
-    systemNotify(c, conversationId, mid, `${pinned ? '置顶会话回答完成' : '回答完成'}：${name}`, secs);
+    systemNotify(c, conversationId, mid, `${pinned ? '置顶会话回答完成' : '回答完成'}：${name}`, secs, text);
   }
   return enqueueAnswer(conversationId, mid);
 }
@@ -489,6 +520,8 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
   state.longOpen = new Set();
   state.composerOpen = true;   // 点卡片打开详情时直接展开快速回复
   state.stickBottom = !toFavorite;   // 默认固定在最后一个回复
+  // 已读：打开详情即视为看过，清掉该会话排队中的通知
+  for (let i = answerQueue.length - 1; i >= 0; i--) if (answerQueue[i].conv === conversationId) answerQueue.splice(i, 1);
   $('quickText').value = '';   // 每次进入弹窗清空输入框，避免把上次没发出去的文字发到别的会话
   closeCands();
   $('detailScrim').classList.add('open');
@@ -499,7 +532,11 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
   try {
     const data = await api(`/api/conversations/${encodeURIComponent(conversationId)}/messages`);
     if (state.selected !== conversationId) return;
-    for (const m of data.messages) state.messages.set(m.message_id, { role: m.role, index: m.msg_index, text: m.text, html: m.html || null, favorite: !!m.favorite });
+    for (const m of data.messages) {
+      state.messages.set(m.message_id, { role: m.role, index: m.msg_index, seq: m.updated_seq, text: m.text, html: m.html || null, favorite: !!m.favorite });
+      state.readMids.add(m.message_id);   // 已读标记：看过之后不再通知
+    }
+    if (state.readMids.size > 2000) { const it = state.readMids.values(); for (let i = 0; i < 1000; i++) state.readMids.delete(it.next().value); }
     renderDetail(true, true);
     if (toFavorite) { state.stickBottom = false; scrollToFavorite(); } else scrollDetailBottom();
     if (state.selected === conversationId && state.composerOpen && document.activeElement !== $('quickText')) $('quickText').focus();
@@ -742,7 +779,10 @@ function onBroadcast(b) {
     if (b.event_type === 'message.added' || b.event_type === 'message.updated') {
       const p = b.payload;
       if (typeof p.text === 'string') {
-        state.messages.set(p.message_id, { role: p.role, index: p.index, text: p.text, html: typeof p.html === 'string' ? p.html : null, favorite: !!state.messages.get(p.message_id)?.favorite });
+        const prev = state.messages.get(p.message_id);
+        // 序号以后端冻结的为准：已存在的消息不再接受广播里的新序号——
+        // 不同页面加载的序号基数不同（见 dom-observer assignIndexes），覆盖会导致乱序；只更新内容
+        state.messages.set(p.message_id, { role: p.role, index: prev ? prev.index : p.index, seq: b.seq, text: p.text, html: typeof p.html === 'string' ? p.html : null, favorite: !!prev?.favorite });
         if (b.event_type === 'message.updated' && p.role === 'assistant') state.streaming.add(p.message_id);
         renderDetail(true);
       }
@@ -769,11 +809,10 @@ function onBroadcast(b) {
       snackbar(`${label}：${name}${b.payload.detail ? ' — ' + b.payload.detail : ''}`, 'err');
     }
   }
-  // 第几次生成：finished 不带序号，取同一会话最近一次 started 的（一次生成对应一次弹出）
-  if (b.event_type === 'generation.started') genSeq.set(conv, b.payload.generation_sequence ?? `${b.event_id}`);
+  // 回答完成即通知（去重在 onAnswerFinished 里做）
   if (b.event_type === 'generation.finished') {
     const secs = b.payload.duration_ms != null ? `用时 ${duration(b.payload.duration_ms)}` : '';
-    onAnswerFinished(c, conv, name, secs, b.payload.message_id || null, genSeq.get(conv));
+    onAnswerFinished(c, conv, name, secs, b.payload.message_id || null, b.event_id);
   }
   scheduleRefresh(b.event_type === 'message.updated' ? 1500 : 300);
 }
@@ -849,7 +888,7 @@ function card(c) {
 
   const node = el('article', {
     class: `card s-${c.status} src-${avatarClass(c.source)} ${c.pinned ? 'pinned' : ''}`,
-    style: /^#[0-9a-f]{3,8}$/i.test(sourceInfo(c.source).color || '') ? `--src:${sourceInfo(c.source).color}` : null,
+    style: /^#[0-9a-f]{3,8}$/i.test(sourceInfo(c.source).color || '') ? `--src:${sourceInfo(c.source).color}` : (srcHueStyle(c.source) || null),
     'data-conv': id, tabindex: '0', role: 'button', title: c.status === 'closed' ? '页面已关：点击查看详情，并在后台重新打开页面' : '点击查看详情',
     onclick: () => activateCard(c),
     onkeydown: (e) => { if (e.target === node && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); activateCard(c); } }
@@ -887,8 +926,13 @@ function card(c) {
       }, el('span', { html: SVG.add, style: 'display:inline-flex' }), '新建'),
       el('button', {
         class: 'btn outlined s', 'data-act': 'close', title: c.open_tabs ? '关闭开着这个会话的标签页' : offlineTip,
-        disabled: !online || busy, onclick: stop(() => closePage(c))
+        disabled: !online || busy || !c.open_tabs, onclick: stop(() => closePage(c))
       }, el('span', { html: SVG.closeTab, style: 'display:inline-flex' }), '关闭'),
+      // 页面已关：一键启动优先从卡片发起
+      c.status === 'closed' && !isReopening(c) ? el('button', {
+        class: 'btn filled s', 'data-act': 'launch', title: '在后台标签页重新打开这个会话',
+        disabled: state.wsState !== 'open' || !state.canControl, onclick: stop(() => reopenPage(c))
+      }, el('span', { html: SVG.add, style: 'display:inline-flex' }), '启动') : null,
       el('button', {
         class: `btn ${state.cardReply === id ? 'tonal' : 'outlined'} s`, 'data-act': 'reply', 'aria-expanded': String(state.cardReply === id),
         title: offlineTip, onclick: stop(() => toggleCardReply(id))
@@ -947,8 +991,12 @@ function closePage(c) {
 async function launchAll() {
   try {
     const r = await api('/api/sites/launch', { method: 'POST', body: '{}' });
-    snackbar(`正在后台打开还没开着的网站（列表共 ${r.count} 个）`, 'ok');
-  } catch (e) { snackbar(`一键启动失败：${e.message}`, 'err'); }
+    if (!r.count) return snackbar('四个站点都开着，没有需要打开的', undefined);
+    const parts = [];
+    if (r.reopened) parts.push(`重开 ${r.reopened} 个已关会话`);
+    if (r.created) parts.push(`新建 ${r.created} 个站点`);
+    snackbar(`正在后台打开：${parts.join('，')}`, 'ok');
+  } catch (e) { snackbar(`一键打开失败：${e.message}`, 'err'); }
 }
 
 // ------------------------------------------------------------------ 卡片：快速回复栏
@@ -1123,6 +1171,12 @@ function renderSitesMenu() {
       onclick: (e) => { e.stopPropagation(); removeSite(x); } })));
   items.push(el('button', { class: 'mi add', role: 'menuitem', 'data-site': '+', onclick: () => { toggleSitesMenu(false); openAddSite(); } },
     el('span', { class: 'plus' }, '+'), el('span', { class: 'nm' }, '添加网站', el('small', {}, '打开网址，获取 DOM 并分析'))));
+  // 删掉默认网站后，在这里一键加回来（调 POST /api/sites/defaults，需要 control 权限）
+  if (state.missingDefaults.length) {
+    items.push(el('button', { class: 'mi restore', role: 'menuitem', onclick: () => restoreDefaultSites() },
+      el('span', { class: 'plus' }, '↺'),
+      el('span', { class: 'nm' }, '恢复默认网站', el('small', {}, `加回 ${state.missingDefaults.join('、')}`))));
+  }
   $('sitesMenu').replaceChildren(...items);
 }
 
@@ -1236,6 +1290,64 @@ async function removeSite(x) {
   if (!window.confirm(`删除“${x.name}”？已记录的会话会保留。`)) return;
   try { await api(`/api/sites/${encodeURIComponent(x.key)}`, { method: 'DELETE' }); snackbar(`已删除 ${x.name}`, 'ok'); loadSites(); }
   catch (e) { snackbar(`删除失败：${e.message}`, 'err'); }
+}
+
+/** 一键加回被删掉的默认网站（POST /api/sites/defaults，需要 control 权限） */
+async function restoreDefaultSites() {
+  try {
+    const r = await api('/api/sites/defaults', { method: 'POST', body: '{}' });
+    snackbar(r.added?.length ? `已恢复默认网站：${r.added.join('、')}` : '没有可恢复的默认网站', 'ok');
+    await loadSites();
+  } catch (e) { snackbar(`恢复失败：${e.message}`, 'err'); }
+}
+
+// ------------------------------------------------------------------ 转发：用户消息 → 选目标 AI（已配置站点）→ 选该站点的会话 → reply 命令
+// 协议结论（A1）：复用 command{action:'reply'}，conversation_id=目标会话，text=原文；只转文本不转附件
+const FORWARD_TEXT_LIMIT = 20000;   // 协议 text 上限，超长看板侧截断
+
+function openForwardPicker(mid, text) {
+  state.forwarding = { mid, text };
+  renderForwardSites();
+  $('forwardScrim').classList.add('open');
+}
+function closeForwardPicker() {
+  $('forwardScrim').classList.remove('open');
+  state.forwarding = null;
+}
+function renderForwardSites() {
+  const sites = (state.sites || []).filter((s) => s.enabled !== false);
+  $('forwardSub').textContent = '选择目标 AI';
+  $('forwardList').replaceChildren(
+    ...sites.map((s) => {
+      const open = state.conversations.filter((c) => c.source === s.key && c.open_tabs > 0 && c.conversation_id !== state.selected).length;
+      return el('button', { class: 'fwitem', onclick: () => renderForwardConvs(s.key) },
+        el('span', { class: `avatar ${avatarClass(s.key)}` }, (s.name || s.key).slice(0, 1).toUpperCase()),
+        el('span', { class: 'nm' }, s.name || s.key),
+        el('small', {}, open ? `${open} 个可转发` : '没有打开的会话'));
+    }),
+    ...(!sites.length ? [el('div', { class: 'empty' }, '还没有配置网站')] : []));
+}
+function renderForwardConvs(siteKey) {
+  const s = (state.sites || []).find((x) => x.key === siteKey);
+  const convs = state.conversations
+    .filter((c) => c.source === siteKey && c.open_tabs > 0 && c.conversation_id !== state.selected)
+    .sort((a, b) => b.last_seen_at - a.last_seen_at);
+  $('forwardSub').textContent = `转发到${s ? s.name : siteKey}：选择会话`;
+  $('forwardList').replaceChildren(
+    el('button', { class: 'fwitem fwback', onclick: () => renderForwardSites() }, el('span', {}, '← 返回选择 AI')),
+    ...convs.map((c) => el('button', { class: 'fwitem', onclick: () => forwardTo(c) },
+      el('span', { class: 'nm' }, titleOf(c)),
+      el('small', {}, ago(c.last_seen_at)))),
+    ...(!convs.length ? [el('div', { class: 'empty' }, '这个 AI 没有打开的会话，先在页面上打开一个')] : []));
+}
+function forwardTo(c) {
+  const f = state.forwarding;
+  closeForwardPicker();
+  if (!f) return;
+  const text = f.text.length > FORWARD_TEXT_LIMIT ? f.text.slice(0, FORWARD_TEXT_LIMIT) : f.text;
+  const id = sendCommand(c.conversation_id, 'reply', text);
+  if (id) snackbar(`已转发到 ${titleOf(c)}`, 'ok');
+  else snackbar('转发失败：看板未连接或没有控制权限', 'err');
 }
 
 function openAddSite() {
@@ -1503,9 +1615,12 @@ function renderDetailHead() {
   $('detailTitle').textContent = c ? titleOf(c) : state.selected;
   const sub = $('detailSub');
   if (!c) { sub.replaceChildren(); return; }
+  const src = sourceInfo(c.source);
   sub.replaceChildren(
     el('span', { class: `badge b-${statusKey(c)}` }, STATUS[statusKey(c)]?.label || c.status),
-    el('span', {}, sourceInfo(c.source).label),
+    el('span', { class: 'dsrc' },
+      el('span', { class: `avatar mini ${avatarClass(c.source)}`, title: src.label }, src.short),
+      el('span', {}, src.label)),
     c.model ? el('span', {}, c.model) : null,
     el('span', {}, `${c.message_count} 条消息`),
     el('span', {}, ago(c.last_seen_at)),
@@ -1516,7 +1631,11 @@ function canControlConv(c) {
   return !!c && c.open_tabs > 0 && state.wsState === 'open' && state.canControl;
 }
 function convBusy(id) {
-  return [...state.pendingCommands.values()].some((p) => p.conversation_id === id && p.action !== 'focus');
+  // 有未完成的指令 → 忙
+  if ([...state.pendingCommands.values()].some((p) => p.conversation_id === id && p.action !== 'focus')) return true;
+  // 页面正在生成 → 忙；后端 5 分钟回落已保证卡死的 generating 不会一直是 generating，不会永久误判
+  const c = convById(id);
+  return !!c && c.status === 'generating';
 }
 
 /** 快速回复时把对话固定在底部（最后一个回复）；回复栏展开、图片加载、窗口变化导致高度变化时保持在底部 */
@@ -1551,8 +1670,16 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
   const body = $('detailBody');
   const nearBottom = forceBottom || state.composerOpen || body.scrollHeight - body.scrollTop - body.clientHeight < 120;
   // 相邻两条角色和内容完全相同的消息只显示一条（旧版插件把同一条发送重复记录过）
-  const msgs = [...state.messages.entries()].sort((a, b) => a[1].index - b[1].index)
+  // 排序：以后端序号为准，序号相同（插件按渲染子集上报时可能重复）时按服务端 seq 排（与 db.listMessages 的 ORDER BY 一致）
+  // 超长对话：默认只渲染最近 500 条，顶部可展开全部
+  const MAX_MSGS = 500;
+  let msgs = [...state.messages.entries()].sort((a, b) => (a[1].index - b[1].index) || ((a[1].seq ?? 0) - (b[1].seq ?? 0)))
     .filter(([, m], i, arr) => !i || arr[i - 1][1].role !== m.role || arr[i - 1][1].text !== m.text || !m.text);
+  let hiddenCount = 0;
+  if (!state.showAllMsgs.has(state.selected) && msgs.length > MAX_MSGS) {
+    hiddenCount = msgs.length - MAX_MSGS;
+    msgs = msgs.slice(-MAX_MSGS);
+  }
   const c = convById(state.selected);
   const src = sourceInfo(c?.source);
   const answers = msgs.filter(([, m]) => m.role === 'assistant').map(([id]) => id);
@@ -1589,7 +1716,18 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
         iconBtn(collapsed ? SVG.unfold : SVG.fold, collapsed ? '展开回答' : '折叠回答', () => {
           collapsed ? state.collapsed.delete(id) : state.collapsed.add(id);
           renderDetail();
-        }, { act: 'fold' })
+        }, { act: 'fold' }),
+        iconBtn(SVG.forward, '转发到其他 AI', () => openForwardPicker(id, m.text),
+          { act: 'forward', disabled: !state.canControl || state.wsState !== 'open' })
+      ) : m.role === 'user' ? el('div', { class: 'mact' },
+        iconBtn(SVG.copy, '复制', () => copyText(m.text), { act: 'copy' }),
+        iconBtn(m.favorite ? SVG.starOn : SVG.star, m.favorite ? '取消收藏' : '收藏', () => toggleFavorite(state.selected, id), { on: m.favorite, act: 'favorite' }),
+        iconBtn(collapsed ? SVG.unfold : SVG.fold, collapsed ? '展开' : '折叠', () => {
+          collapsed ? state.collapsed.delete(id) : state.collapsed.add(id);
+          renderDetail();
+        }, { act: 'fold' }),
+        iconBtn(SVG.forward, '转发到其他 AI', () => openForwardPicker(id, m.text),
+          { act: 'forward', disabled: !state.canControl || state.wsState !== 'open' })
       ) : null);
   };
   const userTotal = userOrd.size;
@@ -1599,7 +1737,11 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
   else {
     // 按消息复用：流式输出时只重建正在变化的那条（富文本解析、代码块渲染都不再每次全部重做）
     const keep = new Set();
-    placeChildren($('detailMsgs'), msgs.map(([id, m]) => {
+    const moreBtn = hiddenCount > 0 ? [el('button', {
+      class: 'cand', type: 'button',
+      onclick: () => { state.showAllMsgs.add(state.selected); renderDetail(); }
+    }, `显示更早的 ${hiddenCount} 条消息`)] : [];
+    placeChildren($('detailMsgs'), moreBtn.concat(msgs.map(([id, m]) => {
       keep.add(id);
       const ai = answers.indexOf(id);
       const sig = JSON.stringify([m.role, m.text, m.html, m.role === 'user' ? sentFilesFor(state.selected, userOrd.get(id)).length : 0, !!m.favorite, state.collapsed.has(id), state.streaming.has(id), state.longOpen.has(id),
@@ -1607,7 +1749,7 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
       let hit = msgCache.get(id);
       if (!hit || hit.sig !== sig) { hit = { sig, node: build(id, m) }; msgCache.set(id, hit); }
       return hit.node;
-    }).concat(orphan.map(orphanFilesEl)));
+    }).concat(orphan.map(orphanFilesEl))));
     for (const id of msgCache.keys()) if (!keep.has(id)) msgCache.delete(id);
   }
   applyLongFold();
@@ -1635,6 +1777,7 @@ function applyLongFold() {
     // 已处理过的（复用的节点上已有“展开全文 / 收起”）不再重复处理
     if (msg.classList.contains('collapsed') || msg.querySelector(':scope > .longbtn, :scope > .longfold')) continue;
     const id = msg.dataset.mid;
+    if (state.streaming.has(id)) continue;   // 正在流式输出的消息不等它，先不折叠
     const body = msg.querySelector(':scope > .body');
     if (!body) continue;
     const h = body.getBoundingClientRect().height;
@@ -1679,7 +1822,6 @@ function renderComposer() {
   const uploading = filesOf(state.selected).some((x) => x.status === 'uploading');
   $('quickSend').disabled = !ok || busy || uploading;
   $('quickSend').textContent = busy ? '发送中…' : uploading ? '上传中…' : '发送';
-  $('quickHint').textContent = !c ? '' : !ok ? '需要有标签页开着这个会话' : c.status === 'generating' ? '正在回答中，发送会被拒绝' : '在开着这个会话的标签页里发送';
 }
 
 function toggleComposer(open = !state.composerOpen) {
@@ -1700,12 +1842,12 @@ function openCands() {
   const box = $('quickCands');
   if (!list.length) { closeCands(); return; }
   if (state.candIndex >= list.length) state.candIndex = list.length - 1;
-  box.replaceChildren(el('div', { class: 'ch' }, '常见回答（点击或 ↑↓ 选择后 Enter 直接发送，Esc 关闭）'),
-    ...list.map((t, i) => el('button', {
-      class: `cand ${i === state.candIndex ? 'on' : ''}`, role: 'option', title: t, type: 'button',
-      onmousedown: (e) => e.preventDefault(),   // 不让输入框失焦
-      onclick: () => pickCand(t)
-    }, t)));
+  // 跟卡片内快速回复 (.creply .qr) 一样的 chip 结构：横向排列，点击直接发送；保留 ↑↓ 键盘选择
+  box.replaceChildren(...list.map((t, i) => el('button', {
+    class: `cand ${i === state.candIndex ? 'on' : ''}`, type: 'button', title: t,
+    onmousedown: (e) => e.preventDefault(),   // 不让输入框失焦
+    onclick: () => pickCand(t)
+  }, t)));
   box.classList.add('open');
 }
 function closeCands() { $('quickCands').classList.remove('open'); state.candIndex = -1; }
@@ -1765,16 +1907,99 @@ function sendReplyWithFab(id, text, onSent, attachments = [], fileItems = []) {
   f._conv = id;
   f.dataset.conv = id;
   const extra = attachments.length ? { attachments } : {};
-  if (!sendCommand(id, 'reply', text || null, { quiet: true, extra, fab: f, fileItems })) {
-    sendFailed({ conversation_id: id, text, fab: f, attachments, fileItems }, { ok: false, detail: '实时连接未建立' });
-    return false;
-  }
-  startProgress(f);
-  onSent?.();
+  // 冷启动：目标没有打开的标签页时，先等页面就绪再真正发送，别在页面还没 ready 就把指令发出去
+  const needWait = !(() => { const c = convById(id); return !!c && c.open_tabs > 0; })();
+  if (needWait) f._label.textContent = `等待「${name}」页面就绪…`;
+  onSent?.();   // 界面先收起（清空输入框、关闭弹窗），右下角按钮显示进度
+  waitForTabReady(id).then(() => {
+    if (!sendCommand(id, 'reply', text || null, { quiet: true, extra, fab: f, fileItems })) {
+      sendFailed({ conversation_id: id, text, fab: f, attachments, fileItems }, { ok: false, detail: '实时连接未建立' });
+      return false;
+    }
+    startProgress(f);
+    return true;
+  }).catch(() => {
+    sendFailed({ conversation_id: id, text, fab: f, attachments, fileItems }, { ok: false, code: 'no_open_tab', detail: '页面一直没就绪，请手动打开页面后重试' });
+  });
   return true;
 }
 
+/** 等目标会话的标签页就绪（open_tabs > 0）：没有就触发后台打开，最多等 30 秒 */
+function waitForTabReady(id, timeoutMs = 30000) {
+  return new Promise((resolve, reject) => {
+    const ready = () => { const c = convById(id); return !!c && c.open_tabs > 0; };
+    if (ready()) return resolve();
+    const c = convById(id);
+    if (c && c.status === 'closed' && !isReopening(c)) reopenPage(c);   // 冷启动：后台打开
+    const t0 = Date.now();
+    const timer = setInterval(() => {
+      if (ready()) { clearInterval(timer); resolve(); }
+      else if (Date.now() - t0 > timeoutMs) { clearInterval(timer); reject(new Error('timeout')); }
+    }, 500);
+  });
+}
+
+// ------------------------------------------------------------------ 底部群发：把内容发给所有空闲会话
+/** 空闲：状态 idle、没有未完成的指令、有打开的标签页；generating 或忙碌的跳过 */
+function bcastTargets() {
+  return state.conversations.filter((c) =>
+    c.status === 'idle' && !convBusy(c.conversation_id) && c.open_tabs > 0);
+}
+function renderBcastFiles() {
+  const box = $('bcastFiles');
+  const list = filesOf('broadcast');
+  box.classList.toggle('has', list.length > 0);
+  box.replaceChildren(...list.map((x) => el('div', { class: `qfile ${x.status}`, 'data-key': x.key, title: x.error || x.name },
+    el('span', { class: 'ft' }, x.preview ? el('img', { src: x.preview, alt: '' }) : extOf(x.name)),
+    el('span', { class: 'fn' }, el('b', {}, x.name),
+      el('small', {}, x.status === 'uploading' ? `上传中 ${Math.round(x.progress * 100)}%` : x.status === 'err' ? (x.error || '上传失败') : fmtSize(x.size))),
+    el('button', { class: 'icon-btn', type: 'button', title: '移除', 'aria-label': `移除 ${x.name}`, html: FAB_ICON.close,
+      onclick: () => { removeFile('broadcast', x.key); renderBcastFiles(); } }),
+    x.status === 'uploading' ? el('span', { class: 'bar', style: `width:${Math.round(x.progress * 100)}%` }) : null)));
+}
+function addBcastFiles(fileList) {
+  // 群发附件不按站点预检（目标站点能力各异），后端按各站能力分别处理；不支持的站点那次发送会失败并提示
+  let list = filesOf('broadcast').slice();
+  for (const file of [...fileList]) {
+    if (list.length >= MAX_FILES) { snackbar(`一次最多 ${MAX_FILES} 个文件`, 'err'); break; }
+    if (file.size > MAX_FILE_BYTES) { snackbar(`文件超过 25 MB：${file.name}`, 'err'); continue; }
+    const item = { key: randomId('f'), name: file.name || 'file', size: file.size, type: file.type || 'application/octet-stream',
+      status: 'uploading', progress: 0,
+      preview: /^image\//.test(file.type) && typeof URL.createObjectURL === 'function' ? URL.createObjectURL(file) : null };
+    list.push(item);
+    uploadFile('broadcast', item, file);
+  }
+  state.files.set('broadcast', list);
+  renderBcastFiles();
+}
+function sendBroadcast() {
+  const text = $('bcastText').value.trim();
+  const all = filesOf('broadcast');
+  if (all.some((x) => x.status === 'uploading')) return snackbar('文件还在上传，稍等一下', 'err');
+  if (all.some((x) => x.status === 'err')) return snackbar('有文件上传失败，删掉它或重新选择', 'err');
+  const files = all.filter((x) => x.status === 'done');
+  if (!text && !files.length) return;
+  if (!state.canControl || state.wsState !== 'open') return snackbar('看板未连接或没有控制权限', 'err');
+  const targets = bcastTargets();
+  if (!targets.length) return snackbar('没有空闲的会话（忙碌的已跳过）', 'err');
+  const attachments = files.map((f) => ({ id: f.id, name: f.name, type: f.type, size: f.size }));
+  let sent = 0;
+  for (const c of targets) {
+    // 直接走 command 链路，不弹 fab（避免刷屏）；结果走 onCommandResult 的无 fab 分支
+    if (sendCommand(c.conversation_id, 'reply', text || null, {
+      extra: attachments.length ? { attachments } : {}, fileItems: files,
+    })) sent++;
+  }
+  $('bcastText').value = '';
+  $('bcastText').style.height = 'auto';
+  state.files.delete('broadcast');
+  renderBcastFiles();
+  snackbar(sent === targets.length ? `已群发到 ${sent} 个会话` : `已发送 ${sent}/${targets.length} 个会话`, sent ? 'ok' : 'err');
+}
+
 /** 发送失败：按钮变红，展开后显示原因、发送的内容，可重新编辑或重试 */
+const NO_RETRY_CODES = new Set(['composer_not_found', 'attach_unsupported', 'regenerate_unsupported', 'regenerate_not_found', 'attach_single_only']);
+// ^ 这些是网站能力问题，重发也没用：不提供重试按钮，文件记录也不保留
 function sendFailed(p, msg) {
   const id = p.conversation_id;
   const reason = CODE_TEXT[msg.code] || msg.detail || msg.code || '未知错误';
@@ -1783,16 +2008,18 @@ function sendFailed(p, msg) {
   const text = p.text || '';
   const atts = p.attachments || [];
   const items = p.fileItems || [];
+  const noRetry = NO_RETRY_CODES.has(msg.code);
   state.drafts.set(id, text);   // 回到详情时输入框还原成没发出去的内容
-  if (items.length) state.files.set(id, items.slice());   // 文件也还原（后端保留 30 分钟）
+  if (!noRetry && items.length) state.files.set(id, items.slice());   // 文件也还原（后端保留 30 分钟）；重试无用时不保留
   if (state.selected === id) restoreDraft(id);   // 详情正开着这个会话：输入框立即同步回没发出去的内容
   const lines = [text.length > 160 ? `${text.slice(0, 160)}…` : text, atts.length ? `📎 ${atts.map((a) => a.name).join('、')}` : ''].filter(Boolean);
+  if (noRetry) lines.push('（这个网站不支持，重试也没用）');
   setFab(f, 'err', `发送失败：${reason}`, {
     title: `「${name}」`,
     detail: lines.join('\n'),
     actions: [
       { label: '重新编辑', onclick: () => { removeFab(f); openDetail(id).then(() => restoreDraft(id)); restoreDraft(id); } },
-      { label: '重试', onclick: () => { removeFab(f); sendReplyWithFab(id, text, () => { state.drafts.delete(id); state.files.delete(id); }, atts, items); } }
+      ...(!noRetry ? [{ label: '重试', onclick: () => { removeFab(f); sendReplyWithFab(id, text, () => { state.drafts.delete(id); state.files.delete(id); }, atts, items); } }] : []),
     ]
   });
 }
@@ -1917,12 +2144,22 @@ function addFiles(fileList) {
 function uploadFile(id, item, file) {
   const xhr = new XMLHttpRequest();
   item.xhr = xhr;
-  const done = () => { item.xhr = null; if (state.selected === id) { renderFiles(); renderComposer(); } };
+  const done = () => {
+    item.xhr = null;
+    if (state.selected === id) { renderFiles(); renderComposer(); }
+    if (id === 'broadcast') renderBcastFiles();
+  };
   xhr.open('POST', '/api/attachments');
   xhr.setRequestHeader('authorization', `Bearer ${settings.token}`);
   xhr.setRequestHeader('x-file-name', encodeURIComponent(item.name));
   xhr.setRequestHeader('content-type', item.type);
-  xhr.upload.onprogress = (e) => { if (e.lengthComputable) { item.progress = e.loaded / e.total; if (state.selected === id) renderFiles(); } };
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      item.progress = e.loaded / e.total;
+      if (state.selected === id) renderFiles();
+      if (id === 'broadcast') renderBcastFiles();
+    }
+  };
   xhr.onload = () => {
     let data = null;
     try { data = JSON.parse(xhr.responseText); } catch { /* ignore */ }
@@ -2053,11 +2290,27 @@ $('siteCfgJson').addEventListener('change', syncCfgFields);
 $('siteCfgEnabled').onclick = () => $('siteCfgEnabled').setAttribute('aria-checked', String($('siteCfgEnabled').getAttribute('aria-checked') !== 'true'));
 $('detailClose').onclick = closeDetail;
 $('detailScrim').addEventListener('click', (e) => { if (e.target === $('detailScrim')) closeDetail(); });
+$('forwardClose').onclick = closeForwardPicker;
+$('forwardScrim').addEventListener('click', (e) => { if (e.target === $('forwardScrim')) closeForwardPicker(); });
 $('detailJump').onclick = () => { const c = convById(state.selected); if (c) jumpTo(c); };
 $('detailPin').onclick = () => { const c = convById(state.selected); if (c) togglePin(c); };
 $('quickSend').onclick = sendQuick;
 $('quickAttach').onclick = () => $('quickFile').click();
 $('quickFile').addEventListener('change', (e) => { addFiles(e.target.files || []); e.target.value = ''; });
+// 底部群发栏
+const bct = $('bcastText');
+bct.addEventListener('input', () => {   // textarea 自适应高度
+  bct.style.height = 'auto';
+  bct.style.height = Math.min(bct.scrollHeight, 180) + 'px';
+});
+bct.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); sendBroadcast(); }
+});
+$('bcastAttach').onclick = () => $('bcastFile').click();
+$('bcastAttach').replaceChildren(buildIcon(ATTACH_ICON_DEFAULT));
+$('bcastAttach').title = '添加附件';
+$('bcastFile').addEventListener('change', (e) => { addBcastFiles(e.target.files || []); e.target.value = ''; });
+$('bcastSend').onclick = sendBroadcast;
 // 粘贴 / 拖进输入框的文件也加进来（网站支持上传时）
 $('quickText').addEventListener('paste', (e) => {
   const fl = e.clipboardData?.files;

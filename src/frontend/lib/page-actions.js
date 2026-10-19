@@ -17,7 +17,9 @@
     attach_button: '[data-testid="composer-plus-btn"], button[aria-label*="添加文件"], button[aria-label*="附件"], button[aria-label*="上传"], ' +
       'button[aria-label*="Attach"], button[aria-label*="attach"], button[aria-label*="Upload"], button[aria-label*="upload"], ' +
       'button[aria-label*="Add files"], button[aria-label*="Add photos"], [data-testid*="attach"], [data-testid*="upload"]',
-    file_input: 'input[type="file"]'
+    file_input: 'input[type="file"]',
+    // 布尔开关：发送按钮超时未出现/未启用时，是否回退到回车发送；false = 直接失败（send_not_confirmed）。
+    enter_fallback: true
   };
   var UPLOAD_WAIT_MS = 90000;   // 带文件时等页面上传完成（发送按钮可用）的最长时间
 
@@ -31,7 +33,8 @@
     a = a && typeof a === 'object' ? a : {};
     var out = {};
     Object.keys(DEFAULT_ACTIONS).forEach(function (k) {
-      if (k === 'regenerate_button' && a[k] === '') { out[k] = ''; return; }   // 该站点不支持
+      if ((k === 'regenerate_button' || k === 'send_button') && a[k] === '') { out[k] = ''; return; }   // 该站点不支持
+      if (k === 'enter_fallback') { out[k] = a[k] === false ? false : true; return; }   // 布尔开关
       if (k === 'regenerate_menu_text') {
         var t = typeof a[k] === 'string' && a[k].length <= 300 ? a[k] : DEFAULT_ACTIONS[k];
         try { out.menuText = new RegExp(t, 'i'); } catch (_) { out.menuText = new RegExp(DEFAULT_ACTIONS[k], 'i'); }
@@ -170,24 +173,60 @@
         await sleep(win, 300);   // 让页面先把文件加进输入框（很多网站上传期间会禁用发送按钮）
       }
       if (text.trim()) setComposerText(doc, win, input, text);
-      var btn = await waitUntil(win, function () {
-        var b = last(doc.querySelectorAll(sel.send_button));
+      // 发送前确认：文字必须真正落在输入框里。有的页面框架会回滚合成输入
+      // （框里看着有字、框架内部状态却是空的），此时点发送也发不出去，
+      // 而旧逻辑只看“输入框空了”就会误报 ok。按行压平后做包含检查，容忍换行差异。
+      if (text.trim()) {
+        var flat = function (s) { return String(s || '').replace(/\s+/g, ''); };
+        if (flat(composerText(input)).indexOf(flat(text).slice(0, 60)) < 0) {
+          return { ok: false, code: 'composer_fill_failed', detail: '文字没能填入输入框（页面可能回滚了输入），未点发送' };
+        }
+      }
+      // 无发送按钮的站点（如 muse.ai）：直接回车发送，不等按钮出现
+      var findSendBtn = function () { return sel.send_button ? last(doc.querySelectorAll(sel.send_button)) : null; };
+      var btn = sel.send_button ? await waitUntil(win, function () {
+        var b = findSendBtn();
         return isEnabled(b) ? b : null;
-      }, files.length ? UPLOAD_WAIT_MS : 3000, files.length ? 200 : 50);
-      // 文字已填好、发送按钮仍不可用：源站限制发送（到达上限）
-      if (!btn && !files.length && text.trim() && last(doc.querySelectorAll(sel.send_button))) {
+      }, files.length ? UPLOAD_WAIT_MS : 3000, files.length ? 200 : 50) : null;
+      // 文字已填好、发送按钮仍不可用：enter_fallback=false 的站直接判失败
+      // （按钮不启用说明文字没被编辑器识别）；否则按到达上限处理
+      if (!btn && !files.length && text.trim() && findSendBtn()) {
+        if (sel.enter_fallback === false) {
+          return { ok: false, code: 'send_not_confirmed', detail: '发送按钮一直处于不可用状态，文字可能没被编辑器识别，未发送' };
+        }
         return { ok: false, code: 'limit_reached', detail: '到达上限（发送按钮不可用）' };
       }
       if (!btn && files.length) return { ok: false, code: 'upload_not_finished', detail: '文件已交给页面，但等不到上传完成（发送按钮一直不可用）' };
-      if (btn) btn.click(); else pressEnter(win, input);
-      var sent = await waitUntil(win, function () {
-        return ctx.isGenerating() || (text.trim() ? composerText(input).trim() === '' : !isEnabled(last(doc.querySelectorAll(sel.send_button))));
-      }, 5000, 100);
+      if (btn) btn.click();
+      else if (sel.enter_fallback !== false) pressEnter(win, input);
+      else return { ok: false, code: 'send_not_confirmed', detail: '没等到发送按钮出现，未发送' };
+      // 发送确认（两阶段，防误报 ok）：
+      //  1) 8 秒内等页面真正接受：进入生成中（最强信号）、或输入框被清空、或纯文件时发送按钮变不可用；
+      //  2) 若靠“输入框清空”确认，再观察 1.2 秒：必须保持清空（排除页面瞬时抖动/回填），
+      //     期间进入生成中则直接成功，文字重现则判失败。超时无确认一律报失败，看板可重试。
+      var acceptState = await waitUntil(win, function () {
+        if (ctx.isGenerating()) return 'generating';
+        if (text.trim() && composerText(input).trim() === '') return 'cleared';
+        if (!text.trim() && sel.send_button && !isEnabled(findSendBtn())) return 'sent_files';
+        return null;
+      }, 8000, 100);
+      if (!acceptState) {
+        return { ok: false, code: 'send_not_confirmed', detail: '点了发送，但 8 秒内页面没有反应（输入框未清空、也未开始回答）' };
+      }
+      if (acceptState === 'cleared') {
+        var settleUntil = Date.now() + 1200;
+        for (;;) {
+          if (ctx.isGenerating()) break;   // 开始回答了，直接算成功
+          if (composerText(input).trim() !== '') {
+            return { ok: false, code: 'send_not_confirmed', detail: '输入框清空后又出现文字，消息可能没发出去' };
+          }
+          if (Date.now() >= settleUntil) break;
+          await sleep(win, 100);
+        }
+      }
       // 等页面开始回答再返回，避免看板紧接着发第二条时页面还没进入“回答中”
-      if (sent) await waitUntil(win, function () { return ctx.isGenerating(); }, 3000, 100);
-      return sent
-        ? { ok: true, detail: btn ? '已发送' : '已发送（回车）' }
-        : { ok: false, code: 'send_not_confirmed', detail: '文字已填入输入框，但没确认发送成功' };
+      await waitUntil(win, function () { return ctx.isGenerating(); }, 3000, 100);
+      return { ok: true, detail: btn ? '已发送' : '已发送（回车）' };
     }
 
     if (command.action === 'regenerate') {

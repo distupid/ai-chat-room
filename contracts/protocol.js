@@ -64,7 +64,8 @@ export const EventType = Object.freeze({
 export const ConversationStatus = Object.freeze({
   OK: 'ok',
   LIMIT_REACHED: 'limit_reached',
-  ERROR: 'error'
+  ERROR: 'error',
+  DELETED: 'deleted'          // 源站页面显示会话已删除 / 不存在 → 后端不再跟踪
 });
 
 /** 访问范围（scope），由后端按 token 授予 */
@@ -102,7 +103,10 @@ export const CommandAction = Object.freeze({
   REPLY: 'reply',             // 在会话输入框中填入 text 并发送
   REGENERATE: 'regenerate',   // 点击某条回答（默认最后一条）的“重新生成”
   FOCUS: 'focus',             // 切换到开着该会话的标签页（看板点卡片）
-  CLOSE: 'close'              // 关闭开着该会话的标签页（看板“关闭页面”）
+  CLOSE: 'close',             // 关闭开着该会话的标签页（看板“关闭页面”）
+  PROBE_SITE: 'probe_site',   // 后端 → 插件：抓取站点 DOM 并上传分析（DOM 选择器）
+  SYNC_SITES: 'sync_sites'    // 后端 → 插件：同步站点配置（DOM 选择器）
+  // 注：OPEN_SITES / NEW_CHAT / RESYNC 已在 schema enum 与两端实现中使用，MVP 后再补常量
 });
 
 export const Limits = Object.freeze({

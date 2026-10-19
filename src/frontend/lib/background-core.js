@@ -18,7 +18,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
 /** 标签页会话 ID 前缀（与后端 db.js 保持一致） */
 export const PSEUDO_PREFIX = 'tab-';
 
-export function createBackground({ WebSocketImpl, storage, clientId, settings, connectionOptions = {}, onBroadcast, executeCommand }) {
+export function createBackground({ WebSocketImpl, storage, clientId, settings, connectionOptions = {}, onBroadcast, executeCommand, fetchCommandFiles }) {
   const tabs = new Map(); // tabId → { url, conversation_id }
   const received = [];    // 最近收到的其他客户端广播（诊断用）
   const pageEventStats = { accepted: 0, rejected: 0, ignored_kind: 0 };
@@ -45,10 +45,20 @@ export function createBackground({ WebSocketImpl, storage, clientId, settings, c
       if (typeof executeCommand !== 'function') return { ok: false, code: 'unsupported' };
       // 标签页会话（还没进入具体会话的页面）：内容脚本看到的会话是 null
       const pageConv = String(cmd.conversation_id || '').startsWith(PSEUDO_PREFIX) ? null : cmd.conversation_id;
-      return executeCommand(cmd.tab_id, {
+      let command = {
         command_id: cmd.command_id, action: cmd.action, conversation_id: pageConv, text: cmd.text,
-        answer_index: cmd.answer_index, answer_total: cmd.answer_total, tab_ids: cmd.tab_ids, url: cmd.url
-      });
+        answer_index: cmd.answer_index, answer_total: cmd.answer_total, tab_ids: cmd.tab_ids, url: cmd.url,
+        attachments: cmd.attachments
+      };
+      if (command.action === 'reply' && Array.isArray(command.attachments) && command.attachments.length) {
+        // 快速回复带文件：先从后端取回文件内容，再交给页面自己的上传控件（见 page-actions.js）
+        if (typeof fetchCommandFiles !== 'function') return { ok: false, code: 'unsupported', detail: '不支持附件' };
+        const got = await fetchCommandFiles(command.attachments);
+        if (!got.ok) return got;
+        command = { ...command, files: got.files };
+        delete command.attachments;
+      }
+      return executeCommand(cmd.tab_id, command);
     },
     ...connectionOptions
   });
@@ -134,9 +144,15 @@ export function createBackground({ WebSocketImpl, storage, clientId, settings, c
    */
   let lastSnapshotKey = '';
   let lastSnapshotAt = 0;
+  const tabHealth = new Map();   // tabId → selector_health（内容脚本上报的选择器健康度，诊断用，不进协议）
   function syncTabs(list, { force = false } = {}) {
     const exist = new Set(list.map((t) => t.tab_id));
     for (const id of [...tabs.keys()]) if (!exist.has(id)) onTabRemoved(id);
+    for (const t of list) {
+      if (t.health) tabHealth.set(t.tab_id, t.health);
+      else tabHealth.delete(t.tab_id);
+    }
+    for (const id of [...tabHealth.keys()]) if (!exist.has(id)) tabHealth.delete(id);
     if (conn.state !== 'open') return 'offline';
     const items = list.slice(0, 500).map((t) => {
       const known = tabs.get(t.tab_id);
@@ -160,7 +176,7 @@ export function createBackground({ WebSocketImpl, storage, clientId, settings, c
   function diagnostics() {
     return {
       ...conn.diagnostics(),
-      tabs: [...tabs.entries()].map(([id, t]) => ({ tab_id: id, ...t })),
+      tabs: [...tabs.entries()].map(([id, t]) => ({ tab_id: id, ...t, selector_health: tabHealth.get(id) || null })),
       page_events: { ...pageEventStats },
       received_broadcasts: received.slice(-20)
     };
