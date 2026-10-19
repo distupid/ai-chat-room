@@ -747,11 +747,6 @@ function onBroadcast(b) {
   const conv = b.conversation_id;
   const c = convById(conv);
   const name = c ? titleOf(c) : conv;
-  // 群发结果收集：目标会话收到 AI 回复 → 更新结果卡片
-  if ((b.event_type === 'message.added' || b.event_type === 'message.updated') &&
-      b.payload?.role === 'assistant' && typeof b.payload?.text === 'string' && b.payload.text.trim()) {
-    onBcastReply(conv, b.payload.text);
-  }
   if (conv && conv === state.selected) {
     if (b.event_type === 'message.added' || b.event_type === 'message.updated') {
       const p = b.payload;
@@ -904,8 +899,13 @@ function card(c) {
       }, el('span', { html: SVG.add, style: 'display:inline-flex' }), '新建'),
       el('button', {
         class: 'btn outlined s', 'data-act': 'close', title: c.open_tabs ? '关闭开着这个会话的标签页' : offlineTip,
-        disabled: !online || busy, onclick: stop(() => closePage(c))
+        disabled: !online || busy || !c.open_tabs, onclick: stop(() => closePage(c))
       }, el('span', { html: SVG.closeTab, style: 'display:inline-flex' }), '关闭'),
+      // 页面已关：一键启动优先从卡片发起
+      c.status === 'closed' && !isReopening(c) ? el('button', {
+        class: 'btn filled s', 'data-act': 'launch', title: '在后台标签页重新打开这个会话',
+        disabled: state.wsState !== 'open' || !state.canControl, onclick: stop(() => reopenPage(c))
+      }, el('span', { html: SVG.add, style: 'display:inline-flex' }), '启动') : null,
       el('button', {
         class: `btn ${state.cardReply === id ? 'tonal' : 'outlined'} s`, 'data-act': 'reply', 'aria-expanded': String(state.cardReply === id),
         title: offlineTip, onclick: stop(() => toggleCardReply(id))
@@ -1880,17 +1880,13 @@ function sendReplyWithFab(id, text, onSent, attachments = [], fileItems = []) {
   const needWait = !(() => { const c = convById(id); return !!c && c.open_tabs > 0; })();
   if (needWait) f._label.textContent = `等待「${name}」页面就绪…`;
   onSent?.();   // 界面先收起（清空输入框、关闭弹窗），右下角按钮显示进度
-  // 带上多 AI 共享上下文（有的话）
-  sharedContextPrefix().then((prefix) => {
-    const fullText = (prefix || '') + (text || '');
-    return waitForTabReady(id).then(() => {
-      if (!sendCommand(id, 'reply', fullText || null, { quiet: true, extra, fab: f, fileItems })) {
-        sendFailed({ conversation_id: id, text, fab: f, attachments, fileItems }, { ok: false, detail: '实时连接未建立' });
-        return false;
-      }
-      startProgress(f);
-      return true;
-    });
+  waitForTabReady(id).then(() => {
+    if (!sendCommand(id, 'reply', text || null, { quiet: true, extra, fab: f, fileItems })) {
+      sendFailed({ conversation_id: id, text, fab: f, attachments, fileItems }, { ok: false, detail: '实时连接未建立' });
+      return false;
+    }
+    startProgress(f);
+    return true;
   }).catch(() => {
     sendFailed({ conversation_id: id, text, fab: f, attachments, fileItems }, { ok: false, code: 'no_open_tab', detail: '页面一直没就绪，请手动打开页面后重试' });
   });
@@ -1945,7 +1941,7 @@ function addBcastFiles(fileList) {
   state.files.set('broadcast', list);
   renderBcastFiles();
 }
-async function sendBroadcast() {
+function sendBroadcast() {
   const text = $('bcastText').value.trim();
   const all = filesOf('broadcast');
   if (all.some((x) => x.status === 'uploading')) return snackbar('文件还在上传，稍等一下', 'err');
@@ -1955,13 +1951,11 @@ async function sendBroadcast() {
   if (!state.canControl || state.wsState !== 'open') return snackbar('看板未连接或没有控制权限', 'err');
   const targets = bcastTargets();
   if (!targets.length) return snackbar('没有空闲的会话（忙碌的已跳过）', 'err');
-  // 带上多 AI 共享上下文，让它们基于同一份上下文一起聊
-  const fullText = (await sharedContextPrefix()) + text;
   const attachments = files.map((f) => ({ id: f.id, name: f.name, type: f.type, size: f.size }));
   let sent = 0;
   for (const c of targets) {
     // 直接走 command 链路，不弹 fab（避免刷屏）；结果走 onCommandResult 的无 fab 分支
-    if (sendCommand(c.conversation_id, 'reply', fullText || null, {
+    if (sendCommand(c.conversation_id, 'reply', text || null, {
       extra: attachments.length ? { attachments } : {}, fileItems: files,
     })) sent++;
   }
@@ -1970,69 +1964,6 @@ async function sendBroadcast() {
   state.files.delete('broadcast');
   renderBcastFiles();
   snackbar(sent === targets.length ? `已群发到 ${sent} 个会话` : `已发送 ${sent}/${targets.length} 个会话`, sent ? 'ok' : 'err');
-  if (sent > 0) openBcastResults(targets, text);
-}
-
-// ------------------------------------------------------------------ 群发结果卡片 + 多 AI 共享上下文
-function openBcastResults(targets, text) {
-  state.bcast = {
-    text, at: Date.now(),
-    results: new Map(targets.map((c) => [c.conversation_id, { c, reply: null, replyAt: 0 }])),
-  };
-  $('bcastResultSub').textContent = `已发送：“${text.length > 60 ? text.slice(0, 60) + '…' : text}”`;
-  renderBcastResults();
-  $('bcastResultScrim').classList.add('open');
-}
-function closeBcastResults() { $('bcastResultScrim').classList.remove('open'); }
-function renderBcastResults() {
-  const b = state.bcast;
-  if (!b) return;
-  $('bcastResultList').replaceChildren(...[...b.results.values()].map(({ c, reply, replyAt }) => {
-    const src = sourceInfo(c.source);
-    return el('div', { class: 'bcast-item', style: srcHueStyle(c.source) || null },
-      el('div', { class: 'bcast-head' },
-        el('span', { class: `avatar ${avatarClass(c.source)}` }, (src.label || c.source).slice(0, 1).toUpperCase()),
-        el('span', { class: 'nm' }, src.label || c.source),
-        el('span', { class: 'st' }, reply ? ago(replyAt) : '等待回复…')),
-      el('div', { class: `bcast-body${reply ? '' : ' waiting'}` }, reply || '…'));
-  }));
-}
-/** 广播里收到群发目标会话的 AI 回复 → 更新结果卡片 + 共享上下文 */
-function onBcastReply(conversationId, text) {
-  const b = state.bcast;
-  if (!b) return;
-  const r = b.results.get(conversation_id);
-  if (!r) return;
-  r.reply = text;
-  r.replyAt = Date.now();
-  if ($('bcastResultScrim').classList.contains('open')) renderBcastResults();
-  syncSharedContext();
-}
-/** 把当前群发结果同步为共享上下文 JSON，存后端 */
-let _sharedCtxTimer = null;
-function syncSharedContext() {
-  clearTimeout(_sharedCtxTimer);
-  _sharedCtxTimer = setTimeout(async () => {
-    const b = state.bcast;
-    if (!b) return;
-    const entries = [...b.results.values()]
-      .filter((r) => r.reply)
-      .map((r) => ({ source: r.c.source, name: sourceInfo(r.c.source).label || r.c.source, reply: r.reply, at: r.replyAt, conversation_id: r.c.conversation_id }));
-    if (!entries.length) return;
-    try {
-      await api('/api/shared-context', { method: 'POST', body: JSON.stringify({ updated_at: Date.now(), entries }) });
-    } catch { /* 后端存失败不打扰用户 */ }
-  }, 1500);   // 等回复收齐一点再存，避免每次流式更新都写
-}
-/** 下次发送时拼进 prompt 的共享上下文（带自然语言指令） */
-async function sharedContextPrefix() {
-  try {
-    const r = await api('/api/shared-context');
-    const entries = (r && r.entries) || [];
-    if (!entries.length) return '';
-    const lines = entries.map((e) => `【${e.name}】(${new Date(e.at).toLocaleString()}):\n${e.reply}`);
-    return `[多 AI 共享上下文] 以下是其他 AI 对同一问题的最新回复，请参考这些内容来回答，保持观点连贯：\n${lines.join('\n\n')}\n\n---\n`;
-  } catch { return ''; }
 }
 
 /** 发送失败：按钮变红，展开后显示原因、发送的内容，可重新编辑或重试 */
@@ -2330,8 +2261,6 @@ $('detailClose').onclick = closeDetail;
 $('detailScrim').addEventListener('click', (e) => { if (e.target === $('detailScrim')) closeDetail(); });
 $('forwardClose').onclick = closeForwardPicker;
 $('forwardScrim').addEventListener('click', (e) => { if (e.target === $('forwardScrim')) closeForwardPicker(); });
-$('bcastResultClose').onclick = closeBcastResults;
-$('bcastResultScrim').addEventListener('click', (e) => { if (e.target === $('bcastResultScrim')) closeBcastResults(); });
 $('detailJump').onclick = () => { const c = convById(state.selected); if (c) jumpTo(c); };
 $('detailPin').onclick = () => { const c = convById(state.selected); if (c) togglePin(c); };
 $('quickSend').onclick = sendQuick;

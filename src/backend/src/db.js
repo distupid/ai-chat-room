@@ -267,14 +267,24 @@ export function openDatabase(dbPath = ':memory:') {
 
     /** 看板：会话列表（最近活动在前），附带消息数、首条用户消息、最后一条消息预览、生成状态、标签页状态 */
     listConversations(limit = 200, now = Date.now()) {
+      // conversation_id → { count, tab_id, client_id, seq }：count 为打开的标签页数，tab_id/client_id 为最近活动的那个（卡片 1 对 1 绑定的 tab）
       const openTabs = new Map();
       for (const t of latestTabEventsStmt.all()) {
         if (t.event_type === 'page.closed' || !t.conversation_id) continue;
         if (now - t.received_at > TAB_STALE_MS) continue;   // 浏览器崩溃等没来得及上报关闭的标签页
-        openTabs.set(t.conversation_id, (openTabs.get(t.conversation_id) || 0) + 1);
+        const cur = openTabs.get(t.conversation_id);
+        if (!cur) {
+          openTabs.set(t.conversation_id, { count: 1, tab_id: Number(t.tab_id), client_id: t.client_id, seq: Number(t.seq) });
+        } else {
+          cur.count++;
+          if (Number(t.seq) > cur.seq) { cur.tab_id = Number(t.tab_id); cur.client_id = t.client_id; cur.seq = Number(t.seq); }
+        }
       }
       // 源站已删除的会话（最近一次 conversation.status 为 deleted）不再跟踪；之后若再上报 ok 会自动恢复
-      return listConversationsStmt.all(limit).map((r) => deriveConversation(r, openTabs.get(r.conversation_id) || 0, sourceResolver, now))
+      return listConversationsStmt.all(limit).map((r) => {
+        const ot = openTabs.get(r.conversation_id);
+        return deriveConversation(r, ot?.count || 0, sourceResolver, now, ot ? { tab_id: ot.tab_id, client_id: ot.client_id } : null);
+      })
         .filter((c) => c.page_status !== 'deleted')
         // 标签页会话（页面开着但还没进入具体会话）：页面关掉 / 进入真正的会话后就不再显示
         .filter((c) => !(c.pending && c.open_tabs === 0));
@@ -391,7 +401,7 @@ function isGenerating(r, now) {
  *   status 优先级：closed（没有标签页开着）> limit_reached > error > generating > idle
  *   页面关掉后 status_detail 仍保留最后一次的限额/报错提示
  */
-function deriveConversation(r, openTabs, resolveSource = sourceFromUrl, now = Date.now()) {
+function deriveConversation(r, openTabs, resolveSource = sourceFromUrl, now = Date.now(), boundTab = null) {
   let st = null;
   try { st = r.status_json ? JSON.parse(r.status_json) : null; } catch { st = null; }
   const generating = isGenerating(r, now);
@@ -416,6 +426,7 @@ function deriveConversation(r, openTabs, resolveSource = sourceFromUrl, now = Da
     status_at: r.status_at ?? null,
     generating: generating && openTabs > 0,
     open_tabs: openTabs,
+    bound_tab: boundTab,   // 卡片 1 对 1 绑定的标签页（最近活动的那个），没有则为 null
     message_count: Number(r.message_count),
     user_count: Number(r.user_count),
     assistant_count: Number(r.assistant_count),
