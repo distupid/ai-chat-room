@@ -19,7 +19,6 @@
       'button[aria-label*="Add files"], button[aria-label*="Add photos"], [data-testid*="attach"], [data-testid*="upload"]',
     file_input: 'input[type="file"]',
     // 布尔开关：发送按钮超时未出现/未启用时，是否回退到回车发送；false = 直接失败（send_not_confirmed）。
-    // meta.ai 的 Lexical 编辑器回车语义不可靠，设 false。
     enter_fallback: true
   };
   var UPLOAD_WAIT_MS = 90000;   // 带文件时等页面上传完成（发送按钮可用）的最长时间
@@ -189,8 +188,8 @@
         var b = findSendBtn();
         return isEnabled(b) ? b : null;
       }, files.length ? UPLOAD_WAIT_MS : 3000, files.length ? 200 : 50) : null;
-      // 文字已填好、发送按钮仍不可用：enter_fallback=false 的站（如 meta.ai）
-      // 直接判失败（按钮不启用说明文字没被编辑器识别）；否则按到达上限处理
+      // 文字已填好、发送按钮仍不可用：enter_fallback=false 的站直接判失败
+      // （按钮不启用说明文字没被编辑器识别）；否则按到达上限处理
       if (!btn && !files.length && text.trim() && findSendBtn()) {
         if (sel.enter_fallback === false) {
           return { ok: false, code: 'send_not_confirmed', detail: '发送按钮一直处于不可用状态，文字可能没被编辑器识别，未发送' };

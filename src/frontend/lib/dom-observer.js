@@ -261,57 +261,6 @@
         regenerate_button: '',
         attach_button: 'button[aria-label="附加文件"]'
       }
-    },
-
-    // meta.ai（2026-10-19）：输入框选择器来自用户提供的真实 DOM（已确认）。
-    // 输入框是 Lexical 编辑器：
-    //   div[contenteditable="true"][data-testid="composer-input"][data-lexical-editor="true"][role="textbox"]
-    // （另有个隐藏的 textarea[data-testid="composer-input"] 是 prehydration 占位，不能用）。
-    // 发送按钮平时 disabled：button[data-testid="composer-send-button"]，
-    // 必须先 focus 编辑器并填入文字，disabled 才会消失。
-    // 附件按钮：button[data-testid="composer-add-attachment-button"]。
-    // 发送逻辑：focus → execCommand 插入文字（Lexical 兼容）→ 等 disabled 消失 → 点击；
-    // 按钮超时未启用则直接 send_not_confirmed（enter_fallback: false，不回车）。
-    metai: {
-      config_version: 1,
-      source: 'default:metai',
-      site: 'metai',
-      conversation: {
-        url_pattern: null,   // 未验证：待实测补充
-        dom: null,
-        fallback_id: null,
-        fallback_path: null,
-        prefix: 'meta-'
-      },
-      message: {
-        // 未验证：通用候选；全部不命中时观察器静默，selector_health 会报 0
-        selector: '[data-testid*="message"], [data-message-id]',
-        role_sources: [],
-        role_rules: [],
-        id_attrs: ['data-message-id', 'id'],
-        id_inner: null
-      },
-      text: {
-        user: '',
-        assistant: '',
-        exclude: 'button, [aria-hidden="true"]'
-      },
-      generating: {
-        selector: '',   // 故意留空，见上
-        activity_idle_ms: 2000
-      },
-      status: {
-        model_selector: '',
-        exclude_messages: true,
-        check_interval_ms: 2000
-      },
-      actions: {
-        composer: 'div[contenteditable="true"][data-testid="composer-input"][data-lexical-editor="true"]',
-        send_button: 'button[data-testid="composer-send-button"]',
-        regenerate_button: '',
-        attach_button: 'button[data-testid="composer-add-attachment-button"]',
-        enter_fallback: false   // 发送按钮超时未启用时不回车，直接失败（Lexical 回车语义不可靠）
-      }
     }
   };
 
@@ -323,9 +272,7 @@
     { key: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', host: 'chatgpt.com', hosts: ['chatgpt.com', 'chat.openai.com'], enabled: true, config: DEFAULT_CONFIG },
     { key: 'duckai', name: 'Duck.ai', url: 'https://duck.ai/', host: 'duck.ai', hosts: ['duck.ai'], enabled: true, config: SITE_PROFILES.duckai },
     { key: 'hark', name: 'Hark', url: 'https://www.hark.com/chat', host: 'www.hark.com', hosts: ['hark.com'], enabled: true, config: SITE_PROFILES.hark },
-    // 2026-10-19 新增：meta.ai / muse.ai 选择器未验证（见 SITE_PROFILES 注释），先默认启用，
-    // 命中为 0 时看 selector_health，再用看板 probe_site 细化
-    { key: 'metai', name: 'Meta AI', url: 'https://www.meta.ai/', host: 'www.meta.ai', hosts: ['meta.ai'], enabled: true, config: SITE_PROFILES.metai },
+    // 2026-10-19 新增：muse.ai（meta.ai 已于同日移除）
     { key: 'muse', name: 'Muse', url: 'https://muse.ai/', host: 'muse.ai', hosts: ['muse.ai'], enabled: true, config: SITE_PROFILES.muse }
   ];
 
