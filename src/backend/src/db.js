@@ -163,6 +163,9 @@ export function openDatabase(dbPath = ':memory:') {
       -- 最近一次生成事件：先在 (会话, 类型, seq) 索引上取 MAX(seq) 再回表，不在长对话的大量 message.updated 里倒序扫描
       (SELECT event_type FROM events WHERE seq = (SELECT MAX(seq) FROM events e WHERE e.conversation_id = c.conversation_id
          AND event_type IN ('generation.started', 'generation.finished'))) AS last_generation_event,
+      (SELECT MAX(seq) FROM events e WHERE e.conversation_id = c.conversation_id
+         AND event_type IN ('generation.started', 'generation.finished')) AS last_generation_seq,
+      (SELECT MAX(updated_seq) FROM messages m WHERE m.conversation_id = c.conversation_id AND role = 'user') AS last_user_msg_seq,
       (SELECT json_extract(payload_json, '$.title') FROM events e WHERE e.conversation_id = c.conversation_id
          AND event_type = 'page.opened' ORDER BY seq DESC LIMIT 1) AS title,
       (SELECT payload_json FROM events e WHERE e.conversation_id = c.conversation_id
@@ -271,7 +274,7 @@ export function openDatabase(dbPath = ':memory:') {
         openTabs.set(t.conversation_id, (openTabs.get(t.conversation_id) || 0) + 1);
       }
       // 源站已删除的会话（最近一次 conversation.status 为 deleted）不再跟踪；之后若再上报 ok 会自动恢复
-      return listConversationsStmt.all(limit).map((r) => deriveConversation(r, openTabs.get(r.conversation_id) || 0, sourceResolver))
+      return listConversationsStmt.all(limit).map((r) => deriveConversation(r, openTabs.get(r.conversation_id) || 0, sourceResolver, now))
         .filter((c) => c.page_status !== 'deleted')
         // 标签页会话（页面开着但还没进入具体会话）：页面关掉 / 进入真正的会话后就不再显示
         .filter((c) => !(c.pending && c.open_tabs === 0));
@@ -352,6 +355,14 @@ function stripText(ev) {
 
 const TAB_STALE_MS = 12 * 60 * 60 * 1000;
 
+/**
+ * 生成状态卡死兜底：最后一次生成事件是 started，但之后 N 分钟内该会话没有任何新事件
+ * （部分站点如 meta.ai 的适配上报不了 generation.finished）→ 视为卡死，回落 idle。
+ * 有新事件进来会自动恢复为 generating，所以 N 取 5 分钟：正常生成时 message.updated
+ * 会持续到来，不会误伤；卡死时最多多显示 5 分钟"回答中"。
+ */
+export const GENERATING_STALE_MS = 5 * 60 * 1000;
+
 /** 默认的来源解析（后端会用网站列表替换，见 setSourceResolver）：取主域名 */
 function sourceFromUrl(url) {
   try {
@@ -361,14 +372,29 @@ function sourceFromUrl(url) {
 }
 
 /**
+ * 生成中判定（含卡死兜底）：
+ * 1. 最后一次生成事件必须是 started（finished 直接结束）；
+ * 2. 用户在那之后又发了新消息 → 那次生成肯定已结束（或被新一轮 supersede）；
+ * 3. 长时间无新事件 → 插件没上报 generation.finished，视为卡死回落 idle（有新事件会自动恢复）。
+ */
+function isGenerating(r, now) {
+  if (r.last_generation_event !== 'generation.started') return false;
+  const genSeq = r.last_generation_seq == null ? null : Number(r.last_generation_seq);
+  const userSeq = r.last_user_msg_seq == null ? null : Number(r.last_user_msg_seq);
+  if (genSeq != null && userSeq != null && userSeq > genSeq) return false;
+  if (now - r.last_seen_at > GENERATING_STALE_MS) return false;
+  return true;
+}
+
+/**
  * 会话实体：
  *   status 优先级：closed（没有标签页开着）> limit_reached > error > generating > idle
  *   页面关掉后 status_detail 仍保留最后一次的限额/报错提示
  */
-function deriveConversation(r, openTabs, resolveSource = sourceFromUrl) {
+function deriveConversation(r, openTabs, resolveSource = sourceFromUrl, now = Date.now()) {
   let st = null;
   try { st = r.status_json ? JSON.parse(r.status_json) : null; } catch { st = null; }
-  const generating = r.last_generation_event === 'generation.started';
+  const generating = isGenerating(r, now);
   const pageStatus = st?.status || 'ok';
   let status;
   if (openTabs === 0) status = 'closed';

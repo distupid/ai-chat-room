@@ -148,8 +148,10 @@ test/                         单元测试 + 多客户端 E2E 验收测试
 | chatgpt.com / chat.openai.com | URL `/c/<id>` | 快速回复、重新回答都支持 |
 | duck.ai | 助手消息元素 id 中的 UUID，前缀 `duck-` | URL 不带会话 ID；新聊天在第一条回答出现后才有 ID。支持快速回复，不支持重新回答 |
 | hark.com | `/chat` → `hark-main`；`/projects/<id>` → `hark-<id>` | 支持快速回复，不支持重新回答 |
+| meta.ai | 未验证（待 probe 补充） | 选择器未实测；generating 选择器故意留空（防状态卡“回答中”），靠文本活动检测 + 后端超时回落 |
+| claude.ai | URL `/chat/<uuid>`，前缀 `claude-` | 选择器按 2026-10-19 的真实 DOM 快照确认；生成中信号为 `data-is-streaming` + Stop Claude 按钮。支持快速回复，不支持重新回答 |
 
-- **默认种子**：上面三个网站的配置（按 2026-10 的真实页面编写）在 `src/frontend/lib/dom-observer.js` 的 `SEED_SITES`，前后端同一份（后端 `src/backend/src/site-seeds.js` 读取）。后端第一次启动时写进网站列表；旧版 `sites.json` 里没有配置的默认网站会补上种子配置和域名。之后种子只用于“恢复默认”和插件的离线兜底。
+- **默认种子**：上面五个网站的配置（ChatGPT / Duck.ai / Hark 按 2026-10 的真实页面编写；Meta AI / Claude 按公开资料编写、未实测，见 `SITE_PROFILES` 注释）在 `src/frontend/lib/dom-observer.js` 的 `SEED_SITES`，前后端同一份（后端 `src/backend/src/site-seeds.js` 读取）。后端第一次启动时写进网站列表；旧版 `sites.json` 里没有配置的默认网站会补上种子配置和域名。之后种子只用于“恢复默认”和插件的离线兜底。
 - **恢复默认**：网站配置弹窗里的“恢复默认”把该网站的 DOM 配置和域名恢复为种子（`POST /api/sites/:key/reset`）；删掉的默认网站可以从网站下拉的“恢复默认网站”加回（`POST /api/sites/defaults`，`GET /api/sites` 的 `missing_defaults` 列出缺少的）。
 - **插件怎么用这份列表**：后端在列表变化时给在线插件发 `sync_sites`；插件拉 `GET /api/sites`，存进 `chrome.storage.local.siteList`，并为每个**启用**的网站动态注册内容脚本（`chrome.scripting.registerContentScripts`，匹配本域名、子域名和其他域名；manifest 不再写死内容脚本）。内容脚本按当前域名在 `siteList` 里找网站（最长域名匹配，`www.` 忽略）并用它的配置；网站停用 / 被删除时不观察。还没同步过列表（例如第一次离线启动）时，插件和内容脚本都用默认种子。
 - **配置变化立即生效**：内容脚本监听 `siteList` 变化并 `setConfig()`；停用的网站立即停止观察，重新启用后开始观察（已开着但没注入过内容脚本的页面需要刷新）。

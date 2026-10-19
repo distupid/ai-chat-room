@@ -230,13 +230,7 @@ async function runCommand(tabId, command) {
       return { ok: false, code: 'tab_unreachable', detail: String(e?.message || e) };
     }
   }
-  if (command.action === 'reply' && Array.isArray(command.attachments) && command.attachments.length) {
-    // 快速回复带文件：先从后端取回文件，再交给页面自己的上传控件
-    const { serverUrl, token } = await loadSettings();
-    const got = await fetchAttachments({ serverUrl, token, attachments: command.attachments });
-    if (!got.ok) return got;
-    command = { ...command, files: got.files };
-  }
+  // 附件已由 background-core 取回为 command.files，这里直接交给内容脚本
   try {
     const r = await chrome.tabs.sendMessage(tabId, { kind: 'bridge_command', command });
     return r || { ok: false, code: 'no_response' };
@@ -256,6 +250,11 @@ const ready = (async () => {
   const settings = await loadSettings();
   const bg = createBackground({
     WebSocketImpl: WebSocket, storage, clientId: settings.clientId, settings,
+    // 快速回复带文件：先从后端取回文件内容，再交给页面自己的上传控件
+    fetchCommandFiles: async (attachments) => {
+      const { serverUrl, token } = await loadSettings();
+      return fetchAttachments({ serverUrl, token, attachments });
+    },
     // 看板指令 → 对应标签页的内容脚本执行
     executeCommand: runCommand
   });
@@ -285,16 +284,17 @@ function syncTabsNow(bg, force = false) {
       const list = await Promise.all(all.filter((t) => t.id != null && /^https?:/.test(t.url || '')).map(async (t) => {
         let conversationId = null;
         let supported = false;
+        let health = null;
         try {
           const r = await Promise.race([
             chrome.tabs.sendMessage(t.id, { kind: 'page_info' }),
             new Promise((res) => setTimeout(() => res(null), 800))
           ]);
-          if (r?.ok) { conversationId = r.conversation_id || null; supported = true; }
+          if (r?.ok) { conversationId = r.conversation_id || null; supported = true; health = r.selector_health || null; }
         } catch { /* 没有内容脚本的标签页 */ }
         let host = '';
         try { host = new URL(t.url).hostname; } catch { /* ignore */ }
-        return { tab_id: t.id, host, conversation_id: conversationId, supported, active: !!t.active, url: t.url, title: t.title || '' };
+        return { tab_id: t.id, host, conversation_id: conversationId, supported, active: !!t.active, url: t.url, title: t.title || '', health };
       }));
       bg.syncTabs(list, { force: f });
     } catch (e) { console.warn('[bridge] tab sync failed', e); }

@@ -65,3 +65,48 @@ export async function fetchAttachments({ fetchImpl = fetch, serverUrl, token, at
   }
   return { ok: true, files };
 }
+
+/**
+ * 插件上传页面里观察到的文件到后端（MVP 文件上传：上传文件 → 后端 → 看板文件卡片）。
+ * POST /api/attachments：body = 文件原始字节，x-file-name = encodeURIComponent(文件名)。
+ * 需要 control 或 publish 权限的 token（插件用自己的 extension token）。
+ * @param {object} o
+ * @param {Uint8Array|string} o.data 文件内容（string 按 base64 解码；浏览器里用 Uint8Array）
+ * @returns {Promise<{ok:true, attachment:{id,name,type,size}} | {ok:false, code, detail}>}
+ */
+export async function uploadAttachment({ fetchImpl = fetch, serverUrl, token, name, type, data }) {
+  let body;
+  if (typeof data === 'string') {
+    const bin = atob(data);
+    body = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) body[i] = bin.charCodeAt(i);
+  } else if (data instanceof Uint8Array) {
+    body = data;
+  } else {
+    return { ok: false, code: 'bad_argument', detail: 'data 必须是 base64 字符串或 Uint8Array' };
+  }
+  let res;
+  try {
+    res = await fetchImpl(wsToHttp(serverUrl) + '/api/attachments', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'x-file-name': encodeURIComponent(String(name || 'file')),
+        'content-type': String(type || 'application/octet-stream')
+      },
+      body
+    });
+  } catch (e) {
+    return { ok: false, code: 'upload_failed', detail: `上传失败：${e?.message || e}` };
+  }
+  let json = null;
+  try { json = await res.json(); } catch { /* 非 JSON 响应 */ }
+  if (!res.ok || !json || json.ok !== true) {
+    return {
+      ok: false,
+      code: res.status === 403 ? 'forbidden' : res.status === 413 ? 'too_large' : 'upload_failed',
+      detail: (json && json.error) || `HTTP ${res.status}`
+    };
+  }
+  return { ok: true, attachment: json.attachment };
+}

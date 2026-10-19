@@ -26,6 +26,7 @@ const SVG = {
   add: '<svg class="i s18" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>',
   closeTab: '<svg class="i s18" viewBox="0 0 24 24"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm-3.59 12L14 16.41 12 14.41l-2 2L8.59 15l2-2-2-2L10 9.59l2 2 2-2L15.41 11l-2 2 2 2z"/></svg>',
   reply: '<svg class="i s18" viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>',
+  forward: '<svg class="i s18" viewBox="0 0 24 24"><path d="M14 9V5l7 7-7 7v-4.1c-5 0-8.5 1.6-11 5.1 1-5 4-10 11-11z"/></svg>',
   pin: '<svg class="i s18" viewBox="0 0 24 24"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>',
   copy: '<svg class="i s18" viewBox="0 0 24 24"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z"/></svg>',
   star: '<svg class="i s18" viewBox="0 0 24 24"><path d="m22 9.24-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/></svg>',
@@ -499,7 +500,7 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
   try {
     const data = await api(`/api/conversations/${encodeURIComponent(conversationId)}/messages`);
     if (state.selected !== conversationId) return;
-    for (const m of data.messages) state.messages.set(m.message_id, { role: m.role, index: m.msg_index, text: m.text, html: m.html || null, favorite: !!m.favorite });
+    for (const m of data.messages) state.messages.set(m.message_id, { role: m.role, index: m.msg_index, seq: m.updated_seq, text: m.text, html: m.html || null, favorite: !!m.favorite });
     renderDetail(true, true);
     if (toFavorite) { state.stickBottom = false; scrollToFavorite(); } else scrollDetailBottom();
     if (state.selected === conversationId && state.composerOpen && document.activeElement !== $('quickText')) $('quickText').focus();
@@ -742,7 +743,10 @@ function onBroadcast(b) {
     if (b.event_type === 'message.added' || b.event_type === 'message.updated') {
       const p = b.payload;
       if (typeof p.text === 'string') {
-        state.messages.set(p.message_id, { role: p.role, index: p.index, text: p.text, html: typeof p.html === 'string' ? p.html : null, favorite: !!state.messages.get(p.message_id)?.favorite });
+        const prev = state.messages.get(p.message_id);
+        // 序号以后端冻结的为准：已存在的消息不再接受广播里的新序号——
+        // 不同页面加载的序号基数不同（见 dom-observer assignIndexes），覆盖会导致乱序；只更新内容
+        state.messages.set(p.message_id, { role: p.role, index: prev ? prev.index : p.index, seq: b.seq, text: p.text, html: typeof p.html === 'string' ? p.html : null, favorite: !!prev?.favorite });
         if (b.event_type === 'message.updated' && p.role === 'assistant') state.streaming.add(p.message_id);
         renderDetail(true);
       }
@@ -1123,6 +1127,12 @@ function renderSitesMenu() {
       onclick: (e) => { e.stopPropagation(); removeSite(x); } })));
   items.push(el('button', { class: 'mi add', role: 'menuitem', 'data-site': '+', onclick: () => { toggleSitesMenu(false); openAddSite(); } },
     el('span', { class: 'plus' }, '+'), el('span', { class: 'nm' }, '添加网站', el('small', {}, '打开网址，获取 DOM 并分析'))));
+  // 删掉默认网站后，在这里一键加回来（调 POST /api/sites/defaults，需要 control 权限）
+  if (state.missingDefaults.length) {
+    items.push(el('button', { class: 'mi restore', role: 'menuitem', onclick: () => restoreDefaultSites() },
+      el('span', { class: 'plus' }, '↺'),
+      el('span', { class: 'nm' }, '恢复默认网站', el('small', {}, `加回 ${state.missingDefaults.join('、')}`))));
+  }
   $('sitesMenu').replaceChildren(...items);
 }
 
@@ -1236,6 +1246,64 @@ async function removeSite(x) {
   if (!window.confirm(`删除“${x.name}”？已记录的会话会保留。`)) return;
   try { await api(`/api/sites/${encodeURIComponent(x.key)}`, { method: 'DELETE' }); snackbar(`已删除 ${x.name}`, 'ok'); loadSites(); }
   catch (e) { snackbar(`删除失败：${e.message}`, 'err'); }
+}
+
+/** 一键加回被删掉的默认网站（POST /api/sites/defaults，需要 control 权限） */
+async function restoreDefaultSites() {
+  try {
+    const r = await api('/api/sites/defaults', { method: 'POST', body: '{}' });
+    snackbar(r.added?.length ? `已恢复默认网站：${r.added.join('、')}` : '没有可恢复的默认网站', 'ok');
+    await loadSites();
+  } catch (e) { snackbar(`恢复失败：${e.message}`, 'err'); }
+}
+
+// ------------------------------------------------------------------ 转发：用户消息 → 选目标 AI（已配置站点）→ 选该站点的会话 → reply 命令
+// 协议结论（A1）：复用 command{action:'reply'}，conversation_id=目标会话，text=原文；只转文本不转附件
+const FORWARD_TEXT_LIMIT = 20000;   // 协议 text 上限，超长看板侧截断
+
+function openForwardPicker(mid, text) {
+  state.forwarding = { mid, text };
+  renderForwardSites();
+  $('forwardScrim').classList.add('open');
+}
+function closeForwardPicker() {
+  $('forwardScrim').classList.remove('open');
+  state.forwarding = null;
+}
+function renderForwardSites() {
+  const sites = (state.sites || []).filter((s) => s.enabled !== false);
+  $('forwardSub').textContent = '选择目标 AI';
+  $('forwardList').replaceChildren(
+    ...sites.map((s) => {
+      const open = state.conversations.filter((c) => c.source === s.key && c.open_tabs > 0 && c.conversation_id !== state.selected).length;
+      return el('button', { class: 'fwitem', onclick: () => renderForwardConvs(s.key) },
+        el('span', { class: `avatar ${avatarClass(s.key)}` }, (s.name || s.key).slice(0, 1).toUpperCase()),
+        el('span', { class: 'nm' }, s.name || s.key),
+        el('small', {}, open ? `${open} 个可转发` : '没有打开的会话'));
+    }),
+    ...(!sites.length ? [el('div', { class: 'empty' }, '还没有配置网站')] : []));
+}
+function renderForwardConvs(siteKey) {
+  const s = (state.sites || []).find((x) => x.key === siteKey);
+  const convs = state.conversations
+    .filter((c) => c.source === siteKey && c.open_tabs > 0 && c.conversation_id !== state.selected)
+    .sort((a, b) => b.last_seen_at - a.last_seen_at);
+  $('forwardSub').textContent = `转发到${s ? s.name : siteKey}：选择会话`;
+  $('forwardList').replaceChildren(
+    el('button', { class: 'fwitem fwback', onclick: () => renderForwardSites() }, el('span', {}, '← 返回选择 AI')),
+    ...convs.map((c) => el('button', { class: 'fwitem', onclick: () => forwardTo(c) },
+      el('span', { class: 'nm' }, titleOf(c)),
+      el('small', {}, ago(c.last_seen_at)))),
+    ...(!convs.length ? [el('div', { class: 'empty' }, '这个 AI 没有打开的会话，先在页面上打开一个')] : []));
+}
+function forwardTo(c) {
+  const f = state.forwarding;
+  closeForwardPicker();
+  if (!f) return;
+  const text = f.text.length > FORWARD_TEXT_LIMIT ? f.text.slice(0, FORWARD_TEXT_LIMIT) : f.text;
+  const id = sendCommand(c.conversation_id, 'reply', text);
+  if (id) snackbar(`已转发到 ${titleOf(c)}`, 'ok');
+  else snackbar('转发失败：看板未连接或没有控制权限', 'err');
 }
 
 function openAddSite() {
@@ -1503,9 +1571,12 @@ function renderDetailHead() {
   $('detailTitle').textContent = c ? titleOf(c) : state.selected;
   const sub = $('detailSub');
   if (!c) { sub.replaceChildren(); return; }
+  const src = sourceInfo(c.source);
   sub.replaceChildren(
     el('span', { class: `badge b-${statusKey(c)}` }, STATUS[statusKey(c)]?.label || c.status),
-    el('span', {}, sourceInfo(c.source).label),
+    el('span', { class: 'dsrc' },
+      el('span', { class: `avatar mini ${avatarClass(c.source)}`, title: src.label }, src.short),
+      el('span', {}, src.label)),
     c.model ? el('span', {}, c.model) : null,
     el('span', {}, `${c.message_count} 条消息`),
     el('span', {}, ago(c.last_seen_at)),
@@ -1516,7 +1587,11 @@ function canControlConv(c) {
   return !!c && c.open_tabs > 0 && state.wsState === 'open' && state.canControl;
 }
 function convBusy(id) {
-  return [...state.pendingCommands.values()].some((p) => p.conversation_id === id && p.action !== 'focus');
+  // 有未完成的指令 → 忙
+  if ([...state.pendingCommands.values()].some((p) => p.conversation_id === id && p.action !== 'focus')) return true;
+  // 页面正在生成 → 忙；后端 5 分钟回落已保证卡死的 generating 不会一直是 generating，不会永久误判
+  const c = convById(id);
+  return !!c && c.status === 'generating';
 }
 
 /** 快速回复时把对话固定在底部（最后一个回复）；回复栏展开、图片加载、窗口变化导致高度变化时保持在底部 */
@@ -1551,7 +1626,8 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
   const body = $('detailBody');
   const nearBottom = forceBottom || state.composerOpen || body.scrollHeight - body.scrollTop - body.clientHeight < 120;
   // 相邻两条角色和内容完全相同的消息只显示一条（旧版插件把同一条发送重复记录过）
-  const msgs = [...state.messages.entries()].sort((a, b) => a[1].index - b[1].index)
+  // 排序：以后端序号为准，序号相同（插件按渲染子集上报时可能重复）时按服务端 seq 排（与 db.listMessages 的 ORDER BY 一致）
+  const msgs = [...state.messages.entries()].sort((a, b) => (a[1].index - b[1].index) || ((a[1].seq ?? 0) - (b[1].seq ?? 0)))
     .filter(([, m], i, arr) => !i || arr[i - 1][1].role !== m.role || arr[i - 1][1].text !== m.text || !m.text);
   const c = convById(state.selected);
   const src = sourceInfo(c?.source);
@@ -1589,7 +1665,12 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
         iconBtn(collapsed ? SVG.unfold : SVG.fold, collapsed ? '展开回答' : '折叠回答', () => {
           collapsed ? state.collapsed.delete(id) : state.collapsed.add(id);
           renderDetail();
-        }, { act: 'fold' })
+        }, { act: 'fold' }),
+        iconBtn(SVG.forward, '转发到其他 AI', () => openForwardPicker(id, m.text),
+          { act: 'forward', disabled: !state.canControl || state.wsState !== 'open' })
+      ) : m.role === 'user' ? el('div', { class: 'mact' },
+        iconBtn(SVG.forward, '转发到其他 AI', () => openForwardPicker(id, m.text),
+          { act: 'forward', disabled: !state.canControl || state.wsState !== 'open' })
       ) : null);
   };
   const userTotal = userOrd.size;
@@ -1679,7 +1760,6 @@ function renderComposer() {
   const uploading = filesOf(state.selected).some((x) => x.status === 'uploading');
   $('quickSend').disabled = !ok || busy || uploading;
   $('quickSend').textContent = busy ? '发送中…' : uploading ? '上传中…' : '发送';
-  $('quickHint').textContent = !c ? '' : !ok ? '需要有标签页开着这个会话' : c.status === 'generating' ? '正在回答中，发送会被拒绝' : '在开着这个会话的标签页里发送';
 }
 
 function toggleComposer(open = !state.composerOpen) {
@@ -1700,12 +1780,12 @@ function openCands() {
   const box = $('quickCands');
   if (!list.length) { closeCands(); return; }
   if (state.candIndex >= list.length) state.candIndex = list.length - 1;
-  box.replaceChildren(el('div', { class: 'ch' }, '常见回答（点击或 ↑↓ 选择后 Enter 直接发送，Esc 关闭）'),
-    ...list.map((t, i) => el('button', {
-      class: `cand ${i === state.candIndex ? 'on' : ''}`, role: 'option', title: t, type: 'button',
-      onmousedown: (e) => e.preventDefault(),   // 不让输入框失焦
-      onclick: () => pickCand(t)
-    }, t)));
+  // 跟卡片内快速回复 (.creply .qr) 一样的 chip 结构：横向排列，点击直接发送；保留 ↑↓ 键盘选择
+  box.replaceChildren(...list.map((t, i) => el('button', {
+    class: `cand ${i === state.candIndex ? 'on' : ''}`, type: 'button', title: t,
+    onmousedown: (e) => e.preventDefault(),   // 不让输入框失焦
+    onclick: () => pickCand(t)
+  }, t)));
   box.classList.add('open');
 }
 function closeCands() { $('quickCands').classList.remove('open'); state.candIndex = -1; }
@@ -1765,13 +1845,36 @@ function sendReplyWithFab(id, text, onSent, attachments = [], fileItems = []) {
   f._conv = id;
   f.dataset.conv = id;
   const extra = attachments.length ? { attachments } : {};
-  if (!sendCommand(id, 'reply', text || null, { quiet: true, extra, fab: f, fileItems })) {
-    sendFailed({ conversation_id: id, text, fab: f, attachments, fileItems }, { ok: false, detail: '实时连接未建立' });
-    return false;
-  }
-  startProgress(f);
-  onSent?.();
+  // 冷启动：目标没有打开的标签页时，先等页面就绪再真正发送，别在页面还没 ready 就把指令发出去
+  const needWait = !(() => { const c = convById(id); return !!c && c.open_tabs > 0; })();
+  if (needWait) f._label.textContent = `等待「${name}」页面就绪…`;
+  onSent?.();   // 界面先收起（清空输入框、关闭弹窗），右下角按钮显示进度
+  waitForTabReady(id).then(() => {
+    if (!sendCommand(id, 'reply', text || null, { quiet: true, extra, fab: f, fileItems })) {
+      sendFailed({ conversation_id: id, text, fab: f, attachments, fileItems }, { ok: false, detail: '实时连接未建立' });
+      return false;
+    }
+    startProgress(f);
+    return true;
+  }).catch(() => {
+    sendFailed({ conversation_id: id, text, fab: f, attachments, fileItems }, { ok: false, code: 'no_open_tab', detail: '页面一直没就绪，请手动打开页面后重试' });
+  });
   return true;
+}
+
+/** 等目标会话的标签页就绪（open_tabs > 0）：没有就触发后台打开，最多等 30 秒 */
+function waitForTabReady(id, timeoutMs = 30000) {
+  return new Promise((resolve, reject) => {
+    const ready = () => { const c = convById(id); return !!c && c.open_tabs > 0; };
+    if (ready()) return resolve();
+    const c = convById(id);
+    if (c && c.status === 'closed' && !isReopening(c)) reopenPage(c);   // 冷启动：后台打开
+    const t0 = Date.now();
+    const timer = setInterval(() => {
+      if (ready()) { clearInterval(timer); resolve(); }
+      else if (Date.now() - t0 > timeoutMs) { clearInterval(timer); reject(new Error('timeout')); }
+    }, 500);
+  });
 }
 
 /** 发送失败：按钮变红，展开后显示原因、发送的内容，可重新编辑或重试 */
@@ -2053,6 +2156,8 @@ $('siteCfgJson').addEventListener('change', syncCfgFields);
 $('siteCfgEnabled').onclick = () => $('siteCfgEnabled').setAttribute('aria-checked', String($('siteCfgEnabled').getAttribute('aria-checked') !== 'true'));
 $('detailClose').onclick = closeDetail;
 $('detailScrim').addEventListener('click', (e) => { if (e.target === $('detailScrim')) closeDetail(); });
+$('forwardClose').onclick = closeForwardPicker;
+$('forwardScrim').addEventListener('click', (e) => { if (e.target === $('forwardScrim')) closeForwardPicker(); });
 $('detailJump').onclick = () => { const c = convById(state.selected); if (c) jumpTo(c); };
 $('detailPin').onclick = () => { const c = convById(state.selected); if (c) togglePin(c); };
 $('quickSend').onclick = sendQuick;

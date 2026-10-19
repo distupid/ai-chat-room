@@ -202,6 +202,97 @@
         send_button: 'button[data-testid="send-button"]',
         regenerate_button: ''
       }
+    },
+
+    // claude.ai（2026-10-19）：选择器来自 claude.ai 实际下发的 DOM 快照（已确认）。
+    // 消息行 [data-testid="transcript-row"]，data-perf-row="human|assistant" 区分角色；
+    // 输入框是 TipTap contenteditable（不是 textarea）；发送按钮 data-testid="chat-input-send"；
+    // 生成中信号：data-is-streaming="true"（结束变 "false"）+ aria-label="Stop Claude" 的停止按钮
+    // （无稳定 testid，结束时消失）。用户反馈过别站卡“回答中”，此处用状态属性而非猜测。
+    claude: {
+      config_version: 1,
+      source: 'default:claude',
+      site: 'claude',
+      conversation: {
+        url_pattern: '/chat/([0-9a-f-]{36})(?:[/?#]|$)',
+        dom: null,
+        fallback_id: null,
+        fallback_path: null,
+        prefix: 'claude-'
+      },
+      message: {
+        selector: '[data-testid="transcript-row"]',
+        role_sources: [],
+        role_rules: [
+          { selector: '[data-perf-row="assistant"]', role: 'assistant', scope: 'self' },
+          { selector: '[data-perf-row="human"]', role: 'user', scope: 'self' }
+        ],
+        id_attrs: ['data-message-id', 'id'],
+        id_inner: null
+      },
+      text: {
+        user: '[data-testid="user-message"]',
+        assistant: '[data-perf-reply-text]',
+        exclude: '[data-cds="MessageActions"], time, .sr-only, [aria-hidden="true"], button'
+      },
+      generating: {
+        selector: '[data-is-streaming="true"], button[aria-label="Stop Claude"]:not([disabled])',
+        activity_idle_ms: 2000
+      },
+      status: {
+        model_selector: '',
+        exclude_messages: true,
+        check_interval_ms: 2000
+      },
+      actions: {
+        composer: 'div[data-testid="chat-input"][contenteditable="true"]',
+        send_button: 'button[data-testid="chat-input-send"]',
+        regenerate_button: ''
+      }
+    },
+
+    // meta.ai（2026-10-19）：未能实地验证——站点被网络策略屏蔽，公开资料无可靠 DOM。
+    // 用户反馈旧版自定义配置曾导致状态卡在“回答中”，因此 generating.selector 故意留空
+    // （不猜停止按钮，猜错会复现卡死），靠文本活动检测 + 后端超时回落。
+    // 待用看板 probe_site 抓取真实 DOM 后细化；当前 0 命中属预期，看 selector_health。
+    metai: {
+      config_version: 1,
+      source: 'default:metai',
+      site: 'metai',
+      conversation: {
+        url_pattern: null,   // 未验证：待实测补充
+        dom: null,
+        fallback_id: null,
+        fallback_path: null,
+        prefix: 'meta-'
+      },
+      message: {
+        // 未验证：通用候选；全部不命中时观察器静默，selector_health 会报 0
+        selector: '[data-testid*="message"], [data-message-id]',
+        role_sources: [],
+        role_rules: [],
+        id_attrs: ['data-message-id', 'id'],
+        id_inner: null
+      },
+      text: {
+        user: '',
+        assistant: '',
+        exclude: 'button, [aria-hidden="true"]'
+      },
+      generating: {
+        selector: '',   // 故意留空，见上
+        activity_idle_ms: 2000
+      },
+      status: {
+        model_selector: '',
+        exclude_messages: true,
+        check_interval_ms: 2000
+      },
+      actions: {
+        composer: 'textarea, div[contenteditable="true"]',
+        send_button: 'button[aria-label*="发送"], button[aria-label*="Send"]',
+        regenerate_button: ''
+      }
     }
   };
 
@@ -212,7 +303,11 @@
   var SEED_SITES = [
     { key: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', host: 'chatgpt.com', hosts: ['chatgpt.com', 'chat.openai.com'], enabled: true, config: DEFAULT_CONFIG },
     { key: 'duckai', name: 'Duck.ai', url: 'https://duck.ai/', host: 'duck.ai', hosts: ['duck.ai'], enabled: true, config: SITE_PROFILES.duckai },
-    { key: 'hark', name: 'Hark', url: 'https://www.hark.com/chat', host: 'www.hark.com', hosts: ['hark.com'], enabled: true, config: SITE_PROFILES.hark }
+    { key: 'hark', name: 'Hark', url: 'https://www.hark.com/chat', host: 'www.hark.com', hosts: ['hark.com'], enabled: true, config: SITE_PROFILES.hark },
+    // 2026-10-19 新增：meta.ai / claude.ai 选择器未完全验证（见 SITE_PROFILES 注释），先默认启用，
+    // 命中为 0 时看 selector_health，再用看板 probe_site 细化
+    { key: 'metai', name: 'Meta AI', url: 'https://www.meta.ai/', host: 'www.meta.ai', hosts: ['meta.ai'], enabled: true, config: SITE_PROFILES.metai },
+    { key: 'claude', name: 'Claude', url: 'https://claude.ai/new', host: 'claude.ai', hosts: ['claude.ai'], enabled: true, config: SITE_PROFILES.claude }
   ];
 
   function normHost(h) { return String(h || '').toLowerCase().replace(/\.$/, '').replace(/^www\./, ''); }
@@ -960,7 +1055,8 @@
       routeSequence: 0,
       statusKey: null,
       statusSequence: 0,
-      lastStatusCheckAt: 0
+      lastStatusCheckAt: 0,
+      lastMessageHits: 0                              // 最近一次扫描消息选择器的命中数（0 = 疑似选择器失效，页面改版时看这个）
     };
 
     var observer = null;
@@ -1126,6 +1222,7 @@
     function scanMessages(conversationId, force, fresh) {
       if (fresh || !observer || now() - lastFullAt >= FULL_REFRESH_MS) resetCache();
       var nodes = doc.querySelectorAll(cfg.messageSelector); // querySelectorAll 结果本身不含重复节点
+      state.lastMessageHits = nodes.length;
       var lastAssistantId = null;
 
       // 第一遍：收集当前渲染出来的消息（长对话里页面只渲染一部分，DOM 位置不能当作消息序号）
@@ -1458,6 +1555,13 @@
       setConfig: setConfig,
       getConfig: function () {
         return { source: cfg.source, site: cfg.site, warnings: cfg.warnings.slice(), config: cfg.raw, actions: cfg.actions };
+      },
+      /**
+       * 选择器健康度（供后台诊断 / 看板判断站点是否改版）：
+       * message_selector_hits 为 0 且页面明显有对话内容时，多半是选择器失效。
+       */
+      getSelectorHealth: function () {
+        return { message_selector_hits: state.lastMessageHits, warnings: cfg.warnings.slice() };
       },
       /** 页面当前是否在生成（供快速回复 / 重新回答判断忙碌） */
       isGenerating: function () { return state.generating || !!(cfg.generating && doc.querySelector(cfg.generating)); },

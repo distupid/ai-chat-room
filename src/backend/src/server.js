@@ -130,9 +130,11 @@ export function createBridgeServer(opts = {}) {
     }
   }
   /**
-   *   POST /api/attachments   （observer token，需要 control）body = 文件原始内容；
-   *        header x-file-name = encodeURIComponent(文件名)，content-type = 文件类型 → {ok, attachment:{id,name,type,size}}
-   *   GET  /api/attachments/:id（extension token，需要 publish）→ 文件内容
+   *   POST /api/attachments   body = 文件原始内容；header x-file-name = encodeURIComponent(文件名)，
+   *        content-type = 文件类型 → {ok, attachment:{id,name,type,size}}
+   *        鉴权：control（看板发快速回复附件）或 publish（插件上传页面里观察到的文件）
+   *   GET  /api/attachments/:id → 文件内容
+   *        鉴权：publish（插件取快速回复附件）或 read_content（看板看插件上传的文件）
    */
   async function handleAttachments(req, res, path) {
     if (!originAllowed(req.headers.origin, req.headers.host)) return json(res, 403, { ok: false, error: 'forbidden origin' });
@@ -140,7 +142,9 @@ export function createBridgeServer(opts = {}) {
     if (!client) return json(res, 401, { ok: false, error: 'unauthorized' });
     pruneAttachments();
     if (path === '/api/attachments' && req.method === 'POST') {
-      if (!client.scopes.includes(Scope.CONTROL)) return json(res, 403, { ok: false, error: 'control scope required' });
+      if (!client.scopes.includes(Scope.CONTROL) && !client.scopes.includes(Scope.PUBLISH)) {
+        return json(res, 403, { ok: false, error: 'control or publish scope required' });
+      }
       let name = 'file';
       try { name = decodeURIComponent(String(req.headers['x-file-name'] || 'file')); } catch { /* 保持默认 */ }
       name = name.replace(/[\u0000-\u001f\u007f/\\]/g, '_').trim().slice(0, 255) || 'file';
@@ -156,7 +160,9 @@ export function createBridgeServer(opts = {}) {
     }
     const one = /^\/api\/attachments\/([A-Za-z0-9_-]{8,64})$/.exec(path);
     if (one && req.method === 'GET') {
-      if (!client.scopes.includes(Scope.PUBLISH)) return json(res, 403, { ok: false, error: 'publish scope required' });
+      if (!client.scopes.includes(Scope.PUBLISH) && !client.scopes.includes(Scope.READ_CONTENT)) {
+        return json(res, 403, { ok: false, error: 'publish or read_content scope required' });
+      }
       const a = attachments.get(one[1]);
       if (!a) return json(res, 404, { ok: false, error: '附件不存在或已过期' });
       res.writeHead(200, {

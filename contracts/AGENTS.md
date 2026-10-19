@@ -21,7 +21,7 @@
 
 ## 改动流程
 1. 改 `protocol.js` → `pnpm build:schema && pnpm build:ext`
-2. 在 `tests/protocol.test.js` 增加正反例
+2. 在 `tests/unit/protocol.test.js` 增加正反例
 3. PR 描述列出受影响的发送方和接收方，由各模块负责人确认
 
 ## 禁止

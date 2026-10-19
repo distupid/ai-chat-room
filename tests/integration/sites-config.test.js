@@ -35,7 +35,7 @@ function offlineBackground() {
 
 test('默认种子：按域名找网站（本域名 / 子域名 / www / 其他域名），网站列表优先，找不到返回 null', () => {
   const { O, close } = observerLib();
-  assert.deepEqual([...O.SEED_SITES.map((x) => x.key)], ['chatgpt', 'duckai', 'hark']);
+  assert.deepEqual([...O.SEED_SITES.map((x) => x.key)], ['chatgpt', 'duckai', 'hark', 'metai', 'claude']);
   assert.ok(O.SEED_SITES.every((x) => x.config && x.config.message && x.enabled === true));
   assert.equal(O.siteForHost('chat.openai.com'), 'chatgpt');
   assert.equal(O.siteForHost('chatgpt.com'), 'chatgpt');
@@ -59,7 +59,7 @@ test('后端网站列表：首次启动写入默认种子（含 DOM 配置）；
   await ext.hello('ext-sitecfg-0002', TOKENS.extension, 'extension');
 
   const list = await (await api('/api/sites')).json();
-  assert.deepEqual(list.sites.map((x) => x.key), ['chatgpt', 'duckai', 'hark']);
+  assert.deepEqual(list.sites.map((x) => x.key), ['chatgpt', 'duckai', 'hark', 'metai', 'claude']);
   assert.deepEqual(list.missing_defaults, []);
   for (const x of list.sites) {
     assert.equal(x.enabled, true);
@@ -97,7 +97,7 @@ test('后端网站列表：首次启动写入默认种子（含 DOM 配置）；
   assert.equal((await (await api('/api/sites/chatgpt', { method: 'PATCH', body: { enabled: false } })).json()).site.enabled, false);
   await waitFor(() => syncs() > s1, { label: 'sync after disable' });
   const ln = await (await api('/api/sites/launch', { method: 'POST' })).json();
-  assert.equal(ln.count, 2);
+  assert.equal(ln.count, 4);
   const open = await waitFor(() => ext.of('command').find((m) => m.action === 'open_sites'), { label: 'open_sites' });
   assert.doesNotMatch(open.text, /chatgpt/);
 
@@ -136,7 +136,7 @@ test('旧版 sites.json（默认网站没有 DOM 配置）：启动时补上种�
   assert.equal(gpt.config.source, 'default:chatgpt');
   assert.deepEqual(gpt.hosts, ['chatgpt.com', 'chat.openai.com']);
   assert.equal(list.sites[1].has_default, false);
-  assert.deepEqual(list.missing_defaults, ['duckai', 'hark']);
+  assert.deepEqual(list.missing_defaults, ['duckai', 'hark', 'metai', 'claude']);
   const saved = JSON.parse(readFileSync(sitesPath, 'utf8'));
   assert.ok(saved[0].config && saved[0].config.message, '写回文件');
   await server.stop();
@@ -199,7 +199,7 @@ test('看板：网站配置弹窗（启用开关、域名、常用选择器与�
   assert.doesNotMatch(d.getElementById('grid').textContent, /ChatGPT|Duck\.ai|Hark/);
 
   d.getElementById('sitesBtn').click();
-  await waitFor(() => d.querySelectorAll('#sitesMenu .mi .cfg').length === 3, { label: 'cfg buttons' });
+  await waitFor(() => d.querySelectorAll('#sitesMenu .mi .cfg').length === 5, { label: 'cfg buttons' });
   d.querySelector('#sitesMenu [data-site="hark"] .cfg').click();
   assert.ok(d.getElementById('siteCfgScrim').classList.contains('open'));
   assert.match(d.getElementById('siteCfgTitle').textContent, /Hark/);
@@ -238,12 +238,12 @@ test('看板：网站配置弹窗（启用开关、域名、常用选择器与�
   await waitFor(() => d.querySelector('#siteCfgFields input[data-path="message.selector"]')?.value === '[data-entry-kind="message"][data-message-id]', { label: 'dialog refreshed' });
   d.getElementById('siteCfgCancel').click();
 
-  // 删除默认网站后菜单里没有“恢复默认网站”
+  // 删除默认网站后菜单里出现"恢复默认网站"（A3 新增功能：缺默认时可一键恢复）
   d.getElementById('sitesBtn').click();
   await waitFor(() => d.querySelector('#sitesMenu [data-site="duckai"] .del'), { label: 'menu' });
   d.querySelector('#sitesMenu [data-site="duckai"] .del').click();
   await waitFor(() => !d.querySelector('#sitesMenu [data-site="duckai"]'), { label: 'deleted' });
-  assert.ok(!d.querySelector('#sitesMenu [data-site="restore"], #sitesMenu .mi.restore'), '没有恢复默认');
+  assert.ok(d.querySelector('#sitesMenu .mi.restore'), '出现恢复默认按钮');
 
   assert.equal(ui.win.__appError, undefined, String(ui.win.__appError?.stack));
   assert.deepEqual(ui.errors, []);
