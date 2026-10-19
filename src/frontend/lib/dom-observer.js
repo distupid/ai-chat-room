@@ -51,7 +51,9 @@
       user: '[data-user-message-bubble] .whitespace-pre-wrap, [data-user-message-bubble]',
       assistant: '[data-dil-message-id], .markdown',
       // 正文中要去掉的部分：代码块工具栏（“复制代码 / 启用自动换行”）、按钮、读屏专用文字
-      exclude: '[data-markdown-copy="exclude"], button, .sr-only'
+      exclude: '[data-markdown-copy="exclude"], button, .sr-only',
+      // 正文开头要删掉的前缀（正则）：如 muse.ai 替身文字自带“用户消息：/助手消息：”
+      strip: ''
     },
     generating: {
       selector:
@@ -204,35 +206,46 @@
       }
     },
 
-    // muse.ai（2026-10-19）：未验证——真实 DOM 拿不到（网络屏蔽），先用保守通用配置顶上。
-    // generating.selector 故意留空（不猜停止按钮，猜错会卡“回答中”），靠文本活动检测 + 后端超时回落。
-    // 等用户跑 probe 拿回真实 DOM 后写实；当前 0 命中属预期，看 selector_health。
+    // muse.ai（2026-10-19）：选择器来自用户提供的真实 DOM 快照（已确认）。
+    // 消息行 [data-message-item="true"]，data-message-role="user|assistant" 区分角色，
+    // data-message-id 取 ID。注意列表虚拟化：可视区外的消息只有 sr-only 替身 span
+    //（[data-message-accessibility-surrogate]，自带“用户消息：/助手消息：”前缀），
+    // 可视区内是可见 <p>（“你：”前缀在 sr-only 里，已被 BASE_EXCLUDE 排除）。
+    // text 指向替身 span（bodyOf 豁免显式选择的候选），strip 去前缀；无替身时退回整行。
+    // 输入框是 textarea[aria-label="消息"]；无发送按钮，回车发送。
+    // 生成中：button[aria-label="停止任务"] 出现即为生成中（快照抓取时正在生成，
+    // 最后一条 assistant 消息还是空壳）。附件按钮：button[aria-label="附加文件"]。
+    // 类名是 Tailwind 动态生成的，只用 data-*/aria-* 语义属性。
+    // 会话 ID：快照未提供 URL 模式，暂用标签页伪 ID，待补充。
     muse: {
       config_version: 1,
       source: 'default:muse',
       site: 'muse',
       conversation: {
-        url_pattern: null,   // 未验证：待实测补充
+        url_pattern: null,   // 待补充：快照 URL 仅为 https://muse.ai/
         dom: null,
         fallback_id: null,
         fallback_path: null,
         prefix: 'muse-'
       },
       message: {
-        // 未验证：通用候选；全部不命中时观察器静默，selector_health 会报 0
-        selector: '[data-testid*="message"], [data-message-id]',
+        selector: '[data-message-item="true"]',
         role_sources: [],
-        role_rules: [],
-        id_attrs: ['data-message-id', 'id'],
+        role_rules: [
+          { selector: '[data-message-role="assistant"]', role: 'assistant', scope: 'self' },
+          { selector: '[data-message-role="user"]', role: 'user', scope: 'self' }
+        ],
+        id_attrs: ['data-message-id'],
         id_inner: null
       },
       text: {
-        user: '',
-        assistant: '',
-        exclude: 'button, [aria-hidden="true"]'
+        user: '[data-message-accessibility-surrogate="true"]',
+        assistant: '[data-message-accessibility-surrogate="true"]',
+        exclude: 'button, [aria-hidden="true"]',
+        strip: '^(用户消息|助手消息)：'
       },
       generating: {
-        selector: '',   // 故意留空，见上
+        selector: 'button[aria-label="停止任务"]:not([disabled])',
         activity_idle_ms: 2000
       },
       status: {
@@ -241,9 +254,10 @@
         check_interval_ms: 2000
       },
       actions: {
-        composer: 'div[contenteditable="true"], textarea',
-        send_button: 'button[aria-label*="Send"], button[aria-label*="发送"]',
-        regenerate_button: ''
+        composer: 'textarea[aria-label="消息"]',
+        send_button: '',   // 无发送按钮，回车发送
+        regenerate_button: '',
+        attach_button: 'button[aria-label="附加文件"]'
       }
     },
 
@@ -460,6 +474,8 @@
       assistantText: pickSel(t.assistant, 'assistant' in dt ? dt.assistant : D.text.assistant, 'text.assistant', true),
       // 配置里的 exclude 之外总是排除：读屏 / 搜索用的替身文字、sr-only 标签、复制排除区、代码块工具栏
       textExclude: [pickSel(t.exclude, 'exclude' in dt ? dt.exclude : D.text.exclude, 'text.exclude', true), BASE_EXCLUDE].filter(Boolean).join(', '),
+      // 正文前缀清理（muse.ai 替身文字自带“用户消息：/助手消息：”）；null = 不处理
+      textStrip: pickRe(t.strip, 'strip' in dt ? dt.strip : D.text.strip, 'text.strip'),
       // 同一组（如同一轮回答拆成 文字 + 文件卡片 + 文字 多个节点）合并成一条消息：组 ID 属性
       groupAttr: str(m.group_attr === undefined ? dm.group_attr : m.group_attr, 200) || '',
       generating: pickSel(g.selector, 'selector' in dg ? dg.selector : D.generating.selector, 'generating.selector', true),
@@ -821,7 +837,9 @@
 
   // 只取正文，避免把“复制/编辑”等按钮区域算进去；找不到正文节点时退回整个消息节点
   function getNodeText(el, role, c) {
-    return extractText(bodyOf(el, role, c) || el, c.textExclude);
+    var text = extractText(bodyOf(el, role, c) || el, c.textExclude);
+    if (text && c.textStrip) text = text.replace(c.textStrip, '');
+    return text;
   }
 
   /** 正文节点：取第一个不在排除区（替身文字、sr-only 等）里的匹配 */
@@ -832,8 +850,9 @@
     for (var i = 0; i < list.length; i++) {
       var b = list[i];
       if (!c.textExclude) return b;
+      // 显式选中的候选本身不排除（muse.ai 的正文就是替身 span），只看祖先是否在排除区
       var bad = false;
-      for (var p = b; p && p !== el; p = p.parentElement) if (p.matches && p.matches(c.textExclude)) { bad = true; break; }
+      for (var p = b.parentElement; p && p !== el; p = p.parentElement) if (p.matches && p.matches(c.textExclude)) { bad = true; break; }
       if (!bad) return b;
     }
     return null;

@@ -31,7 +31,7 @@
     a = a && typeof a === 'object' ? a : {};
     var out = {};
     Object.keys(DEFAULT_ACTIONS).forEach(function (k) {
-      if (k === 'regenerate_button' && a[k] === '') { out[k] = ''; return; }   // 该站点不支持
+      if ((k === 'regenerate_button' || k === 'send_button') && a[k] === '') { out[k] = ''; return; }   // 该站点不支持
       if (k === 'regenerate_menu_text') {
         var t = typeof a[k] === 'string' && a[k].length <= 300 ? a[k] : DEFAULT_ACTIONS[k];
         try { out.menuText = new RegExp(t, 'i'); } catch (_) { out.menuText = new RegExp(DEFAULT_ACTIONS[k], 'i'); }
@@ -179,12 +179,14 @@
           return { ok: false, code: 'composer_fill_failed', detail: '文字没能填入输入框（页面可能回滚了输入），未点发送' };
         }
       }
-      var btn = await waitUntil(win, function () {
-        var b = last(doc.querySelectorAll(sel.send_button));
+      // 无发送按钮的站点（如 muse.ai）：直接回车发送，不等按钮出现
+      var findSendBtn = function () { return sel.send_button ? last(doc.querySelectorAll(sel.send_button)) : null; };
+      var btn = sel.send_button ? await waitUntil(win, function () {
+        var b = findSendBtn();
         return isEnabled(b) ? b : null;
-      }, files.length ? UPLOAD_WAIT_MS : 3000, files.length ? 200 : 50);
+      }, files.length ? UPLOAD_WAIT_MS : 3000, files.length ? 200 : 50) : null;
       // 文字已填好、发送按钮仍不可用：源站限制发送（到达上限）
-      if (!btn && !files.length && text.trim() && last(doc.querySelectorAll(sel.send_button))) {
+      if (!btn && !files.length && text.trim() && findSendBtn()) {
         return { ok: false, code: 'limit_reached', detail: '到达上限（发送按钮不可用）' };
       }
       if (!btn && files.length) return { ok: false, code: 'upload_not_finished', detail: '文件已交给页面，但等不到上传完成（发送按钮一直不可用）' };
@@ -196,7 +198,7 @@
       var acceptState = await waitUntil(win, function () {
         if (ctx.isGenerating()) return 'generating';
         if (text.trim() && composerText(input).trim() === '') return 'cleared';
-        if (!text.trim() && !isEnabled(last(doc.querySelectorAll(sel.send_button)))) return 'sent_files';
+        if (!text.trim() && sel.send_button && !isEnabled(findSendBtn())) return 'sent_files';
         return null;
       }, 8000, 100);
       if (!acceptState) {
