@@ -16,8 +16,9 @@ const STATUS = {
 // regenerate = 该网站的 DOM 配置里有“重新生成”按钮（与 page-actions.js 的判断一致）
 const SOURCES = {};
 // 状态筛选（再点一次已选中的取消 = 全部，“全部”不含页面已关）；“收藏”由顶栏星标按钮切换
+// 筛选 chips 只保留：置顶、回答中、空闲、页面已关
 const STATUS_FILTERS = [
-  ['all', '全部'], ['pinned', '置顶'], ['generating', '回答中'], ['error', '出错'],
+  ['all', '全部'], ['pinned', '置顶'], ['generating', '回答中'],
   ['idle', '空闲'], ['closed', '页面已关'], ['favorite', '收藏']
 ];
 const DEFAULT_QUICK_REPLIES = ['继续', '请详细解释一下', '给出完整代码', '总结一下要点', '换一种思路再试试', '用中文回答', '谢谢，没问题了'];
