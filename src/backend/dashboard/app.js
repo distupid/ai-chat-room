@@ -258,6 +258,13 @@ function titleOf(c) {
 // 只影响头像配色：index.html 里有专门配色的来源，其余统一配色
 const COLORED_SOURCES = ['chatgpt', 'duckai', 'hark'];
 const avatarClass = (s) => COLORED_SOURCES.includes(s) ? s : 'other';
+/** 未预置配色的站点：按 key 稳定生成一个色相，保证各站卡片底色不重复 */
+function srcHueStyle(s) {
+  if (!s || COLORED_SOURCES.includes(s)) return '';
+  let h = 0;
+  for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return `--src: hsl(${h} 55% 48%);`;
+}
 const sourceInfo = (s) => SOURCES[s] || { label: s || '未知', short: (s || '?').slice(0, 1).toUpperCase(), regenerate: false };
 
 // ------------------------------------------------------------------ 主题
@@ -854,7 +861,7 @@ function card(c) {
 
   const node = el('article', {
     class: `card s-${c.status} src-${avatarClass(c.source)} ${c.pinned ? 'pinned' : ''}`,
-    style: /^#[0-9a-f]{3,8}$/i.test(sourceInfo(c.source).color || '') ? `--src:${sourceInfo(c.source).color}` : null,
+    style: /^#[0-9a-f]{3,8}$/i.test(sourceInfo(c.source).color || '') ? `--src:${sourceInfo(c.source).color}` : (srcHueStyle(c.source) || null),
     'data-conv': id, tabindex: '0', role: 'button', title: c.status === 'closed' ? '页面已关：点击查看详情，并在后台重新打开页面' : '点击查看详情',
     onclick: () => activateCard(c),
     onkeydown: (e) => { if (e.target === node && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); activateCard(c); } }
@@ -1896,6 +1903,64 @@ function waitForTabReady(id, timeoutMs = 30000) {
   });
 }
 
+// ------------------------------------------------------------------ 底部群发：把内容发给所有空闲会话
+/** 空闲：状态 idle、没有未完成的指令、有打开的标签页；generating 或忙碌的跳过 */
+function bcastTargets() {
+  return state.conversations.filter((c) =>
+    c.status === 'idle' && !convBusy(c.conversation_id) && c.open_tabs > 0);
+}
+function renderBcastFiles() {
+  const box = $('bcastFiles');
+  const list = filesOf('broadcast');
+  box.classList.toggle('has', list.length > 0);
+  box.replaceChildren(...list.map((x) => el('div', { class: `qfile ${x.status}`, 'data-key': x.key, title: x.error || x.name },
+    el('span', { class: 'ft' }, x.preview ? el('img', { src: x.preview, alt: '' }) : extOf(x.name)),
+    el('span', { class: 'fn' }, el('b', {}, x.name),
+      el('small', {}, x.status === 'uploading' ? `上传中 ${Math.round(x.progress * 100)}%` : x.status === 'err' ? (x.error || '上传失败') : fmtSize(x.size))),
+    el('button', { class: 'icon-btn', type: 'button', title: '移除', 'aria-label': `移除 ${x.name}`, html: FAB_ICON.close,
+      onclick: () => { removeFile('broadcast', x.key); renderBcastFiles(); } }),
+    x.status === 'uploading' ? el('span', { class: 'bar', style: `width:${Math.round(x.progress * 100)}%` }) : null)));
+}
+function addBcastFiles(fileList) {
+  // 群发附件不按站点预检（目标站点能力各异），后端按各站能力分别处理；不支持的站点那次发送会失败并提示
+  let list = filesOf('broadcast').slice();
+  for (const file of [...fileList]) {
+    if (list.length >= MAX_FILES) { snackbar(`一次最多 ${MAX_FILES} 个文件`, 'err'); break; }
+    if (file.size > MAX_FILE_BYTES) { snackbar(`文件超过 25 MB：${file.name}`, 'err'); continue; }
+    const item = { key: randomId('f'), name: file.name || 'file', size: file.size, type: file.type || 'application/octet-stream',
+      status: 'uploading', progress: 0,
+      preview: /^image\//.test(file.type) && typeof URL.createObjectURL === 'function' ? URL.createObjectURL(file) : null };
+    list.push(item);
+    uploadFile('broadcast', item, file);
+  }
+  state.files.set('broadcast', list);
+  renderBcastFiles();
+}
+function sendBroadcast() {
+  const text = $('bcastText').value.trim();
+  const all = filesOf('broadcast');
+  if (all.some((x) => x.status === 'uploading')) return snackbar('文件还在上传，稍等一下', 'err');
+  if (all.some((x) => x.status === 'err')) return snackbar('有文件上传失败，删掉它或重新选择', 'err');
+  const files = all.filter((x) => x.status === 'done');
+  if (!text && !files.length) return;
+  if (!state.canControl || state.wsState !== 'open') return snackbar('看板未连接或没有控制权限', 'err');
+  const targets = bcastTargets();
+  if (!targets.length) return snackbar('没有空闲的会话（忙碌的已跳过）', 'err');
+  const attachments = files.map((f) => ({ id: f.id, name: f.name, type: f.type, size: f.size }));
+  let sent = 0;
+  for (const c of targets) {
+    // 直接走 command 链路，不弹 fab（避免刷屏）；结果走 onCommandResult 的无 fab 分支
+    if (sendCommand(c.conversation_id, 'reply', text || null, {
+      extra: attachments.length ? { attachments } : {}, fileItems: files,
+    })) sent++;
+  }
+  $('bcastText').value = '';
+  $('bcastText').style.height = 'auto';
+  state.files.delete('broadcast');
+  renderBcastFiles();
+  snackbar(sent === targets.length ? `已群发到 ${sent} 个会话` : `已发送 ${sent}/${targets.length} 个会话`, sent ? 'ok' : 'err');
+}
+
 /** 发送失败：按钮变红，展开后显示原因、发送的内容，可重新编辑或重试 */
 const NO_RETRY_CODES = new Set(['composer_not_found', 'attach_unsupported', 'regenerate_unsupported', 'regenerate_not_found', 'attach_single_only']);
 // ^ 这些是网站能力问题，重发也没用：不提供重试按钮，文件记录也不保留
@@ -2043,12 +2108,22 @@ function addFiles(fileList) {
 function uploadFile(id, item, file) {
   const xhr = new XMLHttpRequest();
   item.xhr = xhr;
-  const done = () => { item.xhr = null; if (state.selected === id) { renderFiles(); renderComposer(); } };
+  const done = () => {
+    item.xhr = null;
+    if (state.selected === id) { renderFiles(); renderComposer(); }
+    if (id === 'broadcast') renderBcastFiles();
+  };
   xhr.open('POST', '/api/attachments');
   xhr.setRequestHeader('authorization', `Bearer ${settings.token}`);
   xhr.setRequestHeader('x-file-name', encodeURIComponent(item.name));
   xhr.setRequestHeader('content-type', item.type);
-  xhr.upload.onprogress = (e) => { if (e.lengthComputable) { item.progress = e.loaded / e.total; if (state.selected === id) renderFiles(); } };
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      item.progress = e.loaded / e.total;
+      if (state.selected === id) renderFiles();
+      if (id === 'broadcast') renderBcastFiles();
+    }
+  };
   xhr.onload = () => {
     let data = null;
     try { data = JSON.parse(xhr.responseText); } catch { /* ignore */ }
@@ -2186,6 +2261,20 @@ $('detailPin').onclick = () => { const c = convById(state.selected); if (c) togg
 $('quickSend').onclick = sendQuick;
 $('quickAttach').onclick = () => $('quickFile').click();
 $('quickFile').addEventListener('change', (e) => { addFiles(e.target.files || []); e.target.value = ''; });
+// 底部群发栏
+const bct = $('bcastText');
+bct.addEventListener('input', () => {   // textarea 自适应高度
+  bct.style.height = 'auto';
+  bct.style.height = Math.min(bct.scrollHeight, 180) + 'px';
+});
+bct.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); sendBroadcast(); }
+});
+$('bcastAttach').onclick = () => $('bcastFile').click();
+$('bcastAttach').replaceChildren(buildIcon(ATTACH_ICON_DEFAULT));
+$('bcastAttach').title = '添加附件';
+$('bcastFile').addEventListener('change', (e) => { addBcastFiles(e.target.files || []); e.target.value = ''; });
+$('bcastSend').onclick = sendBroadcast;
 // 粘贴 / 拖进输入框的文件也加进来（网站支持上传时）
 $('quickText').addEventListener('paste', (e) => {
   const fl = e.clipboardData?.files;

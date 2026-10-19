@@ -127,7 +127,7 @@
     .avatar.chatgpt { background: #0FA37E; color: #fff; }
     .avatar.duckai { background: #E0622D; color: #fff; }
     .avatar.hark { background: #5B7CFF; color: #fff; }
-    .avatar.other { background: var(--tertiary-container); color: var(--on-surface); }
+    .avatar.other { background: var(--src, var(--tertiary-container)); color: #fff; }
     /* 详情头部的小头像：跟卡片头像同一样式，只是更小 */
     .avatar.mini { width: 20px; height: 20px; border-radius: 10px; font-size: 11px; }
     .dsub .dsrc { display: inline-flex; align-items: center; gap: 6px; }
@@ -263,6 +263,21 @@
     .cands .cand { height: 28px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--outline-variant); background: transparent; color: var(--on-surface-variant); font-size: 12px; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .cands .cand:hover, .cands .cand.on { background: var(--secondary-container); color: var(--on-secondary-container); }
 
+    /* 底部群发栏：muse.ai composer 风格——大圆角、毛玻璃底、textarea 自适应高度 */
+    .bcastbar { position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px; width: min(760px, calc(100% - 32px)); z-index: 20; }
+    .bcastbox { position: relative; border-radius: 26px; padding: 14px 16px 52px;
+      background: color-mix(in srgb, var(--surface-container-high) 82%, transparent);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      border: 1px solid var(--outline-variant); box-shadow: var(--elev-2); }
+    .bcastbox .qfiles.has { margin-bottom: 8px; }
+    #bcastText { width: 100%; border: 0; background: transparent; resize: none; overflow-y: auto;
+      font: inherit; color: var(--on-surface); max-height: 180px; padding: 0; }
+    #bcastText:focus { outline: none; }
+    .bcastbox .attach { position: absolute; left: 12px; bottom: 8px; width: 36px; height: 36px; border-radius: 18px; }
+    .bcastbox .attach:hover { background: color-mix(in srgb, var(--on-surface) 8%, transparent); }
+    #bcastSend { position: absolute; right: 12px; bottom: 10px; height: 36px; padding: 0 20px; border-radius: 18px; font-weight: 500; }
+    main { padding-bottom: 110px; }   /* 给群发栏留位置 */
+
     /* 对话框 */
     .scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 30; display: none; align-items: center; justify-content: center; padding: 24px; }
     .scrim.open { display: flex; }
@@ -302,7 +317,7 @@
     .mact { display: flex; gap: 2px; margin-top: 6px; margin-left: -8px; }
     /* 消息操作按钮：统一放在气泡右下角；气泡底部留空，避免遮挡正文 */
     .msg { position: relative; }
-    .msg:has(.mact) { padding-bottom: 42px; }
+    .msg:has(.mact) { padding-bottom: 42px; min-width: 152px; }   /* 短气泡也至少能放下四个按钮，不穿透 */
     .msg .mact { position: absolute; bottom: 6px; right: 6px; margin: 0; padding: 2px; border-radius: 12px;
       background: color-mix(in srgb, var(--surface-container-lowest) 88%, transparent); backdrop-filter: blur(4px); }
     .msg.user .mact { background: color-mix(in srgb, var(--primary-container) 88%, transparent); }
@@ -436,6 +451,17 @@
 
   <div id="chips" class="chips"></div>
   <main><section id="grid" class="grid"></section></main>
+
+  <!-- 底部群发：输入内容发送给所有空闲会话 -->
+  <div id="bcastBar" class="bcastbar">
+    <div class="bcastbox">
+      <div id="bcastFiles" class="qfiles" aria-label="要群发的文件"></div>
+      <textarea id="bcastText" rows="1" placeholder="群发到所有空闲会话…"></textarea>
+      <button id="bcastAttach" class="icon-btn attach" type="button" title="添加附件"></button>
+      <input id="bcastFile" type="file" hidden multiple />
+      <button id="bcastSend" class="btn filled" type="button">群发</button>
+    </div>
+  </div>
 
   <!-- 详情 -->
   <div id="detailScrim" class="scrim" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
