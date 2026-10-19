@@ -294,6 +294,19 @@ export function openDatabase(dbPath = ':memory:') {
       return latestTabEventsStmt.all().filter((t) => t.client_id === clientId)
         .map((t) => ({ tab_id: Number(t.tab_id), conversation_id: t.conversation_id, event_type: t.event_type, received_at: t.received_at, url: t.url || '' }));
     },
+    /** 所有客户端当前开着的标签页 host 集合（去 www 前缀），用于一键打开时跳过已开的 */
+    openTabHosts(now = Date.now()) {
+      const hosts = new Set();
+      for (const t of latestTabEventsStmt.all()) {
+        if (t.event_type === 'page.closed') continue;
+        if (now - t.received_at > TAB_STALE_MS) continue;
+        try {
+          const u = t.url || '';
+          if (u) hosts.add(new URL(u).hostname.replace(/^www\./, ''));
+        } catch { /* ignore */ }
+      }
+      return hosts;
+    },
     /** 当前开着该会话的标签页（最近活动在前），用于把看板指令路由到对应插件 */
     openTabsFor(conversationId, now = Date.now()) {
       return latestTabEventsStmt.all()
@@ -367,7 +380,7 @@ const TAB_STALE_MS = 12 * 60 * 60 * 1000;
 
 /**
  * 生成状态卡死兜底：最后一次生成事件是 started，但之后 N 分钟内该会话没有任何新事件
- * （部分站点如 meta.ai 的适配上报不了 generation.finished）→ 视为卡死，回落 idle。
+ * （部分站点适配上报不了 generation.finished）→ 视为卡死，回落 idle。
  * 有新事件进来会自动恢复为 generating，所以 N 取 5 分钟：正常生成时 message.updated
  * 会持续到来，不会误伤；卡死时最多多显示 5 分钟"回答中"。
  */

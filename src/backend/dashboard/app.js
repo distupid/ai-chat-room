@@ -66,6 +66,7 @@ const state = {
   sentFiles: new Map((() => { try { return JSON.parse(localStorage.getItem('sentFiles') || '[]'); } catch { return []; } })()),   // conversation_id → 已发送的文件 [{ordinal, at, files}]
   files: new Map(),       // conversation_id → 详情输入框里待发送的文件 [{key, name, size, type, status, progress, id, error, xhr, preview}]
   reopening: new Map(),   // conversation_id → 截止时间：页面已关的会话正在后台重新打开
+  readMids: new Set(),    // 用户已看过的消息 id：看过之后不再通知
   ws: null,
   wsState: 'idle',
   canControl: false,
@@ -415,7 +416,7 @@ async function systemNotify(c, conversationId, mid, title, secs) {
 }
 
 /** 回答完成：普通会话 → 音效（打开“所有会话弹出”时同置顶）；置顶会话 → 打开详情 + 提示音；在后台时另发系统通知（含回答内容） */
-function onAnswerFinished(c, conversationId, name, secs, mid, seq) {
+function onAnswerFinished(c, conversationId, name, secs, mid, seq, eventId) {
   const n = settings.notify;
   const pinned = !!c?.pinned;
   if (pinned && !n.pinned_popup) return 'none';
@@ -423,11 +424,17 @@ function onAnswerFinished(c, conversationId, name, secs, mid, seq) {
     if (n.sound) { playSound(false); return 'sound'; }
     return 'none';
   }
-  // 一次回答完成（会话 + 回答 + 第几次生成）只弹一次：同一事件重复送达不再弹；重新回答是新的一次
-  const key = `${answerKey(conversationId, mid)}|${seq ?? ''}`;
-  const keyed = mid || seq != null;
-  if (keyed && answerSeen.has(key)) return 'dup';
-  if (keyed) { answerSeen.add(key); if (answerSeen.size > 500) answerSeen.delete(answerSeen.values().next().value); }
+  // 已读：这条消息用户已经看过，不再通知
+  if (mid && state.readMids.has(mid)) return 'read';
+  // 去重：同一条消息只通知一次。
+  // 语义键（会话+mid+生成序号）：插件重发 finished 也只算一次；
+  // 事件键（event_id）：同一广播重复送达（重连回放等）直接丢弃。
+  const semKey = `${answerKey(conversationId, mid)}|${seq ?? ''}`;
+  const evtKey = eventId ? `evt:${eventId}` : null;
+  if (answerSeen.has(semKey) || (evtKey && answerSeen.has(evtKey))) return 'dup';
+  answerSeen.add(semKey);
+  if (evtKey) answerSeen.add(evtKey);
+  if (answerSeen.size > 1000) answerSeen.delete(answerSeen.values().next().value);
   if (pinned || n.sound) playSound(pinned);
   if (!pageInFront() && n.enabled && notificationsSupported() && Notification.permission === 'granted') {
     systemNotify(c, conversationId, mid, `${pinned ? '置顶会话回答完成' : '回答完成'}：${name}`, secs);
@@ -498,6 +505,8 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
   state.longOpen = new Set();
   state.composerOpen = true;   // 点卡片打开详情时直接展开快速回复
   state.stickBottom = !toFavorite;   // 默认固定在最后一个回复
+  // 已读：打开详情即视为看过，清掉该会话排队中的通知
+  for (let i = answerQueue.length - 1; i >= 0; i--) if (answerQueue[i].conv === conversationId) answerQueue.splice(i, 1);
   $('quickText').value = '';   // 每次进入弹窗清空输入框，避免把上次没发出去的文字发到别的会话
   closeCands();
   $('detailScrim').classList.add('open');
@@ -508,7 +517,11 @@ async function openDetail(conversationId, { toFavorite = false } = {}) {
   try {
     const data = await api(`/api/conversations/${encodeURIComponent(conversationId)}/messages`);
     if (state.selected !== conversationId) return;
-    for (const m of data.messages) state.messages.set(m.message_id, { role: m.role, index: m.msg_index, seq: m.updated_seq, text: m.text, html: m.html || null, favorite: !!m.favorite });
+    for (const m of data.messages) {
+      state.messages.set(m.message_id, { role: m.role, index: m.msg_index, seq: m.updated_seq, text: m.text, html: m.html || null, favorite: !!m.favorite });
+      state.readMids.add(m.message_id);   // 已读标记：看过之后不再通知
+    }
+    if (state.readMids.size > 2000) { const it = state.readMids.values(); for (let i = 0; i < 1000; i++) state.readMids.delete(it.next().value); }
     renderDetail(true, true);
     if (toFavorite) { state.stickBottom = false; scrollToFavorite(); } else scrollDetailBottom();
     if (state.selected === conversationId && state.composerOpen && document.activeElement !== $('quickText')) $('quickText').focus();
@@ -785,7 +798,7 @@ function onBroadcast(b) {
   if (b.event_type === 'generation.started') genSeq.set(conv, b.payload.generation_sequence ?? `${b.event_id}`);
   if (b.event_type === 'generation.finished') {
     const secs = b.payload.duration_ms != null ? `用时 ${duration(b.payload.duration_ms)}` : '';
-    onAnswerFinished(c, conv, name, secs, b.payload.message_id || null, genSeq.get(conv));
+    onAnswerFinished(c, conv, name, secs, b.payload.message_id || null, genSeq.get(conv), b.event_id);
   }
   scheduleRefresh(b.event_type === 'message.updated' ? 1500 : 300);
 }
@@ -964,8 +977,8 @@ function closePage(c) {
 async function launchAll() {
   try {
     const r = await api('/api/sites/launch', { method: 'POST', body: '{}' });
-    snackbar(`正在后台打开还没开着的网站（列表共 ${r.count} 个）`, 'ok');
-  } catch (e) { snackbar(`一键启动失败：${e.message}`, 'err'); }
+    snackbar(r.count ? `正在后台打开 ${r.count} 个已关会话（已有同站标签页的已跳过）` : '没有需要打开的已关会话', r.count ? 'ok' : undefined);
+  } catch (e) { snackbar(`一键打开失败：${e.message}`, 'err'); }
 }
 
 // ------------------------------------------------------------------ 卡片：快速回复栏

@@ -385,11 +385,22 @@ export function createBridgeServer(opts = {}) {
       if (path === '/api/sites/launch' && req.method === 'POST') {
         const target = onlineExtensions()[0];
         if (!target) return json(res, 409, { ok: false, error: '没有在线的浏览器插件' });
-        const urls = customSites.filter((x) => x.enabled !== false).map((x) => x.url).filter((u) => /^https:\/\//.test(u));
-        if (!urls.length) return json(res, 400, { ok: false, error: '网站列表是空的' });
-        sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: randomId('launch').slice(0, 40), action: 'open_sites', conversation_id: 'sites', text: urls.join('\n').slice(0, 20000) }));
-        log.info(`[sites] launch ${urls.length} sites via ${target.clientId}`);
-        return json(res, 202, { ok: true, count: urls.length });
+        // 一键打开：优先打开“页面已关”的会话；已有同 host 标签页开着的跳过，不重复打开
+        const openHosts = db.openTabHosts();
+        const toOpen = [];
+        const seen = new Set();
+        for (const c of db.listConversations(500)) {
+          if (c.status !== 'closed' || !c.url || !/^https:\/\//.test(c.url)) continue;
+          let host;
+          try { host = new URL(c.url).hostname.replace(/^www\./, ''); } catch { continue; }
+          if (openHosts.has(host) || seen.has(host)) continue;   // 已有同 host 标签页，跳过
+          seen.add(host);
+          toOpen.push(c.url);
+        }
+        if (!toOpen.length) return json(res, 200, { ok: true, count: 0 });
+        sendTo(target, makeEnvelope(MessageType.COMMAND, { command_id: randomId('launch').slice(0, 40), action: 'open_sites', conversation_id: 'sites', text: toOpen.join('\n').slice(0, 20000) }));
+        log.info(`[sites] launch ${toOpen.length} closed conversations via ${target.clientId}`);
+        return json(res, 202, { ok: true, count: toOpen.length });
       }
       const nc = path.match(/^\/api\/sites\/([^/]+)\/new-chat$/);
       if (nc && req.method === 'POST') {
