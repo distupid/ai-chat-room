@@ -1,6 +1,6 @@
 # ai-chat-room
 
-web ai chat admin：把网页 AI 对话（ChatGPT / Duck.ai / Hark）实时汇集到本地后端，在看板里统一查看、标记、快速回复。
+web ai chat admin：把网页 AI 对话（ChatGPT / Duck.ai / Hark / Muse）实时汇集到本地后端，在看板里统一查看、标记、快速回复、群发。
 
 ```text
 网页对话 ──DOM 观察──▶ Chrome 插件（src/frontend）──WebSocket──▶ 监听后端（src/backend）──▶ 看板 / 观察者
