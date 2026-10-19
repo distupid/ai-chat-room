@@ -212,7 +212,9 @@
     //（[data-message-accessibility-surrogate]，自带“用户消息：/助手消息：”前缀），
     // 可视区内是可见 <p>（“你：”前缀在 sr-only 里，已被 BASE_EXCLUDE 排除）。
     // text 指向替身 span（bodyOf 豁免显式选择的候选），strip 去前缀；无替身时退回整行。
-    // 输入框是 textarea[aria-label="消息"]；无发送按钮，回车发送。
+    // 输入框是 textarea[aria-label="消息"]；发送按钮平时不在 DOM 里
+    // （div[data-hatch-composer-action-slot] 是空槽位），填了内容才渲染出
+    // button[aria-label="发送"]；填完等按钮出现再点，不出现则回车发送。
     // 生成中：button[aria-label="停止任务"] 出现即为生成中（快照抓取时正在生成，
     // 最后一条 assistant 消息还是空壳）。附件按钮：button[aria-label="附加文件"]。
     // 类名是 Tailwind 动态生成的，只用 data-*/aria-* 语义属性。
@@ -255,7 +257,7 @@
       },
       actions: {
         composer: 'textarea[aria-label="消息"]',
-        send_button: '',   // 无发送按钮，回车发送
+        send_button: 'div[data-hatch-composer-action-slot="true"] button[aria-label="发送"], button[aria-label="发送"]',
         regenerate_button: '',
         attach_button: 'button[aria-label="附加文件"]'
       }
