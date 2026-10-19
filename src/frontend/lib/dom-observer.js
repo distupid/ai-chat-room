@@ -204,39 +204,35 @@
       }
     },
 
-    // claude.ai（2026-10-19）：选择器来自 claude.ai 实际下发的 DOM 快照（已确认）。
-    // 消息行 [data-testid="transcript-row"]，data-perf-row="human|assistant" 区分角色；
-    // 输入框是 TipTap contenteditable（不是 textarea）；发送按钮 data-testid="chat-input-send"；
-    // 生成中信号：data-is-streaming="true"（结束变 "false"）+ aria-label="Stop Claude" 的停止按钮
-    // （无稳定 testid，结束时消失）。用户反馈过别站卡“回答中”，此处用状态属性而非猜测。
-    claude: {
+    // muse.ai（2026-10-19）：未验证——真实 DOM 拿不到（网络屏蔽），先用保守通用配置顶上。
+    // generating.selector 故意留空（不猜停止按钮，猜错会卡“回答中”），靠文本活动检测 + 后端超时回落。
+    // 等用户跑 probe 拿回真实 DOM 后写实；当前 0 命中属预期，看 selector_health。
+    muse: {
       config_version: 1,
-      source: 'default:claude',
-      site: 'claude',
+      source: 'default:muse',
+      site: 'muse',
       conversation: {
-        url_pattern: '/chat/([0-9a-f-]{36})(?:[/?#]|$)',
+        url_pattern: null,   // 未验证：待实测补充
         dom: null,
         fallback_id: null,
         fallback_path: null,
-        prefix: 'claude-'
+        prefix: 'muse-'
       },
       message: {
-        selector: '[data-testid="transcript-row"]',
+        // 未验证：通用候选；全部不命中时观察器静默，selector_health 会报 0
+        selector: '[data-testid*="message"], [data-message-id]',
         role_sources: [],
-        role_rules: [
-          { selector: '[data-perf-row="assistant"]', role: 'assistant', scope: 'self' },
-          { selector: '[data-perf-row="human"]', role: 'user', scope: 'self' }
-        ],
+        role_rules: [],
         id_attrs: ['data-message-id', 'id'],
         id_inner: null
       },
       text: {
-        user: '[data-testid="user-message"]',
-        assistant: '[data-perf-reply-text]',
-        exclude: '[data-cds="MessageActions"], time, .sr-only, [aria-hidden="true"], button'
+        user: '',
+        assistant: '',
+        exclude: 'button, [aria-hidden="true"]'
       },
       generating: {
-        selector: '[data-is-streaming="true"], button[aria-label="Stop Claude"]:not([disabled])',
+        selector: '',   // 故意留空，见上
         activity_idle_ms: 2000
       },
       status: {
@@ -245,8 +241,8 @@
         check_interval_ms: 2000
       },
       actions: {
-        composer: 'div[data-testid="chat-input"][contenteditable="true"]',
-        send_button: 'button[data-testid="chat-input-send"]',
+        composer: 'div[contenteditable="true"], textarea',
+        send_button: 'button[aria-label*="Send"], button[aria-label*="发送"]',
         regenerate_button: ''
       }
     },
@@ -304,10 +300,10 @@
     { key: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', host: 'chatgpt.com', hosts: ['chatgpt.com', 'chat.openai.com'], enabled: true, config: DEFAULT_CONFIG },
     { key: 'duckai', name: 'Duck.ai', url: 'https://duck.ai/', host: 'duck.ai', hosts: ['duck.ai'], enabled: true, config: SITE_PROFILES.duckai },
     { key: 'hark', name: 'Hark', url: 'https://www.hark.com/chat', host: 'www.hark.com', hosts: ['hark.com'], enabled: true, config: SITE_PROFILES.hark },
-    // 2026-10-19 新增：meta.ai / claude.ai 选择器未完全验证（见 SITE_PROFILES 注释），先默认启用，
+    // 2026-10-19 新增：meta.ai / muse.ai 选择器未验证（见 SITE_PROFILES 注释），先默认启用，
     // 命中为 0 时看 selector_health，再用看板 probe_site 细化
     { key: 'metai', name: 'Meta AI', url: 'https://www.meta.ai/', host: 'www.meta.ai', hosts: ['meta.ai'], enabled: true, config: SITE_PROFILES.metai },
-    { key: 'claude', name: 'Claude', url: 'https://claude.ai/new', host: 'claude.ai', hosts: ['claude.ai'], enabled: true, config: SITE_PROFILES.claude }
+    { key: 'muse', name: 'Muse', url: 'https://muse.ai/', host: 'muse.ai', hosts: ['muse.ai'], enabled: true, config: SITE_PROFILES.muse }
   ];
 
   function normHost(h) { return String(h || '').toLowerCase().replace(/\.$/, '').replace(/^www\./, ''); }

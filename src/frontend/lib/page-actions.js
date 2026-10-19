@@ -170,6 +170,15 @@
         await sleep(win, 300);   // 让页面先把文件加进输入框（很多网站上传期间会禁用发送按钮）
       }
       if (text.trim()) setComposerText(doc, win, input, text);
+      // 发送前确认：文字必须真正落在输入框里。有的页面框架会回滚合成输入
+      // （框里看着有字、框架内部状态却是空的），此时点发送也发不出去，
+      // 而旧逻辑只看“输入框空了”就会误报 ok。按行压平后做包含检查，容忍换行差异。
+      if (text.trim()) {
+        var flat = function (s) { return String(s || '').replace(/\s+/g, ''); };
+        if (flat(composerText(input)).indexOf(flat(text).slice(0, 60)) < 0) {
+          return { ok: false, code: 'composer_fill_failed', detail: '文字没能填入输入框（页面可能回滚了输入），未点发送' };
+        }
+      }
       var btn = await waitUntil(win, function () {
         var b = last(doc.querySelectorAll(sel.send_button));
         return isEnabled(b) ? b : null;
@@ -180,14 +189,33 @@
       }
       if (!btn && files.length) return { ok: false, code: 'upload_not_finished', detail: '文件已交给页面，但等不到上传完成（发送按钮一直不可用）' };
       if (btn) btn.click(); else pressEnter(win, input);
-      var sent = await waitUntil(win, function () {
-        return ctx.isGenerating() || (text.trim() ? composerText(input).trim() === '' : !isEnabled(last(doc.querySelectorAll(sel.send_button))));
-      }, 5000, 100);
+      // 发送确认（两阶段，防误报 ok）：
+      //  1) 8 秒内等页面真正接受：进入生成中（最强信号）、或输入框被清空、或纯文件时发送按钮变不可用；
+      //  2) 若靠“输入框清空”确认，再观察 1.2 秒：必须保持清空（排除页面瞬时抖动/回填），
+      //     期间进入生成中则直接成功，文字重现则判失败。超时无确认一律报失败，看板可重试。
+      var acceptState = await waitUntil(win, function () {
+        if (ctx.isGenerating()) return 'generating';
+        if (text.trim() && composerText(input).trim() === '') return 'cleared';
+        if (!text.trim() && !isEnabled(last(doc.querySelectorAll(sel.send_button)))) return 'sent_files';
+        return null;
+      }, 8000, 100);
+      if (!acceptState) {
+        return { ok: false, code: 'send_not_confirmed', detail: '点了发送，但 8 秒内页面没有反应（输入框未清空、也未开始回答）' };
+      }
+      if (acceptState === 'cleared') {
+        var settleUntil = Date.now() + 1200;
+        for (;;) {
+          if (ctx.isGenerating()) break;   // 开始回答了，直接算成功
+          if (composerText(input).trim() !== '') {
+            return { ok: false, code: 'send_not_confirmed', detail: '输入框清空后又出现文字，消息可能没发出去' };
+          }
+          if (Date.now() >= settleUntil) break;
+          await sleep(win, 100);
+        }
+      }
       // 等页面开始回答再返回，避免看板紧接着发第二条时页面还没进入“回答中”
-      if (sent) await waitUntil(win, function () { return ctx.isGenerating(); }, 3000, 100);
-      return sent
-        ? { ok: true, detail: btn ? '已发送' : '已发送（回车）' }
-        : { ok: false, code: 'send_not_confirmed', detail: '文字已填入输入框，但没确认发送成功' };
+      await waitUntil(win, function () { return ctx.isGenerating(); }, 3000, 100);
+      return { ok: true, detail: btn ? '已发送' : '已发送（回车）' };
     }
 
     if (command.action === 'regenerate') {

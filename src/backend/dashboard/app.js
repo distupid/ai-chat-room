@@ -86,6 +86,7 @@ const state = {
   longOpen: new Set(),   // 超长消息：用户手动展开了全文的 message_id
   composerOpen: false,
   candIndex: -1,
+  showAllMsgs: new Set(),   // 超长对话：已点“显示更早消息”的会话
   drafts: new Map(),
   cardReply: null,
   pendingCommands: new Map(),
@@ -1627,8 +1628,15 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
   const nearBottom = forceBottom || state.composerOpen || body.scrollHeight - body.scrollTop - body.clientHeight < 120;
   // 相邻两条角色和内容完全相同的消息只显示一条（旧版插件把同一条发送重复记录过）
   // 排序：以后端序号为准，序号相同（插件按渲染子集上报时可能重复）时按服务端 seq 排（与 db.listMessages 的 ORDER BY 一致）
-  const msgs = [...state.messages.entries()].sort((a, b) => (a[1].index - b[1].index) || ((a[1].seq ?? 0) - (b[1].seq ?? 0)))
+  // 超长对话：默认只渲染最近 500 条，顶部可展开全部
+  const MAX_MSGS = 500;
+  let msgs = [...state.messages.entries()].sort((a, b) => (a[1].index - b[1].index) || ((a[1].seq ?? 0) - (b[1].seq ?? 0)))
     .filter(([, m], i, arr) => !i || arr[i - 1][1].role !== m.role || arr[i - 1][1].text !== m.text || !m.text);
+  let hiddenCount = 0;
+  if (!state.showAllMsgs.has(state.selected) && msgs.length > MAX_MSGS) {
+    hiddenCount = msgs.length - MAX_MSGS;
+    msgs = msgs.slice(-MAX_MSGS);
+  }
   const c = convById(state.selected);
   const src = sourceInfo(c?.source);
   const answers = msgs.filter(([, m]) => m.role === 'assistant').map(([id]) => id);
@@ -1669,6 +1677,12 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
         iconBtn(SVG.forward, '转发到其他 AI', () => openForwardPicker(id, m.text),
           { act: 'forward', disabled: !state.canControl || state.wsState !== 'open' })
       ) : m.role === 'user' ? el('div', { class: 'mact' },
+        iconBtn(SVG.copy, '复制', () => copyText(m.text), { act: 'copy' }),
+        iconBtn(m.favorite ? SVG.starOn : SVG.star, m.favorite ? '取消收藏' : '收藏', () => toggleFavorite(state.selected, id), { on: m.favorite, act: 'favorite' }),
+        iconBtn(collapsed ? SVG.unfold : SVG.fold, collapsed ? '展开' : '折叠', () => {
+          collapsed ? state.collapsed.delete(id) : state.collapsed.add(id);
+          renderDetail();
+        }, { act: 'fold' }),
         iconBtn(SVG.forward, '转发到其他 AI', () => openForwardPicker(id, m.text),
           { act: 'forward', disabled: !state.canControl || state.wsState !== 'open' })
       ) : null);
@@ -1680,7 +1694,11 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
   else {
     // 按消息复用：流式输出时只重建正在变化的那条（富文本解析、代码块渲染都不再每次全部重做）
     const keep = new Set();
-    placeChildren($('detailMsgs'), msgs.map(([id, m]) => {
+    const moreBtn = hiddenCount > 0 ? [el('button', {
+      class: 'cand', type: 'button',
+      onclick: () => { state.showAllMsgs.add(state.selected); renderDetail(); }
+    }, `显示更早的 ${hiddenCount} 条消息`)] : [];
+    placeChildren($('detailMsgs'), moreBtn.concat(msgs.map(([id, m]) => {
       keep.add(id);
       const ai = answers.indexOf(id);
       const sig = JSON.stringify([m.role, m.text, m.html, m.role === 'user' ? sentFilesFor(state.selected, userOrd.get(id)).length : 0, !!m.favorite, state.collapsed.has(id), state.streaming.has(id), state.longOpen.has(id),
@@ -1688,7 +1706,7 @@ function renderDetail(scrollToEnd = false, forceBottom = false) {
       let hit = msgCache.get(id);
       if (!hit || hit.sig !== sig) { hit = { sig, node: build(id, m) }; msgCache.set(id, hit); }
       return hit.node;
-    }).concat(orphan.map(orphanFilesEl)));
+    }).concat(orphan.map(orphanFilesEl))));
     for (const id of msgCache.keys()) if (!keep.has(id)) msgCache.delete(id);
   }
   applyLongFold();
@@ -1716,6 +1734,7 @@ function applyLongFold() {
     // 已处理过的（复用的节点上已有“展开全文 / 收起”）不再重复处理
     if (msg.classList.contains('collapsed') || msg.querySelector(':scope > .longbtn, :scope > .longfold')) continue;
     const id = msg.dataset.mid;
+    if (state.streaming.has(id)) continue;   // 正在流式输出的消息不等它，先不折叠
     const body = msg.querySelector(':scope > .body');
     if (!body) continue;
     const h = body.getBoundingClientRect().height;
@@ -1878,6 +1897,8 @@ function waitForTabReady(id, timeoutMs = 30000) {
 }
 
 /** 发送失败：按钮变红，展开后显示原因、发送的内容，可重新编辑或重试 */
+const NO_RETRY_CODES = new Set(['composer_not_found', 'attach_unsupported', 'regenerate_unsupported', 'regenerate_not_found', 'attach_single_only']);
+// ^ 这些是网站能力问题，重发也没用：不提供重试按钮，文件记录也不保留
 function sendFailed(p, msg) {
   const id = p.conversation_id;
   const reason = CODE_TEXT[msg.code] || msg.detail || msg.code || '未知错误';
@@ -1886,16 +1907,18 @@ function sendFailed(p, msg) {
   const text = p.text || '';
   const atts = p.attachments || [];
   const items = p.fileItems || [];
+  const noRetry = NO_RETRY_CODES.has(msg.code);
   state.drafts.set(id, text);   // 回到详情时输入框还原成没发出去的内容
-  if (items.length) state.files.set(id, items.slice());   // 文件也还原（后端保留 30 分钟）
+  if (!noRetry && items.length) state.files.set(id, items.slice());   // 文件也还原（后端保留 30 分钟）；重试无用时不保留
   if (state.selected === id) restoreDraft(id);   // 详情正开着这个会话：输入框立即同步回没发出去的内容
   const lines = [text.length > 160 ? `${text.slice(0, 160)}…` : text, atts.length ? `📎 ${atts.map((a) => a.name).join('、')}` : ''].filter(Boolean);
+  if (noRetry) lines.push('（这个网站不支持，重试也没用）');
   setFab(f, 'err', `发送失败：${reason}`, {
     title: `「${name}」`,
     detail: lines.join('\n'),
     actions: [
       { label: '重新编辑', onclick: () => { removeFab(f); openDetail(id).then(() => restoreDraft(id)); restoreDraft(id); } },
-      { label: '重试', onclick: () => { removeFab(f); sendReplyWithFab(id, text, () => { state.drafts.delete(id); state.files.delete(id); }, atts, items); } }
+      ...(!noRetry ? [{ label: '重试', onclick: () => { removeFab(f); sendReplyWithFab(id, text, () => { state.drafts.delete(id); state.files.delete(id); }, atts, items); } }] : []),
     ]
   });
 }

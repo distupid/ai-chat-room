@@ -117,16 +117,16 @@
     .card:hover { box-shadow: var(--elev-1); background: var(--surface-container); }
     .card.active-page:hover { box-shadow: 0 0 0 2px var(--primary), var(--elev-1); }
     .card:focus-visible { outline: 2px solid var(--primary); }
-    /* 卡片底色 = 网站主题色淡染（网站配置里的 color 优先，没有就用看板主题色），所有状态统一；页面已关更淡 */
-    .card { --src: var(--primary); background: color-mix(in srgb, var(--src) 10%, var(--surface-container-low)); }
-    .card.src-chatgpt { --src: #10A37F; } .card.src-duckai { --src: #DE5833; } .card.src-hark { --src: var(--primary); }
-    .card:hover { background: color-mix(in srgb, var(--src) 16%, var(--surface-container)); }
-    .card.s-closed { background: color-mix(in srgb, var(--src) 5%, var(--surface-container-low)); }
+    /* 卡片底色 = 网站主题色淡染（一眼可区分，整体协调）；所有状态统一；页面已关更淡 */
+    .card { --src: var(--primary); background: color-mix(in srgb, var(--src) 13%, var(--surface-container-low)); }
+    .card.src-chatgpt { --src: #0FA37E; } .card.src-duckai { --src: #E0622D; } .card.src-hark { --src: #5B7CFF; }
+    .card:hover { background: color-mix(in srgb, var(--src) 19%, var(--surface-container)); }
+    .card.s-closed { background: color-mix(in srgb, var(--src) 6%, var(--surface-container-low)); }
     .card .head { display: flex; gap: 12px; align-items: flex-start; }
     .avatar { width: 40px; height: 40px; border-radius: 20px; flex: none; display: flex; align-items: center; justify-content: center; font-weight: 500; font-size: 15px; }
-    .avatar.chatgpt { background: #10A37F; color: #fff; }
-    .avatar.duckai { background: #DE5833; color: #fff; }
-    .avatar.hark { background: var(--primary); color: var(--on-primary); }
+    .avatar.chatgpt { background: #0FA37E; color: #fff; }
+    .avatar.duckai { background: #E0622D; color: #fff; }
+    .avatar.hark { background: #5B7CFF; color: #fff; }
     .avatar.other { background: var(--tertiary-container); color: var(--on-surface); }
     /* 详情头部的小头像：跟卡片头像同一样式，只是更小 */
     .avatar.mini { width: 20px; height: 20px; border-radius: 10px; font-size: 11px; }
@@ -300,9 +300,10 @@
     .msg.collapsed .fold { display: block; }
     .msg.fav { border-color: var(--tertiary); }
     .mact { display: flex; gap: 2px; margin-top: 6px; margin-left: -8px; }
-    /* 消息操作按钮：挪到气泡右上角（绝对定位） */
+    /* 消息操作按钮：统一放在气泡右下角；气泡底部留空，避免遮挡正文 */
     .msg { position: relative; }
-    .msg .mact { position: absolute; top: 6px; right: 6px; margin: 0; padding: 2px; border-radius: 12px;
+    .msg:has(.mact) { padding-bottom: 42px; }
+    .msg .mact { position: absolute; bottom: 6px; right: 6px; margin: 0; padding: 2px; border-radius: 12px;
       background: color-mix(in srgb, var(--surface-container-lowest) 88%, transparent); backdrop-filter: blur(4px); }
     .msg.user .mact { background: color-mix(in srgb, var(--primary-container) 88%, transparent); }
     .mact .icon-btn { width: 32px; height: 32px; border-radius: 16px; }

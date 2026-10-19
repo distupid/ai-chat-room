@@ -260,80 +260,39 @@ test('选择器降级：站点改版后旧选择器全失效，观察器不崩�
 });
 
 // ---------------------------------------------------------------------------
-// 新默认站点种子：meta.ai / claude.ai（2026-10-19）
-// 注意：以下夹具基于公开资料假设的结构（见 SITE_PROFILES 注释），非实测 DOM；
+// 新默认站点种子：meta.ai / muse.ai（2026-10-19）
+// 注意：两站选择器均为未验证的保守通用配置（见 SITE_PROFILES 注释），非实测 DOM；
 // 断言的是“配置按假设工作”，真实选择器待看板 probe_site 细化。
 // ---------------------------------------------------------------------------
 
-test('新种子：meta.ai / claude.ai 按域名找到对应站点配置', () => {
+test('新种子：meta.ai / muse.ai 按域名找到对应站点配置', () => {
   const { win, obs } = runObserver('<!doctype html><html><head><title>x</title></head><body></body></html>', 'https://www.meta.ai/');
   const O = win.ChatGPTBridgeObserver;
   assert.equal(O.findSite('www.meta.ai').key, 'metai');
   assert.equal(O.findSite('meta.ai').key, 'metai');
-  assert.equal(O.findSite('claude.ai').key, 'claude');
+  assert.equal(O.findSite('muse.ai').key, 'muse');
   assert.equal(O.siteHosts(O.findSite('www.meta.ai')).join(','), 'meta.ai');
-  // 种子顺序：chatgpt、duck.ai、hark 之后是 meta.ai、claude.ai
-  assert.equal(O.SEED_SITES.map((s) => s.key).join(','), 'chatgpt,duckai,hark,metai,claude');
+  // 种子顺序：chatgpt、duck.ai、hark 之后是 meta.ai、muse.ai
+  assert.equal(O.SEED_SITES.map((s) => s.key).join(','), 'chatgpt,duckai,hark,metai,muse');
   obs.stop();
   win.close();
 });
 
-test('claude.ai：会话 ID 取自 /chat/<uuid>；停止按钮出现=生成中、消失=结束', async () => {
-  const conv = '12345678-1234-1234-1234-1234567890ab';
-  // 夹具按 claude.ai 实际 DOM 快照编写（2026-10-19 已确认）
-  const html = (generating) => `<!doctype html><html><head><title>Claude</title></head><body><div id="app">
-    <div data-testid="transcript-list">
-      <div data-testid="transcript-row" data-perf-row="human" data-perf-row-streaming="false">
-        <div role="article" aria-label="Message 1 of 2">
-          <h2 class="sr-only">You said: 帮我写个函数</h2>
-          <div data-cds="UserMessage"><div data-testid="user-message"><p>帮我写个函数</p></div></div>
-        </div>
-      </div>
-      <div data-testid="transcript-row" data-perf-row="assistant" data-perf-row-streaming="${generating}">
-        <div role="article" aria-label="Message 2 of 2">
-          <h2 class="sr-only">Claude responded: 好的</h2>
-          <div data-is-streaming="${generating}">
-            <div class="font-claude-response"><div data-perf-reply-text=""><p>好的：</p><pre><code>def f(): pass</code></pre></div></div>
-          </div>
-          <div data-cds="MessageActions" role="toolbar" aria-label="Message actions"><button aria-label="Copy">c</button><button aria-label="Retry">r</button></div>
-        </div>
-      </div>
-    </div>
-    <div data-chat-input-container="true">
-      <div data-cds="ChatComposer">
-        <div data-cds="ChatComposerEditor">
-          <div contenteditable="true" role="textbox" data-testid="chat-input" aria-label="Write your prompt to Claude" class="tiptap ProseMirror"></div>
-        </div>
-        ${generating
-          ? '<button aria-label="Stop Claude">Stop Claude</button>'
-          : '<button data-testid="chat-input-send" aria-label="Send message">➤</button>'}
-      </div>
-    </div>
-  </div></body></html>`;
-
-  // 生成中：data-is-streaming="true" + Stop Claude 按钮 → isGenerating 为 true
-  const g = runObserver(html(true), `https://claude.ai/chat/${conv}`);
-  assert.equal(g.obs.getConversationId(), `claude-${conv}`);
-  await waitFor(() => g.obs.isGenerating(), { label: 'generating true' });
-  g.obs.stop(); g.win.close();
-
-  // 结束后：状态属性翻转、按钮消失 → isGenerating 为 false（不能卡在“回答中”）
-  const d = runObserver(html(false), `https://claude.ai/chat/${conv}`);
-  await waitFor(() => d.events.some((e) => e.event_type === 'page.opened'), { label: 'page.opened' });
-  assert.equal(d.obs.isGenerating(), false);
-  // 角色按 data-perf-row 识别；正文排除操作栏按钮和 sr-only
-  const added = d.events.filter((e) => e.event_type === 'message.added');
-  assert.deepEqual(added.map((e) => e.payload.role), ['user', 'assistant']);
-  const asst = added.find((e) => e.payload.role === 'assistant');
-  assert.match(asst.payload.text, /好的：/);
-  assert.ok(!asst.payload.text.includes('Claude responded'), 'sr-only 不进正文');
-  assert.ok(!asst.payload.text.includes('Copy'), '操作栏按钮不进正文');
-  assert.equal(added.find((e) => e.payload.role === 'user').payload.text, '帮我写个函数');
-  // 页面操作选择器能解析到输入框和发送按钮
-  const actions = d.obs.getConfig().actions;
-  assert.ok(d.doc.querySelector(actions.composer), 'composer 可解析');
-  assert.ok(d.doc.querySelector(actions.send_button), 'send_button 可解析');
-  d.obs.stop(); d.win.close();
+test('muse.ai：generating 选择器故意留空（防卡“回答中”）；健康度可观测', async () => {
+  const { win, obs, events } = runObserver(
+    '<!doctype html><html><head><title>Muse</title></head><body><div id="app"></div></body></html>',
+    'https://muse.ai/');
+  await waitFor(() => events.some((e) => e.event_type === 'page.opened'), { label: 'page.opened' });
+  const cfg = obs.getConfig();
+  assert.equal(cfg.site, 'muse');
+  // 解析后的 generating 选择器为空：不猜停止按钮，防卡“回答中”
+  const O = win.ChatGPTBridgeObserver;
+  const resolved = O.resolveConfig(null, win.document, O.SITE_PROFILES.muse);
+  assert.equal(resolved.generating, '', 'generating 选择器留空，不猜停止按钮');
+  assert.equal(obs.isGenerating(), false);
+  // 选择器未验证，0 命中属预期，且能被后台观测到（等 probe 拿回真实 DOM 后写实）
+  assert.equal(obs.getSelectorHealth().message_selector_hits, 0);
+  obs.stop(); win.close();
 });
 
 test('meta.ai：generating 选择器故意留空（防卡“回答中”）；健康度可观测', async () => {
