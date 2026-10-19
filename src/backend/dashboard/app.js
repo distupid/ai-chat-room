@@ -6,7 +6,6 @@ const $ = (id) => document.getElementById(id);
 
 const STATUS = {
   generating: { label: '回答中', order: 1 },
-  limit_reached: { label: '到达上限', order: 2 },
   error: { label: '出错', order: 2 },
   idle: { label: '空闲', order: 3 },
   closed: { label: '页面已关', order: 4 },

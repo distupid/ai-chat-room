@@ -398,7 +398,8 @@ function isGenerating(r, now) {
 
 /**
  * 会话实体：
- *   status 优先级：closed（没有标签页开着）> limit_reached > error > generating > idle
+ *   status 优先级：closed（没有标签页开着）> error > generating > idle
+ *   （到达上限不再单独成状态，按实际 generating/idle 显示，限额信息保留在 status_detail）
  *   页面关掉后 status_detail 仍保留最后一次的限额/报错提示
  */
 function deriveConversation(r, openTabs, resolveSource = sourceFromUrl, now = Date.now(), boundTab = null) {
@@ -408,7 +409,6 @@ function deriveConversation(r, openTabs, resolveSource = sourceFromUrl, now = Da
   const pageStatus = st?.status || 'ok';
   let status;
   if (openTabs === 0) status = 'closed';
-  else if (pageStatus === 'limit_reached') status = 'limit_reached';
   else if (pageStatus === 'error') status = 'error';
   else if (generating) status = 'generating';
   else status = 'idle';
