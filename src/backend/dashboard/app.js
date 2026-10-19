@@ -352,9 +352,14 @@ async function latestAnswerText(c, conversationId) {
  * 正在看另一个会话的详情时排队，关掉当前详情后依次打开，一个回答对应一次弹出。
  */
 const answerQueue = [];
-const genSeq = new Map();
 const answerSeen = new Set();
 const answerKey = (conv, mid) => `${conv}|${mid || ''}`;
+// 同一条消息短时间内重复 finished（muse.ai 生成信号闪烁会导致 sequence 递增但 mid 不变）→ 只通知一次
+const lastNotifyByMsg = new Map();   // answerKey → 时间戳
+const NOTIFY_DUP_MS = 60000;         // 60 秒内同一条消息重复完成视为重复，不再通知
+// 心跳兜底：页面周期性 DOM 更新（如 muse.ai 的心跳）可能触发假的 generation.finished，
+// 内容没有实质变化时不通知
+const lastNotifyTextByConv = new Map();   // conversation_id → 上次通知时的回答正文（前 500 字）
 // 正在输入（焦点在输入框里且最近 4 秒内打过字）时不弹出，等输入停下来再弹，防止打断
 let lastInputAt = 0;
 document.addEventListener('input', (e) => { if (isEditable(e.target)) lastInputAt = Date.now(); }, true);
@@ -399,8 +404,8 @@ function focusAnswer(conv, mid) {
   setTimeout(() => node.classList.remove('flash'), 1700);
 }
 
-async function systemNotify(c, conversationId, mid, title, secs) {
-  const answer = (await latestAnswerText(c, conversationId)).replace(/\s+/g, ' ').trim();
+async function systemNotify(c, conversationId, mid, title, secs, answerText) {
+  const answer = (answerText ?? (await latestAnswerText(c, conversationId))).replace(/\s+/g, ' ').trim();
   const body = [secs, answer.length > 300 ? answer.slice(0, 300) + '…' : answer].filter(Boolean).join('\n');
   try {
     const note = new Notification(title, { body, tag: `answer:${answerKey(conversationId, mid)}`, renotify: true, requireInteraction: !!c?.pinned });
@@ -416,7 +421,7 @@ async function systemNotify(c, conversationId, mid, title, secs) {
 }
 
 /** 回答完成：普通会话 → 音效（打开“所有会话弹出”时同置顶）；置顶会话 → 打开详情 + 提示音；在后台时另发系统通知（含回答内容） */
-function onAnswerFinished(c, conversationId, name, secs, mid, seq, eventId) {
+async function onAnswerFinished(c, conversationId, name, secs, mid, eventId) {
   const n = settings.notify;
   const pinned = !!c?.pinned;
   if (pinned && !n.pinned_popup) return 'none';
@@ -427,17 +432,27 @@ function onAnswerFinished(c, conversationId, name, secs, mid, seq, eventId) {
   // 已读：这条消息用户已经看过，不再通知
   if (mid && state.readMids.has(mid)) return 'read';
   // 去重：同一条消息只通知一次。
-  // 语义键（会话+mid+生成序号）：插件重发 finished 也只算一次；
   // 事件键（event_id）：同一广播重复送达（重连回放等）直接丢弃。
-  const semKey = `${answerKey(conversationId, mid)}|${seq ?? ''}`;
+  // 语义键（会话+mid）：muse.ai 生成信号闪烁时，插件会发多次 finished，
+  //   message_id 相同但 generation_sequence 递增——按 mid 去重，不再按 sequence 区分。
+  //   60 秒内同一条消息重复完成视为重复；超过 60 秒可能是重新回答，允许再次通知。
   const evtKey = eventId ? `evt:${eventId}` : null;
-  if (answerSeen.has(semKey) || (evtKey && answerSeen.has(evtKey))) return 'dup';
-  answerSeen.add(semKey);
-  if (evtKey) answerSeen.add(evtKey);
-  if (answerSeen.size > 1000) answerSeen.delete(answerSeen.values().next().value);
+  if (evtKey && answerSeen.has(evtKey)) return 'dup';
+  const semKey = answerKey(conversationId, mid);
+  const lastAt = lastNotifyByMsg.get(semKey);
+  if (lastAt && Date.now() - lastAt < NOTIFY_DUP_MS) return 'dup';
+  // 心跳兜底：页面周期性 DOM 更新触发的假 finished，回答正文没有实质变化 → 不通知
+  const text = (await latestAnswerText(c, conversationId)).replace(/\s+/g, ' ').trim().slice(0, 500);
+  const prevText = lastNotifyTextByConv.get(conversationId);
+  if (prevText !== undefined && prevText === text) return 'dup-content';
+  if (evtKey) { answerSeen.add(evtKey); if (answerSeen.size > 1000) answerSeen.delete(answerSeen.values().next().value); }
+  lastNotifyByMsg.set(semKey, Date.now());
+  if (lastNotifyByMsg.size > 500) lastNotifyByMsg.delete(lastNotifyByMsg.keys().next().value);
+  if (text) lastNotifyTextByConv.set(conversationId, text);
+  if (lastNotifyTextByConv.size > 200) lastNotifyTextByConv.delete(lastNotifyTextByConv.keys().next().value);
   if (pinned || n.sound) playSound(pinned);
   if (!pageInFront() && n.enabled && notificationsSupported() && Notification.permission === 'granted') {
-    systemNotify(c, conversationId, mid, `${pinned ? '置顶会话回答完成' : '回答完成'}：${name}`, secs);
+    systemNotify(c, conversationId, mid, `${pinned ? '置顶会话回答完成' : '回答完成'}：${name}`, secs, text);
   }
   return enqueueAnswer(conversationId, mid);
 }
@@ -794,11 +809,10 @@ function onBroadcast(b) {
       snackbar(`${label}：${name}${b.payload.detail ? ' — ' + b.payload.detail : ''}`, 'err');
     }
   }
-  // 第几次生成：finished 不带序号，取同一会话最近一次 started 的（一次生成对应一次弹出）
-  if (b.event_type === 'generation.started') genSeq.set(conv, b.payload.generation_sequence ?? `${b.event_id}`);
+  // 回答完成即通知（去重在 onAnswerFinished 里做）
   if (b.event_type === 'generation.finished') {
     const secs = b.payload.duration_ms != null ? `用时 ${duration(b.payload.duration_ms)}` : '';
-    onAnswerFinished(c, conv, name, secs, b.payload.message_id || null, genSeq.get(conv), b.event_id);
+    onAnswerFinished(c, conv, name, secs, b.payload.message_id || null, b.event_id);
   }
   scheduleRefresh(b.event_type === 'message.updated' ? 1500 : 300);
 }
