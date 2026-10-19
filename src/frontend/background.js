@@ -46,17 +46,26 @@ async function waitRendered(tabId, maxMs) {
 
 /**
  * 后端指令 probe_site：抓 DOM → 上传分析。
- * 统一新开后台标签页，不复用已有标签页：已有标签页的状态不可预测
- * （旧对话、React 未水合完），复用它只等 6 秒稳定容易抓到旧 DOM；
- * 新开标签页等加载完成 + 20 秒渲染稳定，保证抓到的是目标 URL 渲染完成后的 DOM。
- * 抓完关闭，不动用户已有的标签页（同浏览器 profile，登录态一致）。
+ * 统一新开标签页，不复用已有标签页：已有标签页的状态不可预测
+ * （旧对话、React 未水合完），复用它只等 6 秒稳定容易抓到旧 DOM。
+ * 注意：有些站点（如 muse.ai）在后台标签页根本不加载，所以新开后短暂激活
+ * 该标签页，等加载完成 + 20 秒渲染稳定后再抓；抓完切回用户原标签页并关闭。
+ * （同浏览器 profile，登录态一致。）
  */
 async function probeSite(command) {
   const url = command.text;
   if (!/^https:\/\//.test(url || '')) return { ok: false, code: 'bad_url', detail: '只支持 https 网址' };
   let tab;
+  let prevActive = null;
   try {
+    // 记住用户正在看的标签页，抓完切回去，减少打扰
+    try {
+      const [cur] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (cur && cur.id != null) prevActive = cur.id;
+    } catch { /* 读不到就跳过切回 */ }
     tab = await chrome.tabs.create({ url, active: false });
+    // 后台不加载的站点必须激活才渲染；激活失败就按后台抓（尽力而为）
+    try { await chrome.tabs.update(tab.id, { active: true }); } catch { /* 忽略 */ }
     await waitTabComplete(tab.id, 30000);
     // React 等 SSR 页面会先水合，失败（如 React #418）时整页重新渲染：等文字和元素数都稳定再抓
     await waitRendered(tab.id, 20000);
@@ -68,7 +77,13 @@ async function probeSite(command) {
   } catch (e) {
     return { ok: false, code: 'probe_failed', detail: String(e?.message || e) };
   } finally {
-    if (tab?.id != null) chrome.tabs.remove(tab.id).catch(() => {});
+    if (tab?.id != null) {
+      // 先切回用户原标签页，再关探测标签页
+      if (prevActive != null && prevActive !== tab.id) {
+        try { await chrome.tabs.update(prevActive, { active: true }); } catch { /* 忽略 */ }
+      }
+      chrome.tabs.remove(tab.id).catch(() => {});
+    }
   }
 }
 
@@ -278,16 +293,17 @@ function syncTabsNow(bg, force = false) {
         let conversationId = null;
         let supported = false;
         let health = null;
+        let visible = true;   // 老版本内容脚本不带 visible，默认按可见处理
         try {
           const r = await Promise.race([
             chrome.tabs.sendMessage(t.id, { kind: 'page_info' }),
             new Promise((res) => setTimeout(() => res(null), 800))
           ]);
-          if (r?.ok) { conversationId = r.conversation_id || null; supported = true; health = r.selector_health || null; }
+          if (r?.ok) { conversationId = r.conversation_id || null; supported = true; health = r.selector_health || null; visible = r.visible !== false; }
         } catch { /* 没有内容脚本的标签页 */ }
         let host = '';
         try { host = new URL(t.url).hostname; } catch { /* ignore */ }
-        return { tab_id: t.id, host, conversation_id: conversationId, supported, active: !!t.active, url: t.url, title: t.title || '', health };
+        return { tab_id: t.id, host, conversation_id: conversationId, supported, active: !!t.active, url: t.url, title: t.title || '', health, visible };
       }));
       bg.syncTabs(list, { force: f });
     } catch (e) { console.warn('[bridge] tab sync failed', e); }
